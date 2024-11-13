@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=42", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bridgezoo"
+version = "0.0.1"
+description = "A Gymnasium style bridge environment."
+readme = "README.md"
+license = { file = "LICENCE" }
+authors = [
+    { name = "BillHu", email = "billhu0228@icloud.com" }
+]
+maintainers = [
+    { name = "BillHu", email = "billhu0228@icloud.com" }
+]
+dependencies = [
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+
+[project.urls]
+homepage = "https://github.com/billhu0228/BridgeZOO"
+repository = "https://github.com/billhu0228/BridgeZOO"
