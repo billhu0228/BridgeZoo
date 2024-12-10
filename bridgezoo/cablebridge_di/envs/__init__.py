@@ -6,3 +6,8 @@ register(
     entry_point='bridgezoo.cablebridge_di.envs.cablebridge_base:CableBridgeBase',
     max_episode_steps=200,
 )
+register(
+    id='cable_bridge_di-v2',
+    entry_point='bridgezoo.cablebridge_di.envs.cablebridge_base2:CableBridgeBase',
+    max_episode_steps=200,
+)
