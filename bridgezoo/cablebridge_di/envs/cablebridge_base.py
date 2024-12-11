@@ -1,5 +1,4 @@
 from collections import OrderedDict
-
 import gymnasium as gym
 import numpy as np
 import pygame
@@ -8,11 +7,14 @@ from ezdxf.math import Matrix44, Vec2
 from gymnasium import spaces
 from gymnasium.utils import seeding
 
-from .cablebridge_models import FEM, Cable
+from .cablebridge_models import FEM, CableMoveY
 
 
 class CableBridgeBase(gym.Env):
-    metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 30}
+    """
+    第3版基础环境，将随机行为修改为对初始坐标Y的调整。
+    """
+    metadata = {"name": "CableBridge", "render_modes": ["human", "text"], "render_fps": 30}
 
     def __init__(
             self,
@@ -21,6 +23,14 @@ class CableBridgeBase(gym.Env):
             beam_h=1.0,
             num_cables_per_side=30,
             anchor_height=80,
+            strands_init=30,
+            stress_init=0,
+            delta_y=0.2,
+            middle_spacing=10,
+            outside_spacing=8,
+            end_to_first_spacing=4,
+            center_to_adjacent_spacing=2,
+            vertical_spacing=2,
             max_cycles=10,
             render_mode=None,
             DEF_SCALE=10,
@@ -38,11 +48,12 @@ class CableBridgeBase(gym.Env):
         self.beam_E = beam_e
         self.wg = w * h * 1 * 2400 * 9.806
         self.num_cables_per_side = num_cables_per_side
-        self.middle_spacing = 10
-        self.outside_spacing = 8
-        self.end_to_first_spacing = 4
-        self.center_to_adjacent_spacing = 2
-        self.vertical_spacing = 2
+        self.num_strands = strands_init
+        self.middle_spacing = middle_spacing
+        self.outside_spacing = outside_spacing
+        self.end_to_first_spacing = end_to_first_spacing
+        self.center_to_adjacent_spacing = center_to_adjacent_spacing
+        self.vertical_spacing = vertical_spacing
         self.anchor_height = anchor_height  # 上塔柱高度
         self.num_beam_points = self.num_cables_per_side + 3  # 只考虑一侧的梁节点
         self.span = 2 * (self.num_cables_per_side * 0.5 * self.middle_spacing + self.center_to_adjacent_spacing)
@@ -73,18 +84,18 @@ class CableBridgeBase(gym.Env):
 
         # 物理参数 End  --------------------------------------------------
         obv_dim = self.num_cables_per_side + 1
-        self.cables = OrderedDict({"Cable_%i" % i: Cable(obv_dim) for i in range(self.num_cables_per_side)})
+        self.cables = OrderedDict({
+            "Cable_%i" % i: CableMoveY(num_strands=strands_init, stress_init=stress_init, dy=delta_y)
+            for i in range(self.num_cables_per_side)
+        })
         self.render_mode = render_mode
         self.screen = None
         self.frames = 0
         self.num_agents = self.num_cables_per_side
-        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(self.num_cables_per_side * 2,), dtype=np.float32)
-        act_space = [c.action_space for i, c in self.cables.items()]
-        act_n = self.cables['Cable_0'].action_space[1].n
-        self.action_space = spaces.Dict({
-            "discrete_actions": spaces.MultiDiscrete([act_n, ] * self.num_cables_per_side),  # 4组离散动作，每组有4个值
-            "continuous_actions": spaces.Box(low=0, high=1.0, shape=(self.num_cables_per_side,), dtype=np.float32)  # 2个连续动作，取值范围[-1, 1]
-        })
+        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(self.num_cables_per_side,), dtype=np.float32)
+        # act_space = [c.action_space for i, c in self.cables.items()]
+        act_n = self.cables['Cable_0'].action_space.n
+        self.action_space = spaces.MultiDiscrete([act_n, ] * self.num_cables_per_side)
         # self.action_space = spaces.Tuple(act_space)
         self.screen_width = 1080
         self.screen_height = 600
@@ -92,6 +103,7 @@ class CableBridgeBase(gym.Env):
         self.screen_scale = (self.screen_width - 100) / self.beam_length  # 视频比例尺
         self.seed()
         self.state = None
+        self.reward = np.nan
 
     def seed(self, seed=None):
         self.np_random, seed = seeding.np_random(seed)
@@ -108,44 +120,87 @@ class CableBridgeBase(gym.Env):
 
     def reset(self, **kwargs):
         self.frames = 0
-        self.cables = OrderedDict({"Cable_" + str(r): Cable(self.num_cables_per_side + 1) for r in range(self.num_cables_per_side)})
         for i, c in self.cables.items():
             c.reset()
         cable_stress = [c.stress_init for i, c in self.cables.items()]
         cable_no = [c.num_strands for i, c in self.cables.items()]
-        beam_pos, cable_stress_after = self.update_fem(cable_stress, cable_no)
+        cable_y = [c.position for i, c in self.cables.items()]
+        beam_pos, cable_stress_after = self.balance(cable_stress, cable_no, cable_y)
         beam_pos = beam_pos[:self.num_cables_per_side + 3]
         beam_pos = beam_pos[1:self.num_cables_per_side // 2 + 1] + beam_pos[self.num_cables_per_side // 2 + 1 + 1:-1]
         for i, (key, c) in enumerate(self.cables.items()):
             c.update(cable_stress_after[i], beam_pos[i])
-        self.state = np.hstack((beam_pos, cable_stress_after), dtype=np.float32)
+        self.state = np.hstack(beam_pos, dtype=np.float32)
+        if self.render_mode == "text":
+            self.render_text()
         return self.state, {}
 
-    def step(self, action_dict):
-        dis_act = action_dict['discrete_actions']
-        con_act = action_dict['continuous_actions']
-        for i, (k, c) in enumerate(self.cables.items()):
-            self.cables[k].step((con_act[i], dis_act[i]))
+    def balance(self, s_in, no_in, y_in):
+        """
+        返回平衡状态
+        :param s_in:
+        :param no_in:
+        :param y_in:
+        :return: 节点平衡状态坐标
+        """
+        step = 1
+        while True:
+            beam_d, s_out = self.update_fem(s_in, no_in, y_in)
+            diff = self.get_difference(s_in, s_out)
+            if step > 1000 or diff <= 1:
+                break
+            s_in = s_out
+            step += 1
+        return beam_d, s_out
 
-        cable_stress = [c.stress_init for i, c in self.cables.items()]
+    def step(self, action_dict):
+        for i, (k, c) in enumerate(self.cables.items()):
+            self.cables[k].step(action_dict[i])
+        cable_stress = [c.stress_exert for i, c in self.cables.items()]
         cable_no = [c.num_strands for i, c in self.cables.items()]
-        beam_pos, cable_stress_after = self.update_fem(cable_stress, cable_no)
+        cable_y = [c.position for i, c in self.cables.items()]
+        beam_pos, cable_stress_after = self.balance(cable_stress, cable_no, cable_y)
         beam_pos = beam_pos[:self.num_cables_per_side + 3]
         beam_pos = beam_pos[1:self.num_cables_per_side // 2 + 1] + beam_pos[self.num_cables_per_side // 2 + 1 + 1:-1]
         for i, (key, c) in enumerate(self.cables.items()):
             c.update(cable_stress_after[i], beam_pos[i])
-        self.state = np.hstack((beam_pos, cable_stress_after), dtype=np.float32)
+        self.state = np.hstack(beam_pos, dtype=np.float32)
         rewards = [c.reward3() for i, c in self.cables.items()]
+        info = {"输入位置": cable_y, "平衡索力": cable_stress_after, }
+        self.reward = np.sum(rewards)
+        self.frames += 1
+
         done = False
         truncated = self.frames >= self.max_cycles
-        self.frames += 1
+
         if self.render_mode == "human":
             self.render()
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     pygame.quit()
                     exit()
-        return self.state, np.sum(rewards), done, truncated, {}
+        elif self.render_mode == "text":
+            self.render_text()
+        return self.state, self.reward, done, truncated, info
+
+    def render_text(self):
+        cable_stress_after = [cable.stress_after for i, cable in self.cables.items()]
+        cable_y_before = [cable.position for i, cable in self.cables.items()]
+        cable_y_after = [cable.deform for i, cable in self.cables.items()]
+        rep = "-" * 100 + '\n'
+        rep += f"games={self.frames}\n"
+        rep += "输入位置："
+        rep += str([f"{np.round(a * 1000, 0):.0f}" for a in cable_y_before])
+        rep += "\n"
+        rep += "平衡位置："
+        rep += str([f"{np.round(a * 1000, 0):.0f}" for a in cable_y_after])
+        rep += "\n"
+        rep += "平衡索力："
+        rep += str([f"{np.round(a, 0):.0f}" for a in cable_stress_after])
+        rep += "\n"
+        rep += f"得分：{self.reward:.0f}\n"
+        rep += "-" * 100 + '\n'
+        print(rep)
 
     def render(self):
         if self.render_mode is None:
@@ -285,15 +340,17 @@ class CableBridgeBase(gym.Env):
             transformed_points = matrix.transform(Vec2(points.x, -points.y))
             return transformed_points.vec2
 
-    def extract_fem_model(self, cable_sigma, cable_sizes):
+    def extract_fem_model(self, cable_sigma, cable_sizes, cable_position):
         """
         从CableSystemEnv提取信息，生成FEM实例
         """
         # cable_tensions = self.state[self.num_beam_points:self.num_beam_points + self.num_cables_per_side]
         fem_model = FEM(self.num_cables_per_side, self.wg, cable_sigma)
+        y_position = [0, ] + cable_position[0:6] + [0, ] + cable_position[6:]
+        y_position = y_position + [y_position[-1], ] + y_position[::-1]
         # 提取梁的节点信息
         for i, x in enumerate(self.x_positions):
-            fem_model.add_node(i + 1, x, 0)
+            fem_model.add_node(i + 1, x, y_position[i])
         # 提取梁的单元信息
         for i in range(len(self.x_positions) - 1):
             fem_model.add_element(i + 1, i + 1, i + 2, 1, 1)  # 梁单元类型和材料假设为1
@@ -320,9 +377,24 @@ class CableBridgeBase(gym.Env):
         fem_model.add_element_type(1, 'Beam')
         fem_model.add_element_type(2, 'Cable')
         fem_model.add_material(1, {'E': self.beam_E, 'A': self.beam_area, 'I': self.beam_Iz})
-
+        # fem_model.generate_dxf(f"frame-{self.frames}.dxf")
         return fem_model
 
-    def update_fem(self, cable_force, cable_soq):
-        fem = self.extract_fem_model(cable_force, cable_soq)
+    def update_fem(self, cable_force, cable_soq, coble_position):
+        fem = self.extract_fem_model(cable_force, cable_soq, coble_position)
+        # return fem.opensees_new()
         return fem.opensees()
+
+    @staticmethod
+    def get_difference(list1, list2):
+        vector1 = np.array(list1)
+        vector2 = np.array(list2)
+        # 计算向量之间的差
+        difference = vector2 - vector1
+        # 1. L1 范数（曼哈顿距离）
+        l1_norm = np.linalg.norm(difference, ord=1)
+        # 2. L2 范数（欧几里得距离）
+        l2_norm = np.linalg.norm(difference, ord=2)
+        # 3. L∞ 范数（无穷范数）
+        linf_norm = np.linalg.norm(difference, ord=np.inf)
+        return l2_norm

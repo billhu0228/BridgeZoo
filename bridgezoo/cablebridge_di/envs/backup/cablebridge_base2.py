@@ -1,6 +1,6 @@
 from collections import OrderedDict
 
-import gymnasium
+import gymnasium as gym
 import numpy as np
 import pygame
 
@@ -8,15 +8,15 @@ from ezdxf.math import Matrix44, Vec2
 from gymnasium import spaces
 from gymnasium.utils import seeding
 
-from bridgezoo.cablebridge.fem import FEM
-from bridgezoo.cablebridge.cablebridge_models import CableMoveY
+from .cablebridge_models import FEM, CableFixStrands
 
 
-class CableBridgeBase3:
+class CableBridgeBase(gym.Env):
     """
-    第3版基础环境，将随机行为修改为对初始坐标Y的调整。
+    这仍然是完全平衡状态调整初始索力的错误尝试。
+    这个模型考虑完全平衡状态后，无论初始索力是多少，调整后都会回到平衡位置
     """
-    metadata = {"name": "CableBridge", "render_modes": ["human", ], "render_fps": 30}
+    metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 30}
 
     def __init__(
             self,
@@ -27,7 +27,6 @@ class CableBridgeBase3:
             anchor_height=80,
             strands_init=30,
             stress_init=0,
-            delta_y=0.2,
             middle_spacing=10,
             outside_spacing=8,
             end_to_first_spacing=4,
@@ -87,7 +86,7 @@ class CableBridgeBase3:
         # 物理参数 End  --------------------------------------------------
         obv_dim = self.num_cables_per_side + 1
         self.cables = OrderedDict({
-            "Cable_%i" % i: CableMoveY(num_strands=strands_init, stress_init=stress_init, dy=delta_y)
+            "Cable_%i" % i: CableFixStrands(num_strands=strands_init, stress_init=stress_init, stress_delta=10)
             for i in range(self.num_cables_per_side)
         })
         self.render_mode = render_mode
@@ -125,8 +124,7 @@ class CableBridgeBase3:
             c.reset()
         cable_stress = [c.stress_init for i, c in self.cables.items()]
         cable_no = [c.num_strands for i, c in self.cables.items()]
-        cable_y = [c.position for i, c in self.cables.items()]
-        beam_pos, cable_stress_after = self.balance(cable_stress, cable_no, cable_y)
+        beam_pos, cable_stress_after = self.balance(cable_stress, cable_no)
         beam_pos = beam_pos[:self.num_cables_per_side + 3]
         beam_pos = beam_pos[1:self.num_cables_per_side // 2 + 1] + beam_pos[self.num_cables_per_side // 2 + 1 + 1:-1]
         for i, (key, c) in enumerate(self.cables.items()):
@@ -134,17 +132,10 @@ class CableBridgeBase3:
         self.state = np.hstack(beam_pos, dtype=np.float32)
         return self.state, {}
 
-    def balance(self, s_in, no_in, y_in):
-        """
-        返回平衡状态
-        :param s_in:
-        :param no_in:
-        :param y_in:
-        :return: 节点平衡状态坐标
-        """
+    def balance(self, s_in, no_in):
         step = 1
         while True:
-            beam_d, s_out = self.update_fem(s_in, no_in, y_in)
+            beam_d, s_out = self.update_fem(s_in, no_in)
             diff = self.get_difference(s_in, s_out)
             if step > 1000 or diff <= 1:
                 break
@@ -156,14 +147,17 @@ class CableBridgeBase3:
         for i, (k, c) in enumerate(self.cables.items()):
             self.cables[k].step(action_dict[i])
         cable_stress = [c.stress_exert for i, c in self.cables.items()]
+        print([np.round(s, 0) for s in cable_stress])
         cable_no = [c.num_strands for i, c in self.cables.items()]
-        cable_y = [c.position for i, c in self.cables.items()]
-        beam_pos, cable_stress_after = self.balance(cable_stress, cable_no, cable_y)
+        beam_pos, cable_stress_after = self.balance(cable_stress, cable_no)
+        print([np.round(s, 0) for s in cable_stress_after])
+        print([f"{np.round(s * 1000, 0):.0f}" for s in beam_pos[1:self.num_cables_per_side + 1]])
+        print("------------------------------------------------")
         beam_pos = beam_pos[:self.num_cables_per_side + 3]
         beam_pos = beam_pos[1:self.num_cables_per_side // 2 + 1] + beam_pos[self.num_cables_per_side // 2 + 1 + 1:-1]
         for i, (key, c) in enumerate(self.cables.items()):
             c.update(cable_stress_after[i], beam_pos[i])
-        self.state = np.hstack([cable_y, beam_pos, cable_stress_after], dtype=np.float32)
+        self.state = np.hstack(beam_pos, dtype=np.float32)
         rewards = [c.reward3() for i, c in self.cables.items()]
         done = False
         truncated = self.frames >= self.max_cycles
@@ -178,7 +172,7 @@ class CableBridgeBase3:
 
     def render(self):
         if self.render_mode is None:
-            print(
+            gym.logger.warn(
                 "You are calling render method without specifying any render mode."
             )
             return
@@ -314,17 +308,15 @@ class CableBridgeBase3:
             transformed_points = matrix.transform(Vec2(points.x, -points.y))
             return transformed_points.vec2
 
-    def extract_fem_model(self, cable_sigma, cable_sizes, cable_position):
+    def extract_fem_model(self, cable_sigma, cable_sizes):
         """
         从CableSystemEnv提取信息，生成FEM实例
         """
         # cable_tensions = self.state[self.num_beam_points:self.num_beam_points + self.num_cables_per_side]
         fem_model = FEM(self.num_cables_per_side, self.wg, cable_sigma)
-        y_position = [0, ] + cable_position[0:6] + [0, ] + cable_position[6:]
-        y_position = y_position + [y_position[-1], ] + y_position[::-1]
         # 提取梁的节点信息
         for i, x in enumerate(self.x_positions):
-            fem_model.add_node(i + 1, x, y_position[i])
+            fem_model.add_node(i + 1, x, 0)
         # 提取梁的单元信息
         for i in range(len(self.x_positions) - 1):
             fem_model.add_element(i + 1, i + 1, i + 2, 1, 1)  # 梁单元类型和材料假设为1
@@ -351,11 +343,11 @@ class CableBridgeBase3:
         fem_model.add_element_type(1, 'Beam')
         fem_model.add_element_type(2, 'Cable')
         fem_model.add_material(1, {'E': self.beam_E, 'A': self.beam_area, 'I': self.beam_Iz})
-        # fem_model.generate_dxf(f"frame-{self.frames}.dxf")
+
         return fem_model
 
-    def update_fem(self, cable_force, cable_soq, coble_position):
-        fem = self.extract_fem_model(cable_force, cable_soq, coble_position)
+    def update_fem(self, cable_force, cable_soq):
+        fem = self.extract_fem_model(cable_force, cable_soq)
         # return fem.opensees_new()
         return fem.opensees()
 
