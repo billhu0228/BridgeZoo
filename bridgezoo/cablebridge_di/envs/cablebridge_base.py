@@ -14,7 +14,7 @@ class CableBridgeBase(gym.Env):
     """
     第3版基础环境，将随机行为修改为对初始坐标Y的调整。
     """
-    metadata = {"name": "CableBridge", "render_modes": ["human", "text"], "render_fps": 30}
+    metadata = {"name": "CableBridge", "render_modes": ["human", "text", "empty"], "render_fps": 30}
 
     def __init__(
             self,
@@ -124,7 +124,7 @@ class CableBridgeBase(gym.Env):
             c.reset()
         cable_stress = [c.stress_init for i, c in self.cables.items()]
         cable_no = [c.num_strands for i, c in self.cables.items()]
-        cable_y = [c.position for i, c in self.cables.items()]
+        cable_y = [c.position_input for i, c in self.cables.items()]
         beam_pos, cable_stress_after = self.balance(cable_stress, cable_no, cable_y)
         beam_pos = beam_pos[:self.num_cables_per_side + 3]
         beam_pos = beam_pos[1:self.num_cables_per_side // 2 + 1] + beam_pos[self.num_cables_per_side // 2 + 1 + 1:-1]
@@ -158,14 +158,14 @@ class CableBridgeBase(gym.Env):
             self.cables[k].step(action_dict[i])
         cable_stress = [c.stress_exert for i, c in self.cables.items()]
         cable_no = [c.num_strands for i, c in self.cables.items()]
-        cable_y = [c.position for i, c in self.cables.items()]
+        cable_y = [c.position_input for i, c in self.cables.items()]
         beam_pos, cable_stress_after = self.balance(cable_stress, cable_no, cable_y)
         beam_pos = beam_pos[:self.num_cables_per_side + 3]
         beam_pos = beam_pos[1:self.num_cables_per_side // 2 + 1] + beam_pos[self.num_cables_per_side // 2 + 1 + 1:-1]
         for i, (key, c) in enumerate(self.cables.items()):
             c.update(cable_stress_after[i], beam_pos[i])
         self.state = np.hstack(beam_pos, dtype=np.float32)
-        rewards = [c.reward3() for i, c in self.cables.items()]
+        rewards = [c.reward() for i, c in self.cables.items()]
         info = {"输入位置": cable_y, "平衡索力": cable_stress_after, }
         self.reward = np.sum(rewards)
         self.frames += 1
@@ -185,8 +185,8 @@ class CableBridgeBase(gym.Env):
 
     def render_text(self):
         cable_stress_after = [cable.stress_after for i, cable in self.cables.items()]
-        cable_y_before = [cable.position for i, cable in self.cables.items()]
-        cable_y_after = [cable.deform for i, cable in self.cables.items()]
+        cable_y_before = [cable.position_input for i, cable in self.cables.items()]
+        cable_y_after = [cable.position_after for i, cable in self.cables.items()]
         rep = "-" * 100 + '\n'
         rep += f"games={self.frames}\n"
         rep += "输入位置："

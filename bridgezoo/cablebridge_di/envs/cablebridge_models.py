@@ -429,25 +429,17 @@ class CableMoveY:
 
         self.stress_after = np.nan
         self.action_history = []
+        self.position_history = []
         self.num_strands = num_strands
 
-        self.position = 0
+        self.position_input = 0
         self.delta_y = dy
-        self.deform = None
+        self.position_after = None
         self.action = None
         self._reward = None
 
     def __str__(self):
         return "Cable(e:%i,a:%i)" % (self.stress_exert, self.stress_after)
-
-    #    @property
-    #    def observation_space(self):
-    #        return spaces.Box(
-    #            low=np.float32(-10),
-    #            high=np.float32(10),
-    #            shape=(self.obs_dim,),
-    #            dtype=np.float32,
-    #        )
 
     @property
     def action_space(self):
@@ -459,31 +451,43 @@ class CableMoveY:
         self.stress_exert = self.stress_init
         self.stress_after = np.nan
         self.action = action
-        self.position = 0
-        self.deform = None
+        self.position_input = 0
+        self.position_after = None
 
     def step(self, action):
         a = action - 1
         self.action_history.append(action)
-        if len(self.action_history) == 4:
-            debug = 1
-        # self.stress_exert = self.stress_after + a * self.delta_y
-        self.position = self.position + a * self.delta_y
+        self.position_input = self.position_input + a * self.delta_y
         return
 
-    def update(self, balance_stress, deform):
+    def update(self, balance_stress, balance_position):
         self.stress_after = balance_stress
-        self.deform = deform
+        self.position_after = balance_position
+        self.position_history.append(self.position_after)
 
     def done(self):
         return False
 
+    def reward(self):
+        return self.reward1
+
+    @property
+    def reward1(self):
+        if (self.action_history[-1] - 1) * self.position_history[-2] < 0:
+            self._reward = 1
+        else:
+            self._reward = 0
+        if self.action_history[-1] == 1 and abs(self.position_history[-2]) * 1e3 < 30:
+            self._reward += 0.5
+        return self._reward
+
+    @property
     def reward2(self):
         EPS = 0.01
-        if abs(self.deform) <= EPS:
+        if abs(self.position_after) <= EPS:
             s_score = {0: -1, 1: 2, 2: -1}
         else:
-            if self.deform > 0:
+            if self.position_after > 0:
                 s_score = {0: 2, 1: -1, 2: -1}
             else:
                 s_score = {0: -1, 1: -1, 2: 2}
@@ -496,8 +500,9 @@ class CableMoveY:
         self._reward = s_score[self.action[0]] + n_score[self.action[1]]
         return self._reward
 
+    @property
     def reward3(self):
-        self._reward = -abs(self.deform) * 100
+        self._reward = -abs(self.position_after) * 100
         return self._reward
 
 
