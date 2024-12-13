@@ -31,7 +31,7 @@ class CableBridgeBase(gym.Env):
             end_to_first_spacing=4,
             center_to_adjacent_spacing=2,
             vertical_spacing=2,
-            max_cycles=10,
+            max_cycles=512,
             render_mode=None,
             DEF_SCALE=10,
             FPS=10,
@@ -165,9 +165,15 @@ class CableBridgeBase(gym.Env):
         for i, (key, c) in enumerate(self.cables.items()):
             c.update(cable_stress_after[i], beam_pos[i])
         self.state = np.hstack(beam_pos, dtype=np.float32)
-        rewards = [c.reward() for i, c in self.cables.items()]
+        # --------------------------------------------
+        # 设计回报方案
+        # rewards = [c.reward() for i, c in self.cables.items()]
+        # self.reward = np.sum(rewards)
+        d1 = self.get_difference(beam_pos, [0, ] * self.num_cables_per_side)
+        d_pre = self.get_difference([c.position_history[-2] for i, c in self.cables.items()], [0, ] * self.num_cables_per_side)
+        self.reward = 1 if d1 < d_pre else 0
+        # --------------------------------------------
         info = {"输入位置": cable_y, "平衡索力": cable_stress_after, }
-        self.reward = np.sum(rewards)
         self.frames += 1
 
         done = False
