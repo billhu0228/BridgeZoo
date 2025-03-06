@@ -1,4 +1,3 @@
-import numpy as np
 from gymnasium.utils import EzPickle
 
 from pettingzoo import AECEnv

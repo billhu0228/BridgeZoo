@@ -1,5 +1,4 @@
 import numpy as np
-import pygame
 from gymnasium import spaces
 
 
@@ -21,15 +20,6 @@ class CableMoveY:
 
     def __str__(self):
         return "Cable(e:%i,a:%i)" % (self.stress_exert, self.stress_after)
-
-    #    @property
-    #    def observation_space(self):
-    #        return spaces.Box(
-    #            low=np.float32(-10),
-    #            high=np.float32(10),
-    #            shape=(self.obs_dim,),
-    #            dtype=np.float32,
-    #        )
 
     @property
     def action_space(self):
@@ -216,10 +206,6 @@ class CableAgent:
             debug = 1
         self._reward = s_score[self.action[0]] + n_score[self.action[1]] + 1
         return self._reward
-
-    # def reward3(self):
-    #     self._reward = -abs(self.deform[-1]) * 100
-    #     return self._reward
 
     def reward2(self):
         self._reward = -abs(self.deform) * 1000 - abs(self.stress_after - 500) * 1e-1

@@ -15,7 +15,6 @@ def run(env_func, num_games, **kwargs):
                 break
             else:
                 act = env.unwrapped.action_spaces[agent].sample()
-                # act = [1, 1]
             env.step(act)
         print(rewards)
     env.close()
@@ -31,7 +30,7 @@ if __name__ == "__main__":
         max_cycles=100,
         render_mode="",
         DEF_SCALE=10,
-        FPS=10,
+        FPS=20,
     )
 
     env_kwargs['render_mode'] = 'human'
