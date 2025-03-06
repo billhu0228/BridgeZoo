@@ -3,41 +3,39 @@ import numpy as np
 import pygame
 
 from ezdxf.math import Matrix44, Vec2
-from gymnasium import spaces
 from gymnasium.utils import seeding
-
 from bridgezoo.cablebridge.fem import FEM
-from bridgezoo.cablebridge.cablebridge_models import CableObj
-
-FPS = 15
+from bridgezoo.cablebridge.cablebridge_models import CableAgent
 
 
 class CableBridgeBase:
     def __init__(
             self,
-            beam_e=30e9,
+            # beam_e=20e9,
             beam_w=10.0,
             beam_h=1.0,
             num_cables_per_side=30,
             anchor_height=80,
             max_cycles=10,
             render_mode=None,
-            FPS=FPS,
+            FPS=10,
             DEF_SCALE=10,
-
     ):
 
         self.clock = pygame.time.Clock()
         self.FPS = FPS  # Frames Per Second
         self.DEF_SCALE = DEF_SCALE
         self.max_cycles = max_cycles
+        # 系统随机参数
+        self.beam_E = 20e9
         # 物理参数 Start --------------------------------------------------
         w = beam_w
         h = beam_h
         self.beam_area = h * w
+        self.beam_h = h
+        self.beam_w = w
         self.beam_Iz = w * h ** 3 / 12.0
-        self.beam_E = beam_e
-        self.wg = w * h * 1 * 2400 * 9.806
+        self.wg = w * h * 1 * 2400 * 9.806 * 2
         self.num_cables_per_side = num_cables_per_side
         self.middle_spacing = 10
         self.outside_spacing = 8
@@ -55,7 +53,8 @@ class CableBridgeBase:
         self.left_tower_pts = []
         self.right_tower_pts = []
         # 主梁参数
-        x1 = np.linspace(-0.5 * self.beam_length + self.end_to_first_spacing, -self.outside_spacing - self.span * 0.5, self.num_cables_per_side // 2)
+        x1 = np.linspace(-0.5 * self.beam_length + self.end_to_first_spacing, -self.outside_spacing - self.span * 0.5,
+                         self.num_cables_per_side // 2)
         x2 = np.linspace(-self.span * 0.5, -self.center_to_adjacent_spacing, self.num_cables_per_side // 2 + 1)
         self.x_positions = np.hstack((-self.beam_length * 0.5, x1, x2, 0, x2 * -1, x1 * -1, 0.5 * self.beam_length))
         self.x_positions.sort()
@@ -72,11 +71,12 @@ class CableBridgeBase:
             self.left_tower_pts.append(left_anchor)
             self.right_tower_pts.append(right_anchor)
         # 索力限制
-        self.min_stress = 300
+        self.min_stress = 10
         self.max_stress = 1000
         self.min_num_strands = 5
         self.max_num_strands = 100
         # 物理参数 End  --------------------------------------------------
+        self.system_obv = [0, ]
         self.control_rewards = [0 for _ in range(self.num_cables_per_side)]
         self.behavior_rewards = [0 for _ in range(self.num_cables_per_side)]
         self.last_dones = [False for _ in range(self.num_cables_per_side)]
@@ -94,33 +94,22 @@ class CableBridgeBase:
         self._seed()
 
     def get_spaces(self):
-        obs_space = spaces.Box(
-            low=np.float32(-np.sqrt(2)),
-            high=np.float32(np.sqrt(2)),
-            shape=(self.num_cables_per_side + 1,),
-            dtype=np.float32,
-        )
-
-        act_space = spaces.Box(
-            low=np.float32(0.0),
-            high=np.float32(1.0),
-            shape=(1,),
-            dtype=np.float32,
-        )
+        obs_space = CableAgent(self.num_cables_per_side * 2 + 1).observation_space
+        act_space = CableAgent(self.num_cables_per_side * 2 + 1).action_space
+        # act_space = spaces.Discrete(3)
+        # act_space = spaces.MultiDiscrete([3, ] * 2)
+        # act_space = spaces.Box(
+        #     low=np.float32(0.0),
+        #     high=np.float32(1.0),
+        #     shape=(1,),
+        #     dtype=np.float32,
+        # )
         self.observation_space = [obs_space for i in range(self.num_cables_per_side)]
         self.action_space = [act_space for i in range(self.num_cables_per_side)]
 
     def _seed(self, seed=None):
         self.np_random, seed = seeding.np_random(seed)
         return [seed]
-
-    def add_obj(self):
-        """Create all moving object instances."""
-        self.cables = []
-        for i in range(self.num_cables_per_side):
-            self.cables.append(
-                CableObj(self.num_cables_per_side + 1)
-            )
 
     def close(self):
         if self.screen is not None:
@@ -129,8 +118,10 @@ class CableBridgeBase:
 
     def reset(self):
         self.frames = 0
-        self.cables = {"Cable_" + str(r): CableObj(self.num_cables_per_side)
+        self.cables = {"Cable_" + str(r): CableAgent(self.num_cables_per_side)
                        for r in range(self.num_cables_per_side)}
+        # self.beam_E = np.interp(np.random.random(), [0, 1], [20e9, 30e9])
+        self.system_obv = [self.beam_E, ]
         cable_stress = [c.stress_init for i, c in self.cables.items()]
         cable_no = [c.num_strands for i, c in self.cables.items()]
         beam_pos, cable_stress_after = self.update_fem(cable_stress, cable_no)
@@ -140,33 +131,44 @@ class CableBridgeBase:
         self.control_rewards = [0 for _ in range(self.num_cables_per_side)]
         self.behavior_rewards = [0 for _ in range(self.num_cables_per_side)]
         self.last_dones = [False for _ in range(self.num_cables_per_side)]
-        self.last_obs = [np.array(beam_pos, dtype=np.float32) for _ in range(self.num_cables_per_side)]
+        self.last_obs = [np.array(beam_pos + cable_stress_after + self.system_obv, dtype=np.float32) for _ in
+                         range(self.num_cables_per_side)]
         return self.last_obs[0]
 
     def step(self, action, agent_id, is_last):
         c = self.cables["Cable_%i" % agent_id]
-        c.stress_init = self.min_stress + action[0] * (self.max_stress - self.min_stress)
+        c.step(action)
+        # c.stress_init = c.stress_after + (action[0] - 1) * self.min_stress
+        # c.num_strands += (action[1] - 1) * self.min_num_strands
         if is_last:
             cable_stress = [c.stress_init for i, c in self.cables.items()]
             cable_no = [c.num_strands for i, c in self.cables.items()]
             beam_pos, cable_stress_after = self.update_fem(cable_stress, cable_no)
             beam_pos = beam_pos[:self.num_cables_per_side + 3]
             beam_pos = beam_pos[1:self.num_cables_per_side // 2 + 1] + beam_pos[self.num_cables_per_side // 2 + 1 + 1:]
-            self.last_obs = [np.array(beam_pos, dtype=np.float32) for _ in range(self.num_cables_per_side)]
+            self.last_obs = [np.array(beam_pos + cable_stress_after, dtype=np.float32) for _ in
+                             range(self.num_cables_per_side)]
             for i, (key, c) in enumerate(self.cables.items()):
-                c.update(cable_stress_after[i], self.last_obs[i])
-            # rewards = np.array(self.behavior_rewards) + np.array(self.control_rewards)
-            # local_reward = rewards
-            # global_reward = local_reward.mean()
-            self.last_rewards = [c.reward3() for i, c in self.cables.items()]
+                c.update(cable_stress_after[i], self.last_obs[i][i])
+            self.last_rewards = [c.reward() for i, c in self.cables.items()]
+            self.last_dones = [c.done() for _, c in self.cables.items()]
             self.frames += 1
-        if self.render_mode == "human":
-            pygame.init()
-            for event in pygame.event.get():
-                if event.type == pygame.QUIT:
-                    pygame.quit()
-                    exit()
+            if self.render_mode == "human":
+                pygame.init()
+                for event in pygame.event.get():
+                    if event.type == pygame.QUIT:
+                        pygame.quit()
+                        exit()
         return self.observe(agent_id)
+
+    def _get_reward(self):
+        # 位移得分：
+        ft_def = 1e3
+        ft_num = 1
+        r_def = [-abs(d) * ft_def for d in self.last_obs[0][0:self.num_cables_per_side + 1]]
+        s_num = [-abs(r - 500) * ft_num for r in self.last_obs[0][self.num_cables_per_side + 1:self.num_cables_per_side * 2 + 1]]
+        rr = sum(r_def)  # + sum(s_num)
+        return rr
 
     def observe(self, agent_id):
         return np.array(self.last_obs[agent_id], dtype=np.float32)
@@ -188,7 +190,8 @@ class CableBridgeBase:
                 pygame.display.set_caption('Cable-Stayed Bridge Environment')
 
         beam_positions = np.hstack(
-            ([0, ], self.last_obs[0][:self.num_cables_per_side // 2], [0, ], self.last_obs[0][self.num_cables_per_side // 2:]))
+            ([0, ], self.last_obs[0][:self.num_cables_per_side // 2], [0, ],
+             self.last_obs[0][self.num_cables_per_side // 2:self.num_cables_per_side // 2 * 2 + 1]))
         cable_stress_after = [cable.stress_after for i, cable in self.cables.items()]
         if not hasattr(self, 'screen'):
             pygame.init()
@@ -336,8 +339,7 @@ class CableBridgeBase:
         # 添加单元类型和材料信息
         fem_model.add_element_type(1, 'Beam')
         fem_model.add_element_type(2, 'Cable')
-        fem_model.add_material(1, {'E': self.beam_E, 'A': self.beam_area, 'I': self.beam_Iz})
-
+        fem_model.add_material(1, {'E': self.beam_E, 'A': self.beam_area, 'I': self.beam_Iz, 'W': self.beam_w, 'H': self.beam_h})
         return fem_model
 
     def update_fem(self, cable_force, cable_soq):

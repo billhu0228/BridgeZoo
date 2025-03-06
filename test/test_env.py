@@ -1,4 +1,4 @@
-from bridgezoo import cablebridge_v2
+from bridgezoo import cablebridge_v1
 
 
 def run(env_func, num_games, **kwargs):
@@ -15,23 +15,24 @@ def run(env_func, num_games, **kwargs):
                 break
             else:
                 act = env.unwrapped.action_spaces[agent].sample()
+                # act = [1, 1]
             env.step(act)
         print(rewards)
     env.close()
 
 
 if __name__ == "__main__":
-    env_fn = cablebridge_v2
+    env_fn = cablebridge_v1
     env_kwargs = dict(
         beam_w=10.0,
         beam_h=1.0,
         num_cables_per_side=6,
         anchor_height=20,
-        max_cycles=30,
+        max_cycles=100,
         render_mode="",
         DEF_SCALE=10,
-        FPS=3,
+        FPS=10,
     )
 
     env_kwargs['render_mode'] = 'human'
-    run(env_fn, num_games=1, **env_kwargs)
+    run(env_fn, num_games=2, **env_kwargs)

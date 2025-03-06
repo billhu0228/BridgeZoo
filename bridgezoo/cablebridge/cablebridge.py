@@ -1,3 +1,4 @@
+import numpy as np
 from gymnasium.utils import EzPickle
 
 from pettingzoo import AECEnv
@@ -8,7 +9,7 @@ from pettingzoo.utils.conversions import parallel_wrapper_fn
 
 def env(**kwargs):
     env = raw_env(**kwargs)
-    env = wrappers.ClipOutOfBoundsWrapper(env)
+    # env = wrappers.ClipOutOfBoundsWrapper(env)
     env = wrappers.OrderEnforcingWrapper(env)
     return env
 
@@ -19,7 +20,7 @@ parallel_env = parallel_wrapper_fn(env)
 class raw_env(AECEnv, EzPickle):
     metadata = {
         "render_modes": ["human", "text"],
-        "name": "cablebridge_v1",
+        "name": "cablebridge_v2",
         "is_parallelizable": True,
         # "render_fps": FPS,
     }
@@ -83,8 +84,6 @@ class raw_env(AECEnv, EzPickle):
         is_last = self._agent_selector.is_last()
         self.env.step(action, self.agent_name_mapping[agent], is_last)
 
-        for r in self.rewards:
-            self.rewards[r] = self.env.control_rewards[self.agent_name_mapping[r]]
         if is_last:
             for r in self.rewards:
                 self.rewards[r] += self.env.last_rewards[self.agent_name_mapping[r]]
@@ -99,6 +98,28 @@ class raw_env(AECEnv, EzPickle):
         self._accumulate_rewards()
         if self.render_mode == "human":
             self.render()
+        elif self.render_mode == 'text':
+            if is_last:
+                cable_stress = [c.stress_init for c in self.env.cables.values()]
+                beam_pos = [c.deform for c in self.env.cables.values()]
+                cable_stress_after = [c.stress_after for c in self.env.cables.values()]
+                cable_nos = [c.num_strands for c in self.env.cables.values()]
+                # print(env.unwrapped.env.cables, obs_str)
+                # print("BeamE:%.2e | Wg= %.2e | %s | %s" % (self.env.beam_E, self.env.wg, self.env.cables, obs_str))
+                text_render = ""
+                for s in cable_stress:
+                    text_render += "%6i" % s
+                text_render += "  |  "
+                for s in beam_pos:
+                    text_render += "%6.3f  " % s
+                text_render += "  |  "
+                for s in cable_stress_after:
+                    text_render += "%6i" % s
+                text_render += "  |  "
+                for s in cable_nos:
+                    text_render += "%3i" % s
+                print(text_render)
+                # print(np.round(cable_stress_after, 0))
 
     def observe(self, agent):
         return self.env.observe(self.agent_name_mapping[agent])

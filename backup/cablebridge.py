@@ -1,14 +1,14 @@
 from gymnasium.utils import EzPickle
 
 from pettingzoo import AECEnv
-from bridgezoo.cablebridge.cablebridge_base2 import CableBridgeBase2 as _env
+from bridgezoo.cablebridge.cablebridge_base import CableBridgeBase as _env
 from pettingzoo.utils import agent_selector, wrappers
 from pettingzoo.utils.conversions import parallel_wrapper_fn
 
 
 def env(**kwargs):
     env = raw_env(**kwargs)
-    # env = wrappers.ClipOutOfBoundsWrapper(env)
+    env = wrappers.ClipOutOfBoundsWrapper(env)
     env = wrappers.OrderEnforcingWrapper(env)
     return env
 
@@ -19,7 +19,7 @@ parallel_env = parallel_wrapper_fn(env)
 class raw_env(AECEnv, EzPickle):
     metadata = {
         "render_modes": ["human", "text"],
-        "name": "cablebridge_v2",
+        "name": "cablebridge_v1",
         "is_parallelizable": True,
         # "render_fps": FPS,
     }
@@ -83,8 +83,8 @@ class raw_env(AECEnv, EzPickle):
         is_last = self._agent_selector.is_last()
         self.env.step(action, self.agent_name_mapping[agent], is_last)
 
-        # for r in self.rewards:
-        #     self.rewards[r] = self.env.control_rewards[self.agent_name_mapping[r]]
+        for r in self.rewards:
+            self.rewards[r] = self.env.control_rewards[self.agent_name_mapping[r]]
         if is_last:
             for r in self.rewards:
                 self.rewards[r] += self.env.last_rewards[self.agent_name_mapping[r]]
@@ -99,11 +99,6 @@ class raw_env(AECEnv, EzPickle):
         self._accumulate_rewards()
         if self.render_mode == "human":
             self.render()
-        elif self.render_mode == 'ansi':
-            if is_last:
-                obs_str = ["%i" % (v * 1000) for v in self.last()[0][0:len(self.agents)]]
-                # print(env.unwrapped.env.cables, obs_str)
-                print("BeamE:%.2e | Wg= %.2e | %s | %s" % (self.env.beam_E, self.env.wg, self.env.cables, obs_str))
 
     def observe(self, agent):
         return self.env.observe(self.agent_name_mapping[agent])

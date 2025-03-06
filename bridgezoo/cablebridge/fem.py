@@ -112,17 +112,18 @@ class FEM:
             pattern('Plain', 1, 1)
             for i in range(1, self.cab_per_side * 2 + 4):
                 eleLoad('-ele', i, '-type', '-beamUniform', -self.Wg)
-            system('BandSPD')
+            system('ProfileSPD')
             constraints('Plain')
-            numberer('Plain')
+            numberer('RCM')
             # test('NormDispIncr', 1.0e-3, 100, 0)
             test('NormUnbalance', 1.0e-6, 100)
-            integrator('LoadControl', 1)
-            algorithm("Linear")
+            steps = 100
+            integrator('LoadControl', 1.0 / steps)
+            algorithm("Newton")
             # algorithm("Newton")
             analysis("Static")
             # printModel()
-            analyze(1)
+            analyze(steps)
             res = []
             e_res = []
             for nd in self.nodes:
