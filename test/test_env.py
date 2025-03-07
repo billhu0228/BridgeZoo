@@ -14,7 +14,7 @@ def run(env_func, num_games, **kwargs):
             if termination or truncation:
                 break
             else:
-                act = env.unwrapped.action_spaces[agent].sample()
+                act = env.unwrapped.action_space(agent).sample()
             env.step(act)
         print(rewards)
     env.close()
@@ -27,11 +27,11 @@ if __name__ == "__main__":
         beam_h=1.0,
         num_cables_per_side=6,
         anchor_height=20,
-        max_cycles=100,
+        max_cycles=60,
         render_mode="",
         DEF_SCALE=10,
-        FPS=20,
+        FPS=60,
     )
 
-    env_kwargs['render_mode'] = 'human'
+    env_kwargs['render_mode'] = 'text'
     run(env_fn, num_games=2, **env_kwargs)

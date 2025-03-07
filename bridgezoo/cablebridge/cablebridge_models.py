@@ -1,5 +1,6 @@
 import numpy as np
 from gymnasium import spaces
+from gymnasium.spaces import Discrete, Tuple
 
 
 class CableMoveY:
@@ -157,8 +158,8 @@ class CableAgent:
     @property
     def observation_space(self):
         return spaces.Box(
-            low=np.float32(-10),
-            high=np.float32(10),
+            low=-np.inf,
+            high=+np.inf,
             shape=(self.obs_dim,),
             dtype=np.float32,
         )
@@ -166,6 +167,9 @@ class CableAgent:
     @property
     def action_space(self):
         return spaces.MultiDiscrete([3, ] * 2)
+        # return Tuple((Discrete(3), Discrete(3)))  # 每个动作都有 3 个可能值
+
+    #
 
     def _reset(self):
         self.stress_init = 1000  # 500
@@ -181,11 +185,11 @@ class CableAgent:
 
     def update(self, balance_stress, deform):
         self.stress_after = balance_stress
-        # self.stress_init = balance_stress
+        self.stress_init = balance_stress
         self.deform = deform
 
     def done(self):
-        return self.num_strands <= 2 or self.stress_after <= 10
+        return bool(self.num_strands <= 2 or self.stress_after <= 10)
 
     def reward(self):
         EPS = 0.01

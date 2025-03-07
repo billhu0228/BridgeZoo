@@ -87,27 +87,16 @@ class CableBridgeBase:
         self.screen = None
         self.frames = 0
         self.num_agents = self.num_cables_per_side
-        self.get_spaces()
+        obs_space = CableAgent(self.num_cables_per_side * 2 + 1).observation_space
+        act_space = CableAgent(self.num_cables_per_side * 2 + 1).action_space
+        self.observation_space = [obs_space for i in range(self.num_cables_per_side)]
+        self.action_space = [act_space for i in range(self.num_cables_per_side)]
         self.screen_width = 1080
         self.screen_height = 600
         self.screen_scale = (self.screen_width - 100) / self.beam_length  # 视频比例尺
-        self._seed()
+        self.seed()
 
-    def get_spaces(self):
-        obs_space = CableAgent(self.num_cables_per_side * 2 + 1).observation_space
-        act_space = CableAgent(self.num_cables_per_side * 2 + 1).action_space
-        # act_space = spaces.Discrete(3)
-        # act_space = spaces.MultiDiscrete([3, ] * 2)
-        # act_space = spaces.Box(
-        #     low=np.float32(0.0),
-        #     high=np.float32(1.0),
-        #     shape=(1,),
-        #     dtype=np.float32,
-        # )
-        self.observation_space = [obs_space for i in range(self.num_cables_per_side)]
-        self.action_space = [act_space for i in range(self.num_cables_per_side)]
-
-    def _seed(self, seed=None):
+    def seed(self, seed=None):
         self.np_random, seed = seeding.np_random(seed)
         return [seed]
 
@@ -118,9 +107,8 @@ class CableBridgeBase:
 
     def reset(self):
         self.frames = 0
-        self.cables = {"Cable_" + str(r): CableAgent(self.num_cables_per_side)
+        self.cables = {"Cable_" + str(r): CableAgent(self.num_cables_per_side * 2 + 1)
                        for r in range(self.num_cables_per_side)}
-        # self.beam_E = np.interp(np.random.random(), [0, 1], [20e9, 30e9])
         self.system_obv = [self.beam_E, ]
         cable_stress = [c.stress_init for i, c in self.cables.items()]
         cable_no = [c.num_strands for i, c in self.cables.items()]
@@ -131,34 +119,54 @@ class CableBridgeBase:
         self.control_rewards = [0 for _ in range(self.num_cables_per_side)]
         self.behavior_rewards = [0 for _ in range(self.num_cables_per_side)]
         self.last_dones = [False for _ in range(self.num_cables_per_side)]
-        self.last_obs = [np.array(beam_pos + cable_stress_after + self.system_obv, dtype=np.float32) for _ in
+        self.last_obs = [np.array(beam_pos + cable_stress_after, dtype=np.float32) for _ in
                          range(self.num_cables_per_side)]
         return self.last_obs[0]
 
     def step(self, action, agent_id, is_last):
         c = self.cables["Cable_%i" % agent_id]
         c.step(action)
-        # c.stress_init = c.stress_after + (action[0] - 1) * self.min_stress
-        # c.num_strands += (action[1] - 1) * self.min_num_strands
-        if is_last:
-            cable_stress = [c.stress_init for i, c in self.cables.items()]
-            cable_no = [c.num_strands for i, c in self.cables.items()]
-            beam_pos, cable_stress_after = self.update_fem(cable_stress, cable_no)
-            beam_pos = beam_pos[:self.num_cables_per_side + 3]
-            beam_pos = beam_pos[1:self.num_cables_per_side // 2 + 1] + beam_pos[self.num_cables_per_side // 2 + 1 + 1:]
-            self.last_obs = [np.array(beam_pos + cable_stress_after, dtype=np.float32) for _ in
-                             range(self.num_cables_per_side)]
-            for i, (key, c) in enumerate(self.cables.items()):
-                c.update(cable_stress_after[i], self.last_obs[i][i])
-            self.last_rewards = [c.reward() for i, c in self.cables.items()]
-            self.last_dones = [c.done() for _, c in self.cables.items()]
-            self.frames += 1
-            if self.render_mode == "human":
-                pygame.init()
-                for event in pygame.event.get():
-                    if event.type == pygame.QUIT:
-                        pygame.quit()
-                        exit()
+        # 单步执行
+        cable_stress = [c.stress_init for i, c in self.cables.items()]
+        cable_no = [c.num_strands for i, c in self.cables.items()]
+        beam_pos, cable_stress_after = self.update_fem(cable_stress, cable_no)
+        beam_pos = beam_pos[:self.num_cables_per_side + 3]
+        beam_pos = beam_pos[1:self.num_cables_per_side // 2 + 1] + beam_pos[self.num_cables_per_side // 2 + 1 + 1:]
+        self.last_obs = [np.array(beam_pos + cable_stress_after, dtype=np.float32) for _ in range(self.num_cables_per_side)]
+        for i, (key, the_cable) in enumerate(self.cables.items()):
+            the_cable.update(cable_stress_after[i], self.last_obs[i][i])
+        self.last_rewards[agent_id] = c.reward()
+        self.last_dones[agent_id] = c.done()
+        if any(self.last_dones):
+            self.last_dones = [True for _, c in self.cables.items()]
+        self.frames += 1
+        if self.render_mode == "human":
+            pygame.init()
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    pygame.quit()
+                    exit()
+
+        #         # 全部更新后执行
+        #         if is_last:
+        #             cable_stress = [c.stress_init for i, c in self.cables.items()]
+        #             cable_no = [c.num_strands for i, c in self.cables.items()]
+        #             beam_pos, cable_stress_after = self.update_fem(cable_stress, cable_no)
+        #             beam_pos = beam_pos[:self.num_cables_per_side + 3]
+        #             beam_pos = beam_pos[1:self.num_cables_per_side // 2 + 1] + beam_pos[self.num_cables_per_side // 2 + 1 + 1:]
+        #             self.last_obs = [np.array(beam_pos + cable_stress_after, dtype=np.float32) for _ in
+        #                              range(self.num_cables_per_side)]
+        #             for i, (key, c) in enumerate(self.cables.items()):
+        #                 c.update(cable_stress_after[i], self.last_obs[i][i])
+        #             self.last_rewards = [c.reward() for i, c in self.cables.items()]
+        #             self.last_dones = [c.done() for _, c in self.cables.items()]
+        #             self.frames += 1
+        #             if self.render_mode == "human":
+        #                 pygame.init()
+        #                 for event in pygame.event.get():
+        #                     if event.type == pygame.QUIT:
+        #                         pygame.quit()
+        #                         exit()
         return self.observe(agent_id)
 
     def _get_reward(self):
