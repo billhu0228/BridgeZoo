@@ -7,7 +7,7 @@ from gymnasium import spaces
 from gymnasium.utils import seeding
 
 from bridgezoo.cablebridge.fem import FEM
-from bridgezoo.cablebridge.cablebridge_models import CableObj
+from bridgezoo.cablebridge.cablebridge_models_useless import CableObj
 
 FPS = 15
 

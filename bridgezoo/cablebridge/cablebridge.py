@@ -7,10 +7,10 @@ from pettingzoo.utils.conversions import parallel_wrapper_fn
 
 
 def env(**kwargs):
-    env = raw_env(**kwargs)
-    # env = wrappers.ClipOutOfBoundsWrapper(env)
-    env = wrappers.OrderEnforcingWrapper(env)
-    return env
+    the_env = raw_env(**kwargs)
+    # the_env = wrappers.ClipOutOfBoundsWrapper(the_env)
+    the_env = wrappers.OrderEnforcingWrapper(the_env)
+    return the_env
 
 
 parallel_env = parallel_wrapper_fn(env)
@@ -31,22 +31,17 @@ class raw_env(AECEnv, EzPickle):
         self.possible_agents = self.agents[:]
         self.agent_name_mapping = dict(zip(self.agents, list(range(self.num_agents))))
         self._agent_selector = agent_selector(self.agents)
-
-        # spaces
-        # self.action_spaces = dict(zip(self.agents, self.env.action_space))
-        # self.observation_spaces = dict(zip(self.agents, self.env.observation_space))
         self.has_reset = False
-
         self.render_mode = self.env.render_mode
 
     def observation_space(self, agent):
-        return self.env.observation_space[0]
+        return self.env.observation_space[self.agent_name_mapping[agent]]
 
     def action_space(self, agent):
-        return self.env.action_space[0]
+        return self.env.action_space[self.agent_name_mapping[agent]]
 
-    def convert_to_dict(self, list_of_list):
-        return dict(zip(self.agents, list_of_list))
+    # def convert_to_dict(self, list_of_list):
+    #     return dict(zip(self.agents, list_of_list))
 
     def reset(self, seed=None, options=None):
         if seed is not None:
@@ -56,7 +51,7 @@ class raw_env(AECEnv, EzPickle):
         self.agents = self.possible_agents[:]
         self._agent_selector.reinit(self.agents)
         self.agent_selection = self._agent_selector.next()
-        self.rewards = dict(zip(self.agents, [(0) for _ in self.agents]))
+        self.rewards = dict(zip(self.agents, [0 for _ in self.agents]))
         self._cumulative_rewards = {agent: 0 for agent in self.agents}
         self.terminations = {agent: False for agent in self.agents}
         self.truncations = {agent: False for agent in self.agents}
@@ -110,6 +105,7 @@ class raw_env(AECEnv, EzPickle):
                 beam_pos = [c.deform for c in self.env.cables.values()]
                 cable_stress_after = [c.stress_after for c in self.env.cables.values()]
                 cable_nos = [c.num_strands for c in self.env.cables.values()]
+                actions = [c.action for c in self.env.cables.values()]
                 # print(env.unwrapped.env.cables, obs_str)
                 # print("BeamE:%.2e | Wg= %.2e | %s | %s" % (self.env.beam_E, self.env.wg, self.env.cables, obs_str))
                 text_render = ""
@@ -124,6 +120,13 @@ class raw_env(AECEnv, EzPickle):
                 text_render += "  |  "
                 for s in cable_nos:
                     text_render += "%3i" % s
+                text_render += "  |  "
+                for s in actions:
+                    if s is None:
+                        text_render += "  \033[91m×\033[0m"
+                    else:
+                        text_render += "%3i" % s
+
                 print(text_render)
                 # print(np.round(cable_stress_after, 0))
 

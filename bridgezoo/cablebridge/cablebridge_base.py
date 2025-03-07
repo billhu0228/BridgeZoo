@@ -87,13 +87,14 @@ class CableBridgeBase:
         self.screen = None
         self.frames = 0
         self.num_agents = self.num_cables_per_side
-        obs_space = CableAgent(self.num_cables_per_side * 2 + 1).observation_space
-        act_space = CableAgent(self.num_cables_per_side * 2 + 1).action_space
-        self.observation_space = [obs_space for i in range(self.num_cables_per_side)]
-        self.action_space = [act_space for i in range(self.num_cables_per_side)]
+        # obs_space = CableAgent(self.num_cables_per_side * 2 + 1).observation_space
+        # act_space = CableAgent(self.num_cables_per_side * 2 + 1).action_space
+        self.observation_space = []
+        self.action_space = []
         self.screen_width = 1080
         self.screen_height = 600
         self.screen_scale = (self.screen_width - 100) / self.beam_length  # 视频比例尺
+        self.np_random = 0
         self.seed()
 
     def seed(self, seed=None):
@@ -107,24 +108,27 @@ class CableBridgeBase:
 
     def reset(self):
         self.frames = 0
-        self.cables = {"Cable_" + str(r): CableAgent(self.num_cables_per_side * 2 + 1)
-                       for r in range(self.num_cables_per_side)}
-        self.system_obv = [self.beam_E, ]
+        self.cables = {"cable_" + str(r): CableAgent(2) for r in range(self.num_cables_per_side)}
+        # self.system_obv = [self.beam_E, ]
         cable_stress = [c.stress_init for i, c in self.cables.items()]
         cable_no = [c.num_strands for i, c in self.cables.items()]
         beam_pos, cable_stress_after = self.update_fem(cable_stress, cable_no)
         beam_pos = beam_pos[:self.num_cables_per_side + 3]
         beam_pos = beam_pos[1:self.num_cables_per_side // 2 + 1] + beam_pos[self.num_cables_per_side // 2 + 1 + 1:]
-        self.last_rewards = [np.float64(0) for _ in range(self.num_cables_per_side)]
+        for i, (key, the_cable) in enumerate(self.cables.items()):
+            the_cable.update(cable_stress_after[i], beam_pos[i])
+
+        self.last_rewards = [0 for _ in range(self.num_cables_per_side)]
         self.control_rewards = [0 for _ in range(self.num_cables_per_side)]
         self.behavior_rewards = [0 for _ in range(self.num_cables_per_side)]
         self.last_dones = [False for _ in range(self.num_cables_per_side)]
-        self.last_obs = [np.array(beam_pos + cable_stress_after, dtype=np.float32) for _ in
-                         range(self.num_cables_per_side)]
-        return self.last_obs[0]
+        self.last_obs = [c.observation for _, c in self.cables.items()]
+        self.observation_space = [c.observation_space for _, c in self.cables.items()]
+        self.action_space = [c.action_space for _, c in self.cables.items()]
+        return
 
     def step(self, action, agent_id, is_last):
-        c = self.cables["Cable_%i" % agent_id]
+        c = self.cables["cable_%i" % agent_id]
         c.step(action)
         # 单步执行
         cable_stress = [c.stress_init for i, c in self.cables.items()]
@@ -132,13 +136,13 @@ class CableBridgeBase:
         beam_pos, cable_stress_after = self.update_fem(cable_stress, cable_no)
         beam_pos = beam_pos[:self.num_cables_per_side + 3]
         beam_pos = beam_pos[1:self.num_cables_per_side // 2 + 1] + beam_pos[self.num_cables_per_side // 2 + 1 + 1:]
-        self.last_obs = [np.array(beam_pos + cable_stress_after, dtype=np.float32) for _ in range(self.num_cables_per_side)]
         for i, (key, the_cable) in enumerate(self.cables.items()):
-            the_cable.update(cable_stress_after[i], self.last_obs[i][i])
+            the_cable.update(cable_stress_after[i], beam_pos[i])
         self.last_rewards[agent_id] = c.reward()
         self.last_dones[agent_id] = c.done()
         if any(self.last_dones):
             self.last_dones = [True for _, c in self.cables.items()]
+        self.last_obs = [c.observation for _, c in self.cables.items()]
         self.frames += 1
         if self.render_mode == "human":
             pygame.init()
@@ -169,14 +173,14 @@ class CableBridgeBase:
         #                         exit()
         return self.observe(agent_id)
 
-    def _get_reward(self):
-        # 位移得分：
-        ft_def = 1e3
-        ft_num = 1
-        r_def = [-abs(d) * ft_def for d in self.last_obs[0][0:self.num_cables_per_side + 1]]
-        s_num = [-abs(r - 500) * ft_num for r in self.last_obs[0][self.num_cables_per_side + 1:self.num_cables_per_side * 2 + 1]]
-        rr = sum(r_def)  # + sum(s_num)
-        return rr
+    # def _get_reward(self):
+    #     # 位移得分：
+    #     ft_def = 1e3
+    #     ft_num = 1
+    #     r_def = [-abs(d) * ft_def for d in self.last_obs[0][0:self.num_cables_per_side + 1]]
+    #     s_num = [-abs(r - 500) * ft_num for r in self.last_obs[0][self.num_cables_per_side + 1:self.num_cables_per_side * 2 + 1]]
+    #     rr = sum(r_def)  # + sum(s_num)
+    #     return rr
 
     def observe(self, agent_id):
         return np.array(self.last_obs[agent_id], dtype=np.float32)
