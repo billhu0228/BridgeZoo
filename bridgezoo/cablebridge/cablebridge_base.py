@@ -76,7 +76,6 @@ class CableBridgeBase:
         self.min_num_strands = 5
         self.max_num_strands = 100
         # 物理参数 End  --------------------------------------------------
-        self.system_obv = [0, ]
         self.control_rewards = [0 for _ in range(self.num_cables_per_side)]
         self.behavior_rewards = [0 for _ in range(self.num_cables_per_side)]
         self.last_dones = [False for _ in range(self.num_cables_per_side)]
@@ -95,6 +94,7 @@ class CableBridgeBase:
         self.screen_height = 600
         self.screen_scale = (self.screen_width - 100) / self.beam_length  # 视频比例尺
         self.np_random = 0
+        self.system_obv = 0
         self.seed()
 
     def seed(self, seed=None):
@@ -113,11 +113,11 @@ class CableBridgeBase:
         cable_stress = [c.stress_init for i, c in self.cables.items()]
         cable_no = [c.num_strands for i, c in self.cables.items()]
         beam_pos, cable_stress_after = self.update_fem(cable_stress, cable_no)
+        self.system_obv = beam_pos[self.num_cables_per_side + 3]
         beam_pos = beam_pos[:self.num_cables_per_side + 3]
         beam_pos = beam_pos[1:self.num_cables_per_side // 2 + 1] + beam_pos[self.num_cables_per_side // 2 + 1 + 1:]
         for i, (key, the_cable) in enumerate(self.cables.items()):
             the_cable.update(cable_stress_after[i], beam_pos[i])
-
         self.last_rewards = [0 for _ in range(self.num_cables_per_side)]
         self.control_rewards = [0 for _ in range(self.num_cables_per_side)]
         self.behavior_rewards = [0 for _ in range(self.num_cables_per_side)]
@@ -125,52 +125,32 @@ class CableBridgeBase:
         self.last_obs = [c.observation for _, c in self.cables.items()]
         self.observation_space = [c.observation_space for _, c in self.cables.items()]
         self.action_space = [c.action_space for _, c in self.cables.items()]
+        # self.system_obv = 0
         return
 
     def step(self, action, agent_id, is_last):
         c = self.cables["cable_%i" % agent_id]
         c.step(action)
-        # 单步执行
-        cable_stress = [c.stress_init for i, c in self.cables.items()]
-        cable_no = [c.num_strands for i, c in self.cables.items()]
-        beam_pos, cable_stress_after = self.update_fem(cable_stress, cable_no)
-        beam_pos = beam_pos[:self.num_cables_per_side + 3]
-        beam_pos = beam_pos[1:self.num_cables_per_side // 2 + 1] + beam_pos[self.num_cables_per_side // 2 + 1 + 1:]
-        for i, (key, the_cable) in enumerate(self.cables.items()):
-            the_cable.update(cable_stress_after[i], beam_pos[i])
-        self.last_rewards[agent_id] = c.reward()
-        self.last_dones[agent_id] = c.done()
-        if any(self.last_dones):
-            self.last_dones = [True for _, c in self.cables.items()]
-        self.last_obs = [c.observation for _, c in self.cables.items()]
-        self.frames += 1
+        if is_last:
+            cable_stress = [c.stress_init for i, c in self.cables.items()]
+            cable_no = [c.num_strands for i, c in self.cables.items()]
+            beam_pos, cable_stress_after = self.update_fem(cable_stress, cable_no)
+            self.system_obv = beam_pos[self.num_cables_per_side + 3]
+            beam_pos = beam_pos[:self.num_cables_per_side + 3]
+            beam_pos = beam_pos[1:self.num_cables_per_side // 2 + 1] + beam_pos[self.num_cables_per_side // 2 + 1 + 1:]
+            for i, (key, the_cable) in enumerate(self.cables.items()):
+                the_cable.update(cable_stress_after[i], beam_pos[i])
+            self.last_rewards = [c.reward() for _, c in self.cables.items()]
+            self.last_obs = [c.observation for _, c in self.cables.items()]
+            self.last_dones[agent_id] = c.done()
+            self.frames += 1
+
         if self.render_mode == "human":
             pygame.init()
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     pygame.quit()
                     exit()
-
-        #         # 全部更新后执行
-        #         if is_last:
-        #             cable_stress = [c.stress_init for i, c in self.cables.items()]
-        #             cable_no = [c.num_strands for i, c in self.cables.items()]
-        #             beam_pos, cable_stress_after = self.update_fem(cable_stress, cable_no)
-        #             beam_pos = beam_pos[:self.num_cables_per_side + 3]
-        #             beam_pos = beam_pos[1:self.num_cables_per_side // 2 + 1] + beam_pos[self.num_cables_per_side // 2 + 1 + 1:]
-        #             self.last_obs = [np.array(beam_pos + cable_stress_after, dtype=np.float32) for _ in
-        #                              range(self.num_cables_per_side)]
-        #             for i, (key, c) in enumerate(self.cables.items()):
-        #                 c.update(cable_stress_after[i], self.last_obs[i][i])
-        #             self.last_rewards = [c.reward() for i, c in self.cables.items()]
-        #             self.last_dones = [c.done() for _, c in self.cables.items()]
-        #             self.frames += 1
-        #             if self.render_mode == "human":
-        #                 pygame.init()
-        #                 for event in pygame.event.get():
-        #                     if event.type == pygame.QUIT:
-        #                         pygame.quit()
-        #                         exit()
         return self.observe(agent_id)
 
     # def _get_reward(self):
@@ -185,7 +165,7 @@ class CableBridgeBase:
     def observe(self, agent_id):
         return np.array(self.last_obs[agent_id], dtype=np.float32)
 
-    def render(self):
+    def render(self, agent_id=None):
         if self.render_mode is None:
             gymnasium.logger.warn(
                 "You are calling render method without specifying any render mode."
@@ -201,10 +181,18 @@ class CableBridgeBase:
                 self.screen = pygame.display.set_mode((self.screen_width, self.screen_height))
                 pygame.display.set_caption('Cable-Stayed Bridge Environment')
 
-        beam_positions = np.hstack(
-            ([0, ], self.last_obs[0][:self.num_cables_per_side // 2], [0, ],
-             self.last_obs[0][self.num_cables_per_side // 2:self.num_cables_per_side // 2 * 2 + 1]))
+        # 当观察为所有拉索点+跨中点时：
+        # beam_positions = np.hstack(
+        #     ([0, ], self.last_obs[0][:self.num_cables_per_side // 2], [0, ],
+        #      self.last_obs[0][self.num_cables_per_side // 2:self.num_cables_per_side // 2 * 2 + 1]))
+        # 当观察为所有拉索点+跨中点时：
+
+        # 当采用单步执行并仅观察本身点时
+        beam_positions = [v[0] for v in self.last_obs]
+        beam_positions = [0] + beam_positions[0:3] + [0, ] + beam_positions[3:] + [self.system_obv]
+        # 当采用单步执行并仅观察本身点时
         cable_stress_after = [cable.stress_after for i, cable in self.cables.items()]
+
         if not hasattr(self, 'screen'):
             pygame.init()
             self.screen_width = 1080
@@ -242,10 +230,14 @@ class CableBridgeBase:
             tr2 = self.trans(mat, (left_anchor, right_anchor))
             beam_index_left = i + 1
             beam_index_right = self.num_beam_points
-            pygame.draw.line(self.screen, (0, 0, 255), tr2[0], transformed_points[beam_index_left], 2)
-            pygame.draw.line(self.screen, (0, 0, 255), tr2[0], transformed_points[self.num_beam_points - 2 - i], 2)
-            pygame.draw.line(self.screen, (0, 0, 255), tr2[1], transformed_points[beam_index_right + i], 2)
-            pygame.draw.line(self.screen, (0, 0, 255), tr2[1], transformed_points[self.num_beam_points * 2 - 3 - i], 2)
+            if i == agent_id:
+                color = (255, 0, 0)
+            else:
+                color = (0, 0, 255)
+            pygame.draw.line(self.screen, color, tr2[0], transformed_points[beam_index_left], 2)
+            pygame.draw.line(self.screen, color, tr2[0], transformed_points[self.num_beam_points - 2 - i], 2)
+            pygame.draw.line(self.screen, color, tr2[1], transformed_points[beam_index_right + i], 2)
+            pygame.draw.line(self.screen, color, tr2[1], transformed_points[self.num_beam_points * 2 - 3 - i], 2)
 
         # 绘制参考线
         left_anchor_base = self.trans(mat, self.left_tower_top)

@@ -1,4 +1,4 @@
-from bridgezoo import cablebridge_v1
+from bridgezoo import pistonball_v6
 
 
 def run(env_func, num_games, **kwargs):

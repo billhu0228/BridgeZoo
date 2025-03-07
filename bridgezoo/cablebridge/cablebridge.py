@@ -17,6 +17,9 @@ parallel_env = parallel_wrapper_fn(env)
 
 
 class raw_env(AECEnv, EzPickle):
+    """
+    V1 是一个基本循环，每个agent仅观察自身的位置
+    """
     metadata = {
         "render_modes": ["human", "text"],
         "name": "cablebridge_v1",
@@ -62,45 +65,63 @@ class raw_env(AECEnv, EzPickle):
             self.env.close()
 
     def render(self):
-        return self.env.render()
+        return self.env.render(self.agent_name_mapping[self.agent_selection])
 
     def step(self, action):
         if (
                 self.terminations[self.agent_selection]
-                or self.truncations[self.agent_selection]
+                or
+                self.truncations[self.agent_selection]
         ):
-            # self._was_dead_step(action)
-            self.agents = []
-            self.terminations = {}
-            self.truncations = {}
-            self.rewards = {}
-            self._cumulative_rewards = {}
-            self.infos = {}  #
+            self._was_dead_step(action)
+            # agent = self.agent_selection
+            # del self.terminations[agent]
+            # del self.truncations[agent]
+            # del self.rewards[agent]
+            # del self._cumulative_rewards[agent]
+            # del self.infos[agent]
+            # self.agents.remove(agent)
+
+            # self.agents = []
+            # self.terminations = {}
+            # self.truncations = {}
+            # self.rewards = {}
+            # self._cumulative_rewards = {}
+            # self.infos = {}  #
             return
 
         agent = self.agent_selection
         is_last = self._agent_selector.is_last()
         self.env.step(action, self.agent_name_mapping[agent], is_last)
         self.infos = {agent: {} for agent in self.agents if not self.truncations[agent]}
-
         # if self.terminations[agent] or self.truncations[agent]:
         #     del self.infos[agent]
         if is_last:
             for r in self.rewards:
                 self.rewards[r] += self.env.last_rewards[self.agent_name_mapping[r]]
+            self.terminations = dict(zip(self.agents, self.env.last_dones))
+        else:
+            self._clear_rewards()
 
         if self.env.frames >= self.env.max_cycles:
             self.truncations = dict(zip(self.agents, [True for _ in self.agents]))
-        else:
-            self.terminations = dict(zip(self.agents, self.env.last_dones))
+
+        if (
+                self.terminations[self.agent_selection]
+                or
+                self.truncations[self.agent_selection]
+        ):
+            debug = 1
+            self.terminations = {agent: True for agent in self.agents}
 
         self._cumulative_rewards[self.agent_selection] = 0
-        self.agent_selection = self._agent_selector.next()
         self._accumulate_rewards()
+        self.agent_selection = self._agent_selector.next()
+
         if self.render_mode == "human":
             self.render()
         elif self.render_mode == 'text':
-            if True:
+            if is_last:
                 cable_stress = [c.stress_init for c in self.env.cables.values()]
                 beam_pos = [c.deform for c in self.env.cables.values()]
                 cable_stress_after = [c.stress_after for c in self.env.cables.values()]
@@ -108,24 +129,27 @@ class raw_env(AECEnv, EzPickle):
                 actions = [c.action for c in self.env.cables.values()]
                 # print(env.unwrapped.env.cables, obs_str)
                 # print("BeamE:%.2e | Wg= %.2e | %s | %s" % (self.env.beam_E, self.env.wg, self.env.cables, obs_str))
-                text_render = ""
+                text_render = "(%3i)  " % self.env.frames
                 for s in cable_stress:
-                    text_render += "%6i" % s
-                text_render += "  |  "
+                    text_render += "%5i" % s
+                text_render += " | "
                 for s in beam_pos:
                     text_render += "%6.3f  " % s
-                text_render += "  |  "
+                text_render += " | "
                 for s in cable_stress_after:
-                    text_render += "%6i" % s
-                text_render += "  |  "
+                    text_render += "%5i" % s
+                text_render += " | "
                 for s in cable_nos:
                     text_render += "%3i" % s
-                text_render += "  |  "
+                text_render += " | "
                 for s in actions:
                     if s is None:
                         text_render += "  \033[91m×\033[0m"
                     else:
-                        text_render += "%3i" % s
+                        text_render += "%2i" % s
+                text_render += " | "
+                for i, s in self.rewards.items():
+                    text_render += "%3i  " % s
 
                 print(text_render)
                 # print(np.round(cable_stress_after, 0))

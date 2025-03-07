@@ -64,35 +64,40 @@ class CableAgent:
         self.action = act
         self.real_action = self.action_map[act]
         self.stress_init = self.stress_after + (self.real_action['s'] - 1) * self.stress_step
+        self.stress_init = max(0, self.stress_init)
         self.num_strands = self.num_strands + (self.real_action['n'] - 1) * self.num_step
+        self.num_strands = max(self.num_step, self.num_strands)
 
     def update(self, balance_stress, deform):
         self.stress_after = balance_stress
-        self.stress_init = balance_stress
+        # self.stress_init = balance_stress
         self.deform = deform
         self.observation = [deform, balance_stress]
 
     def done(self):
-        return bool(self.num_strands <= self.num_step or self.stress_after <= self.stress_step)
+        ret = bool(self.num_strands <= self.num_step * 2 or self.stress_after <= self.stress_step * 2)
+        if ret:
+            debug = 1
+        return ret
 
     def reward(self):
-        EPS = 0.01
+        EPS = 0.001
         if abs(self.observation[0]) <= EPS:
-            s_score = {0: -1, 1: 2, 2: -1}
+            s_score = {0: -1, 1: 5, 2: -1}
         else:
             if self.observation[0] > 0:
-                s_score = {0: 2, 1: -1, 2: -1}
+                s_score = {0: 5, 1: -1, 2: -1}
             else:
-                s_score = {0: -1, 1: -1, 2: 2}
-        if self.observation[1] <= 450:
-            n_score = {0: 1, 1: 0, 2: -1}
-        elif self.observation[1] <= 550:
-            n_score = {0: 0, 1: 1, 2: 0}
+                s_score = {0: -1, 1: -1, 2: 5}
+        if self.observation[1] <= 500:
+            n_score = {0: 5, 1: -1, 2: -1}
+        elif self.observation[1] >= 1200:
+            n_score = {0: -1, 1: -1, 2: 5}
         else:
-            n_score = {0: -2, 1: -1, 2: +2}
+            n_score = {0: -1, 1: 5, 2: -1}
         # if self.action is None:
         #     debug = 1
-        self.the_reward = s_score[self.real_action['s']] + n_score[self.real_action['n']] + 1
+        self.the_reward = s_score[self.real_action['s']]  # + n_score[self.real_action['n']]
         return self.the_reward
 
     def __repr__(self):
