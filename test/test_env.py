@@ -1,4 +1,6 @@
-from bridgezoo import cablebridge_v1
+import numpy as np
+
+from bridgezoo import cablebridge_v2
 
 
 def run(env_func, num_games, **kwargs):
@@ -15,13 +17,18 @@ def run(env_func, num_games, **kwargs):
                 break
             else:
                 act = env.unwrapped.action_space(agent).sample()
+            # action = np.array([0.999,])
+            # action = np.clip(action, -0.999, 0.999)
+            # action = action.reshape(
+            #     1,
+            # )
             env.step(act)
         print(rewards)
     env.close()
 
 
 if __name__ == "__main__":
-    env_fn = cablebridge_v1
+    env_fn = cablebridge_v2
     env_kwargs = dict(
         beam_w=10.0,
         beam_h=1.0,
@@ -30,8 +37,8 @@ if __name__ == "__main__":
         max_cycles=100,
         render_mode="",
         DEF_SCALE=10,
-        FPS=10,
+        fps=10,
     )
 
     env_kwargs['render_mode'] = 'text'
-    run(env_fn, num_games=10, **env_kwargs)
+    run(env_fn, num_games=1, **env_kwargs)

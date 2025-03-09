@@ -1,29 +1,90 @@
-def score_by_displacement(value, eps=0.001, scale=5):
-    """
-    计算基于位移的得分，鼓励接近 0，偏离越多扣分越多。
+import numpy as np
+import pygame
 
-    参数:
-    - value: float, 观察值
-    - eps: float, 允许接近 0 的误差范围
-    - scale: float, 最大得分（接近 0 时）
 
-    返回:
-    - dict: {0: 放松得分, 1: 不变得分, 2: 加紧得分}
-    """
-    # 方式 1：二次损失（偏移平方衰减）
-    score = scale - (value / eps) ** 2 * scale
+class ManualPolicy:
+    def __init__(self, env, agent_id: int = 0, show_obs: bool = False):
+        self.env = env
+        self.agent_id = agent_id
+        self.agent = self.env.agents[self.agent_id]
 
-    # 方式 2：线性衰减（可以替换上面这一行）
-    # score = scale - abs(value / eps) * scale
+        # TO-DO: show current agent observation if this is True
+        self.show_obs = show_obs
 
-    score = max(-scale, score)  # 限制最低得分
+        # action mappings for all agents are the same
+        if True:
+            self.default_action = 0
+            self.action_mapping = dict()
+            self.action_mapping[pygame.K_w] = 1.0
+            self.action_mapping[pygame.K_s] = -1.0
 
-    if value > 0:
-        return {0: scale, 1: score, 2: -scale}
-    else:
-        return {0: -scale, 1: score, 2: scale}
+    def __call__(self, observation, agent):
+        # only trigger when we are the correct agent
+        assert (
+            agent == self.agent
+        ), f"Manual Policy only applied to agent: {self.agent}, but got tag for {agent}."
 
-# 测试
-print(score_by_displacement(0.0005))  # 接近 0，得分高
-print(score_by_displacement(0.01))    # 偏正，扣分
-print(score_by_displacement(-0.02))   # 偏负，扣分
+        # set the default action
+        action = self.default_action
+
+        # if we get a key, override action using the dict
+        for event in pygame.event.get():
+            if event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_ESCAPE:
+                    # escape to end
+                    exit()
+
+                elif event.key == pygame.K_BACKSPACE:
+                    # backspace to reset
+                    self.env.reset()
+
+                elif event.key in self.action_mapping:
+                    action = self.action_mapping[event.key]
+
+        return action
+
+    @property
+    def available_agents(self):
+        return self.env.agent_name_mapping
+
+
+if __name__ == "__main__":
+    from bridgezoo import cablebridge_v2
+    from pettingzoo.test import api_test
+    env_kwargs = dict(
+        beam_w=10.0,
+        beam_h=1.0,
+        num_cables_per_side=6,
+        anchor_height=20,
+        max_cycles=100,
+        render_mode="human",
+        DEF_SCALE=10,
+        fps=100,
+    )
+
+    env = cablebridge_v2.env(**env_kwargs)
+    env.reset()
+
+    # api_test(env, num_cycles=100, verbose_progress=False)
+
+    clock = pygame.time.Clock()
+    manual_policy = ManualPolicy(env)
+
+    for agent in env.agent_iter():
+        # clock.tick(env.metadata["render_fps"])
+
+        observation, reward, termination, truncation, info = env.last()
+
+        if agent == manual_policy.agent:
+            action = manual_policy(observation, agent)
+        else:
+            action = env.action_space(agent).sample()
+
+        action = np.array(action)
+        action = action.reshape(
+            1,
+        )
+        env.step(action)
+
+        if termination or truncation:
+            env.reset()

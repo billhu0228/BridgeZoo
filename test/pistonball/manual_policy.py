@@ -50,12 +50,15 @@ class ManualPolicy:
 
 if __name__ == "__main__":
     from bridgezoo import pistonball_v6
+    from pettingzoo.test import api_test
 
     env = pistonball_v6.env(render_mode="human")
     env.reset()
 
+    api_test(env, num_cycles=100, verbose_progress=False)
+
     clock = pygame.time.Clock()
-    manual_policy = pistonball_v6.ManualPolicy(env)
+    manual_policy = ManualPolicy(env)
 
     for agent in env.agent_iter():
         clock.tick(env.metadata["render_fps"])

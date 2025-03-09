@@ -88,7 +88,6 @@ import pymunk.pygame_util
 from gymnasium.utils import EzPickle, seeding
 
 from pettingzoo import AECEnv
-from pettingzoo.butterfly.pistonball.manual_policy import ManualPolicy
 from pettingzoo.utils import agent_selector, wrappers
 from pettingzoo.utils.conversions import parallel_wrapper_fn
 
@@ -96,7 +95,7 @@ _image_library = {}
 
 FPS = 20
 
-__all__ = ["ManualPolicy", "env", "parallel_env", "raw_env"]
+__all__ = [ "env", "parallel_env", "raw_env"]
 
 
 def get_image(path):
@@ -111,10 +110,7 @@ def get_image(path):
 
 def env(**kwargs):
     env = raw_env(**kwargs)
-    if env.continuous:
-        env = wrappers.ClipOutOfBoundsWrapper(env)
-    else:
-        env = wrappers.AssertOutOfBoundsWrapper(env)
+    env = wrappers.ClipOutOfBoundsWrapper(env)
     env = wrappers.OrderEnforcingWrapper(env)
     return env
 
@@ -132,30 +128,40 @@ class raw_env(AECEnv, EzPickle):
     }
 
     def __init__(
-        self,
-        n_pistons=20,
-        time_penalty=-0.1,
-        continuous=True,
-        random_drop=True,
-        random_rotate=True,
-        ball_mass=0.75,
-        ball_friction=0.3,
-        ball_elasticity=1.5,
-        max_cycles=125,
-        render_mode=None,
+            self,
+            n_pistons=20,
+            time_penalty=-0.1,
+            random_rotate=True,
+            ball_mass=0.75,
+            ball_friction=0.3,
+            ball_elasticity=1.5,
+
+            beam_w=10.0,
+            beam_h=1.0,
+            num_cables_per_side=30,
+            anchor_height=80,
+            max_cycles=125,
+            render_mode=None,
+            fps=10,
+            DEF_SCALE=10,
     ):
         EzPickle.__init__(
             self,
             n_pistons=n_pistons,
             time_penalty=time_penalty,
-            continuous=continuous,
-            random_drop=random_drop,
             random_rotate=random_rotate,
             ball_mass=ball_mass,
             ball_friction=ball_friction,
             ball_elasticity=ball_elasticity,
+
+            beam_w=beam_w,
+            beam_h=beam_h,
+            num_cables_per_side=num_cables_per_side,
+            anchor_height=anchor_height,
             max_cycles=max_cycles,
             render_mode=render_mode,
+            fps=fps,
+            DEF_SCALE=DEF_SCALE,
         )
         self.dt = 1.0 / FPS
         self.n_pistons = n_pistons
@@ -173,7 +179,7 @@ class raw_env(AECEnv, EzPickle):
         obs_height = y_high - y_low
 
         assert (
-            self.piston_width == self.wall_width
+                self.piston_width == self.wall_width
         ), "Wall width and piston width must be equal for observation calculation"
         assert self.n_pistons > 1, "n_pistons must be greater than 1"
 
@@ -196,18 +202,14 @@ class raw_env(AECEnv, EzPickle):
                 * self.n_pistons,
             )
         )
-        self.continuous = continuous
-        if self.continuous:
-            self.action_spaces = dict(
-                zip(
-                    self.agents,
-                    [gymnasium.spaces.Box(low=-1, high=1, shape=(1,))] * self.n_pistons,
-                )
+
+        self.action_spaces = dict(
+            zip(
+                self.agents,
+                [gymnasium.spaces.Box(low=-1, high=1, shape=(1,))] * self.n_pistons,
             )
-        else:
-            self.action_spaces = dict(
-                zip(self.agents, [gymnasium.spaces.Discrete(3)] * self.n_pistons)
-            )
+        )
+
         self.state_space = gymnasium.spaces.Box(
             low=0,
             high=255,
@@ -226,15 +228,11 @@ class raw_env(AECEnv, EzPickle):
         self.piston_sprite = get_image("piston.png")
         self.piston_body_sprite = get_image("piston_body.png")
         self.background = get_image("background.png")
-        self.random_drop = random_drop
         self.random_rotate = random_rotate
 
         self.pistonList = []
         self.pistonRewards = []  # Keeps track of individual rewards
-        self.recentFrameLimit = (
-            20  # Defines what "recent" means in terms of number of frames.
-        )
-        self.recentPistons = set()  # Set of pistons that have touched the ball recently
+
         self.time_penalty = time_penalty
         # TODO: this was a bad idea and the logic this uses should be removed at some point
         self.local_ratio = 0
@@ -368,17 +366,17 @@ class raw_env(AECEnv, EzPickle):
     def move_piston(self, piston, v):
         def cap(y):
             maximum_piston_y = (
-                self.screen_height
-                - self.wall_width
-                - (self.piston_height - self.piston_head_height)
+                    self.screen_height
+                    - self.wall_width
+                    - (self.piston_height - self.piston_head_height)
             )
             if y > maximum_piston_y:
                 y = maximum_piston_y
             elif y < maximum_piston_y - (
-                self.n_piston_positions * self.pixels_per_position
+                    self.n_piston_positions * self.pixels_per_position
             ):
                 y = maximum_piston_y - (
-                    self.n_piston_positions * self.pixels_per_position
+                        self.n_piston_positions * self.pixels_per_position
                 )
             return y
 
@@ -387,21 +385,19 @@ class raw_env(AECEnv, EzPickle):
             cap(piston.position[1] - v * self.pixels_per_position),
         )
 
-    def reset(self, seed=None, options=None):
-        if seed is not None:
-            self._seed(seed)
+    def reset_draw(self, seed, options):
+        # 绘图相关
         self.space = pymunk.Space(threaded=False)
         self.add_walls()
-        # self.space.threads = 2
         self.space.gravity = (0.0, 750.0)
         self.space.collision_bias = 0.0001
         self.space.iterations = 10  # 10 is default in PyMunk
 
         self.pistonList = []
         maximum_piston_y = (
-            self.screen_height
-            - self.wall_width
-            - (self.piston_height - self.piston_head_height)
+                self.screen_height
+                - self.wall_width
+                - (self.piston_height - self.piston_head_height)
         )
         for i in range(self.n_pistons):
             # Multiply by 0.5 to use only the lower half of possible positions
@@ -426,28 +422,21 @@ class raw_env(AECEnv, EzPickle):
         self.vertical_offset = 0
         horizontal_offset_range = 30
         vertical_offset_range = 15
-        if self.random_drop:
-            self.vertical_offset = self.np_random.integers(
-                -vertical_offset_range, vertical_offset_range + 1
-            )
-            self.horizontal_offset = self.np_random.integers(
-                -horizontal_offset_range, horizontal_offset_range + 1
-            )
         ball_x = (
-            self.screen_width
-            - self.wall_width
-            - self.ball_radius
-            - horizontal_offset_range
-            + self.horizontal_offset
+                self.screen_width
+                - self.wall_width
+                - self.ball_radius
+                - horizontal_offset_range
+                + self.horizontal_offset
         )
         ball_y = (
-            self.screen_height
-            - self.wall_width
-            - self.piston_body_height
-            - self.ball_radius
-            - (0.5 * self.pixels_per_position * self.n_piston_positions)
-            - vertical_offset_range
-            + self.vertical_offset
+                self.screen_height
+                - self.wall_width
+                - self.piston_body_height
+                - self.ball_radius
+                - (0.5 * self.pixels_per_position * self.n_piston_positions)
+                - vertical_offset_range
+                + self.vertical_offset
         )
 
         # Ensure ball starts somewhere right of the left wall
@@ -469,6 +458,12 @@ class raw_env(AECEnv, EzPickle):
         self.draw_background()
         self.draw()
 
+    def reset(self, seed=None, options=None):
+        if seed is not None:
+            self._seed(seed)
+
+        # 绘图
+        self.reset_draw(seed, options)
         self.agents = self.possible_agents[:]
 
         self._agent_selector.reinit(self.agents)
@@ -513,11 +508,11 @@ class raw_env(AECEnv, EzPickle):
             )
             # Height is the size of the blue part of the piston. 6 is the piston base height (the gray part at the bottom)
             height = (
-                self.screen_height
-                - self.wall_width
-                - self.piston_body_height
-                - (piston.position[1] + self.piston_radius)
-                + (self.piston_body_height - 6)
+                    self.screen_height
+                    - self.wall_width
+                    - self.piston_body_height
+                    - (piston.position[1] + self.piston_radius)
+                    + (self.piston_body_height - 6)
             )
             body_rect = pygame.Rect(
                 piston.position[0]
@@ -612,28 +607,23 @@ class raw_env(AECEnv, EzPickle):
 
     def step(self, action):
         if (
-            self.terminations[self.agent_selection]
-            or self.truncations[self.agent_selection]
+                self.terminations[self.agent_selection]
+                or self.truncations[self.agent_selection]
         ):
             self._was_dead_step(action)
             return
 
         action = np.asarray(action)
         agent = self.agent_selection
-        if self.continuous:
-            self.move_piston(self.pistonList[self.agent_name_mapping[agent]], action)
-        else:
-            self.move_piston(
-                self.pistonList[self.agent_name_mapping[agent]], action - 1
-            )
 
+        self.move_piston(self.pistonList[self.agent_name_mapping[agent]], action)
         self.space.step(self.dt)
         if self._agent_selector.is_last():
             ball_min_x = int(self.ball.position[0] - self.ball_radius)
             ball_next_x = (
-                self.ball.position[0]
-                - self.ball_radius
-                + self.ball.velocity[0] * self.dt
+                    self.ball.position[0]
+                    - self.ball_radius
+                    + self.ball.velocity[0] * self.dt
             )
             if ball_next_x <= self.wall_width + 1:
                 self.terminate = True
@@ -646,21 +636,21 @@ class raw_env(AECEnv, EzPickle):
             if not self.terminate:
                 global_reward += self.time_penalty
             total_reward = [
-                global_reward * (1 - self.local_ratio)
-            ] * self.n_pistons  # start with global reward
+                               global_reward * (1 - self.local_ratio)
+                           ] * self.n_pistons  # start with global reward
             local_pistons_to_reward = self.get_nearby_pistons()
             for index in local_pistons_to_reward:
                 total_reward[index] += local_reward * self.local_ratio
+
             self.rewards = dict(zip(self.agents, total_reward))
+
             self.lastX = ball_min_x
             self.frames += 1
         else:
             self._clear_rewards()
 
         self.truncate = self.frames >= self.max_cycles
-        # Clear the list of recent pistons for the next reward cycle
-        if self.frames % self.recentFrameLimit == 0:
-            self.recentPistons = set()
+
         if self._agent_selector.is_last():
             self.terminations = dict(
                 zip(self.agents, [self.terminate for _ in self.agents])
@@ -675,6 +665,5 @@ class raw_env(AECEnv, EzPickle):
 
         if self.render_mode == "human":
             self.render()
-
 
 # Game art created by J K Terry
