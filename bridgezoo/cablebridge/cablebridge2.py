@@ -68,13 +68,17 @@ class CableAgent:
         self.deform = deform
         self.observation = np.array([deform, ], dtype=np.float32)
 
-
     def done(self):
         ret = bool(self.stress_after <= self.stress_step * 2)
         return ret
 
     def reward(self):
-        return 1
+        if self.action > 0 > self.deform:
+            return 1 - 10 * self.deform
+        elif self.action < 0 < self.deform:
+            return 1 - 10 * self.deform
+        else:
+            return -1 - 10 * self.deform
 
 
 def env(**kwargs):
@@ -121,6 +125,7 @@ class raw_env(AECEnv, EzPickle):
         self.fps = fps  # Frames Per Second
         self.DEF_SCALE = DEF_SCALE
         self.max_cycles = max_cycles
+        self.local_ratio = 0.1
         # 系统随机参数
         self.beam_E = 20e9
         # 物理参数 Start --------------------------------------------------
@@ -425,7 +430,8 @@ class raw_env(AECEnv, EzPickle):
 
     def update_fem(self, cable_force, cable_soq):
         fem = self.extract_fem_model(cable_force, cable_soq)
-        return fem.opensees()
+        beam_pos, cable_stress_after = fem.opensees()
+        return beam_pos, cable_stress_after
 
     def step(self, action):
         if (
@@ -450,13 +456,21 @@ class raw_env(AECEnv, EzPickle):
                 the_cable.update(cable_stress_after[i], beam_pos[i])
             if self.is_even(beam_pos):
                 self.terminate = True
-            self.rewards = dict(zip(self.agents, [0, ] * self.num_cables_per_side))
+            if np.all(beam_pos) == 0:
+                self.truncate = True  # 求解失败
+            global_reward = sum(beam_pos)
+            if self.truncate:
+                global_reward = -10
+            rewards = [global_reward] * self.num_cables_per_side
+            # rewards = [c.reward() for key, c in self.cables.items()]
+            self.rewards = dict(zip(self.agents, rewards))
             self.frames += 1
 
         else:
             self._clear_rewards()
 
-        self.truncate = self.frames >= self.max_cycles
+        if not self.truncate:
+            self.truncate = self.frames >= self.max_cycles
 
         if self._agent_selector.is_last():
             self.terminations = dict(
@@ -475,8 +489,23 @@ class raw_env(AECEnv, EzPickle):
                 self.report()
         self.agent_selection = self._agent_selector.next()
 
-    def is_even(self, beam_pos):
+    @staticmethod
+    def is_even(beam_pos, eps=0.01):
+        if max(beam_pos) < eps and min(beam_pos) > -eps:
+            return True
         return False
+
+    @staticmethod
+    def reward_mse(beam_pos):
+        return -np.mean(np.square(beam_pos)) * 100
+
+    @staticmethod
+    def reward_exp(beam_pos, alpha=1.0):
+        return np.sum(np.exp(-alpha * np.abs(beam_pos)))
+
+    @staticmethod
+    def reward_max_deviation(beam_pos):
+        return -np.max(np.abs(beam_pos[-2:]))
 
     def report(self):
         cable_stress = [c.stress_before for c in self.cables.values()]
@@ -503,6 +532,6 @@ class raw_env(AECEnv, EzPickle):
                 text_render += " %5.2f " % s
         text_render += " | "
         for i, s in self.rewards.items():
-            text_render += "%3i  " % s
+            text_render += "%3.2f  " % s
 
         print(text_render)

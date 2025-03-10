@@ -9,7 +9,7 @@ import supersuit as ss
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import VecNormalize
 from stable_baselines3.ppo import MlpPolicy
-from bridgezoo import cablebridge_v1
+from bridgezoo import cablebridge_v2
 
 
 def train(env_func, log_dir, steps: int = 10000, seed: int | None = None, with_board=False, **kwargs):
@@ -27,7 +27,7 @@ def train(env_func, log_dir, steps: int = 10000, seed: int | None = None, with_b
         env,
         policy_kwargs={"net_arch": [128, 128]},  # 增加神经网络层数
         verbose=2,
-        learning_rate=5e-4,
+        learning_rate=5e-3,
         batch_size=512,
         device='cpu',
         tensorboard_log=log_dir,
@@ -112,16 +112,16 @@ def evaluate(env_func, policy_folder, policy_name="", num_games: int = 1, use_po
 
 
 if __name__ == "__main__":
-    env_fn = cablebridge_v1
+    env_fn = cablebridge_v2
     env_kwargs = dict(
         beam_w=10.0,
         beam_h=1.0,
         num_cables_per_side=6,
         anchor_height=20,
-        max_cycles=100,
+        max_cycles=256,
         render_mode="",
         DEF_SCALE=10,
-        FPS=20,
+        fps=200,
     )
 
     # Train a model

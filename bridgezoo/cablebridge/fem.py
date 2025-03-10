@@ -116,7 +116,7 @@ class FEM:
             constraints('Plain')
             numberer('RCM')
             # test('NormDispIncr', 1.0e-3, 100, 0)
-            test('NormUnbalance', 1.0e-6, 100)
+            test('NormUnbalance', 1.0e-6, 1000)
             steps = 100
             integrator('LoadControl', 1.0 / steps)
             algorithm("Newton")
@@ -142,5 +142,6 @@ class FEM:
                 sig = (fx ** 2 + fy ** 2) ** 0.5 / (mat['Ns'] * As)
                 e_res.append(sig * 1e-6)
             wipe()
-            # print(len(res))
+            # if sum(res) == 0:
+            #     return [], []
             return res, e_res

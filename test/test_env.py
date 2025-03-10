@@ -34,7 +34,7 @@ if __name__ == "__main__":
         beam_h=1.0,
         num_cables_per_side=6,
         anchor_height=20,
-        max_cycles=100,
+        max_cycles=256,
         render_mode="",
         DEF_SCALE=10,
         fps=10,
