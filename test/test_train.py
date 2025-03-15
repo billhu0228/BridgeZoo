@@ -9,7 +9,7 @@ import supersuit as ss
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import VecNormalize
 from stable_baselines3.ppo import MlpPolicy
-from bridgezoo import cablebridge_v2
+from bridgezoo import cablebridge_v2,pistonball_v6
 
 
 def train(env_func, log_dir, steps: int = 10000, seed: int | None = None, with_board=False, **kwargs):
@@ -112,20 +112,9 @@ def evaluate(env_func, policy_folder, policy_name="", num_games: int = 1, use_po
 
 
 if __name__ == "__main__":
-    env_fn = cablebridge_v2
-    env_kwargs = dict(
-        beam_w=10.0,
-        beam_h=1.0,
-        num_cables_per_side=6,
-        anchor_height=20,
-        max_cycles=256,
-        render_mode="",
-        DEF_SCALE=10,
-        fps=200,
-    )
-
+    env_fn = pistonball_v6
     # Train a model
-    train(env_fn, '../train_folder/', steps=int(4e6), with_board=True, **env_kwargs)
+    train(env_fn, '../train_folder/', steps=int(4e6), with_board=True)
 
     # Evaluate 10 games (average reward should be positive but can vary significantly)
     # env_kwargs['render_mode'] = 'text'

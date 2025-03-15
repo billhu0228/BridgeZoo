@@ -20,11 +20,11 @@ __all__ = ["env", "parallel_env", "raw_env"]
 class CableAgent:
     def __init__(self):
         self.obs_dim = 1
-        self.stress_init = 1000
+        self.stress_init = 0
         self.stress_before = self.stress_init
-        self.stress_after = 1000
-        self.num_strands = 40
-        self.stress_step = 500
+        self.stress_after = 0
+        self.num_strands = 0
+        self.stress_step = 0
         self.observation = 0
         self.deform = 0
         self.action = None
@@ -33,9 +33,9 @@ class CableAgent:
         self.reset()
 
     def reset(self):
-        self.stress_init = 1000
+        self.stress_init = 1200
         self.stress_before = self.stress_init
-        self.stress_after = 1000
+        self.stress_after = 1200
         self.num_strands = 20
         self.stress_step = 500
         self.deform = 0.0
@@ -458,7 +458,7 @@ class raw_env(AECEnv, EzPickle):
                 self.terminate = True
             if np.all(beam_pos) == 0:
                 self.truncate = True  # 求解失败
-            global_reward = sum(beam_pos)
+            global_reward = beam_pos[-1]
             if self.truncate:
                 global_reward = -10
             rewards = [global_reward] * self.num_cables_per_side

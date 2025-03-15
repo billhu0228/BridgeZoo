@@ -116,14 +116,16 @@ class FEM:
             constraints('Plain')
             numberer('RCM')
             # test('NormDispIncr', 1.0e-3, 100, 0)
-            test('NormUnbalance', 1.0e-6, 1000)
+            test('NormUnbalance', 1.0e-3, 1000)
             steps = 100
             integrator('LoadControl', 1.0 / steps)
             algorithm("Newton")
             # algorithm("Newton")
             analysis("Static")
             # printModel()
-            analyze(steps)
+            for i in range(steps):
+                analyze(1)
+            #analyze(steps)
             res = []
             e_res = []
             for nd in self.nodes:
