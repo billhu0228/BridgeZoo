@@ -32,8 +32,13 @@ class MultiAgentEnvWrapper(gym.Env):
         self.num_agents = num_agents
         
         # 设置动作空间和观察空间
-        # 每个智能体有5个动作：左、右、上、下、不动
-        self.action_space = spaces.MultiDiscrete([5] * num_agents)
+        # 每个智能体有2个动作：x方向和y方向的移动
+        self.action_space = spaces.Box(
+            low=-1.0,
+            high=1.0,
+            shape=(2 * num_agents,),  # 每个智能体2个动作维度
+            dtype=np.float32
+        )
         
         # 观察空间：所有智能体的x,y坐标
         self.observation_space = spaces.Box(
@@ -54,6 +59,9 @@ class MultiAgentEnvWrapper(gym.Env):
         # 记录上一步的状态，用于计算奖励
         self.last_positions = None
         self.last_min_distance = float('inf')
+        
+        # 移动步长
+        self.move_size = self.env.move_size
     
     def reset(self, seed=None):
         """重置环境"""
@@ -129,9 +137,35 @@ class MultiAgentEnvWrapper(gym.Env):
     
     def step(self, actions):
         """执行动作"""
-        # 依次为每个智能体执行动作
+        # 将连续动作转换为离散动作
+        discrete_actions = []
         for i in range(self.num_agents):
-            obs = self.env.step(int(actions[i]))
+            x_action = actions[i*2]     # x方向的动作
+            y_action = actions[i*2+1]   # y方向的动作
+            
+            # 根据连续动作的值选择离散动作
+            # 0: 左, 1: 右, 2: 上, 3: 下, 4: 不动
+            if abs(x_action) > abs(y_action):
+                if x_action > 0.3:
+                    discrete_actions.append(1)  # 右
+                elif x_action < -0.3:
+                    discrete_actions.append(0)  # 左
+                else:
+                    discrete_actions.append(4)  # 不动
+            else:
+                if y_action > 0.3:
+                    discrete_actions.append(2)  # 上
+                elif y_action < -0.3:
+                    discrete_actions.append(3)  # 下
+                else:
+                    discrete_actions.append(4)  # 不动
+        
+        # 为每个智能体执行对应的动作
+        for i, agent in enumerate(self.env.agents):
+            # 设置当前智能体
+            self.env.agent_selection = agent
+            # 执行动作
+            obs = self.env.step(discrete_actions[i])
         
         # 计算奖励
         reward = self._calculate_reward()
@@ -211,7 +245,7 @@ class TensorboardCallback(BaseCallback):
     
     def _on_step(self) -> bool:
         """每步更新时记录信息"""
-        # 获取当前环境
+        # 获取当前环境（通过env属性访问被Monitor包装的原始环境）
         env = self.training_env.envs[0].env
         
         # 记录当前episode的信息
@@ -261,24 +295,27 @@ def make_env(num_agents=5, boundary_shape=BoundaryShape.RECTANGLE, rank=0):
         return env
     return _init
 
-def train(num_agents=5, total_timesteps=1000000, save_freq=10000):
-    """训练SAC模型"""
-    # 创建日志和模型保存目录
+def train(num_agents=5, total_timesteps=1000000):
+    """训练SAC模型
+    
+    参数:
+        num_agents: 智能体数量
+        total_timesteps: 总训练步数
+    """
+    # 创建日志目录
     log_dir = "logs"
     tensorboard_log = os.path.join(log_dir, "tensorboard")
     os.makedirs(log_dir, exist_ok=True)
     os.makedirs(tensorboard_log, exist_ok=True)
     
-    # 创建多进程环境
-    num_cpu = 4  # 根据您的CPU核心数调整
-    env = SubprocVecEnv([make_env(num_agents, BoundaryShape.RECTANGLE, i) for i in range(num_cpu)])
+    # 创建环境（使用DummyVecEnv而不是SubprocVecEnv）
+    env = DummyVecEnv([make_env(num_agents, BoundaryShape.RECTANGLE, i) for i in range(4)])
     
     # 设置策略网络参数
     policy_kwargs = dict(
         features_extractor_class=CustomCNN,
         features_extractor_kwargs=dict(features_dim=256),
-        net_arch=dict(pi=[256, 256], qf=[256, 256]),
-        activation_fn=torch.nn.ReLU
+        net_arch=dict(pi=[256], qf=[256])
     )
     
     # 创建SAC模型
@@ -289,35 +326,42 @@ def train(num_agents=5, total_timesteps=1000000, save_freq=10000):
         buffer_size=1000000,
         learning_starts=10000,
         batch_size=256,
-        tau=0.005,
-        gamma=0.99,
-        train_freq=1,
-        gradient_steps=1,
-        action_noise=None,
         policy_kwargs=policy_kwargs,
         tensorboard_log=tensorboard_log,
         verbose=1
     )
     
-    # 设置检查点回调
-    checkpoint_callback = CheckpointCallback(
-        save_freq=save_freq,
-        save_path=log_dir,
-        name_prefix="sac_rebar"
-    )
-    
-    # 设置TensorBoard回调
+    # 创建TensorBoard回调
     tensorboard_callback = TensorboardCallback()
     
-    # 开始训练
-    model.learn(
-        total_timesteps=total_timesteps,
-        callback=[checkpoint_callback, tensorboard_callback],
-        progress_bar=True
+    # 创建检查点回调，每100000步保存一次
+    checkpoint_callback = CheckpointCallback(
+        save_freq=100000,
+        save_path=log_dir,
+        name_prefix="sac_model"
     )
     
-    # 保存最终模型
-    model.save(f"{log_dir}/final_model")
+    # 获取当前时间戳
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    
+    try:
+        # 开始训练，使用回调
+        model.learn(
+            total_timesteps=total_timesteps,
+            callback=[tensorboard_callback, checkpoint_callback]
+        )
+        
+        # 训练完成，保存最终模型
+        final_model_path = os.path.join(log_dir, f"sac_model_{timestamp}_final")
+        model.save(final_model_path)
+        print(f"\n训练完成！最终模型已保存到：{os.path.abspath(final_model_path)}")
+        
+    except KeyboardInterrupt:
+        print("\n检测到用户中断，正在保存模型...")
+        # 保存中断时的模型
+        interrupted_model_path = os.path.join(log_dir, f"sac_model_{timestamp}_interrupted")
+        model.save(interrupted_model_path)
+        print(f"模型已保存到：{os.path.abspath(interrupted_model_path)}")
     
     return model
 
@@ -347,40 +391,24 @@ def start_tensorboard(logdir: str, port: int = 6006):
 
 if __name__ == "__main__":
     # 训练参数
-    NUM_AGENTS = 5
-    TOTAL_TIMESTEPS = 2000000  # 增加训练步数
-    SAVE_FREQ = 50000
+    NUM_AGENTS = 4
+    TOTAL_TIMESTEPS = 2000000
     
-    # 获取当前工作目录的绝对路径
-    current_dir = os.path.abspath(os.path.dirname(__file__))
-    tensorboard_dir = os.path.join(current_dir, "logs", "tensorboard")
+    # 创建日志目录
+    log_dir = "logs"
+    tensorboard_log = os.path.join(log_dir, "tensorboard")
+    os.makedirs(log_dir, exist_ok=True)
+    os.makedirs(tensorboard_log, exist_ok=True)
+    
+    print("启动TensorBoard...")
+    tensorboard_process = start_tensorboard(tensorboard_log)
     
     print("开始训练...")
-    print("\n正在启动TensorBoard...")
-    
+    print("提示：按Ctrl+C可以提前结束训练并保存模型")
     try:
-        # 启动TensorBoard
-        tensorboard_process = start_tensorboard(tensorboard_dir)
-        print("TensorBoard已启动！")
-        print("如果浏览器没有自动打开，请访问：http://localhost:6006")
-        
-        # 开始训练
-        model = train(NUM_AGENTS, TOTAL_TIMESTEPS, SAVE_FREQ)
-        print("\n训练完成！")
-        print(f"模型已保存到：{os.path.join(current_dir, 'logs', 'final_model.zip')}")
-        
-    except Exception as e:
-        print(f"\n启动TensorBoard时出错：{str(e)}")
-        print("请手动运行以下命令：")
-        print(f"tensorboard --logdir {tensorboard_dir}")
-        
-        # 继续训练
-        model = train(NUM_AGENTS, TOTAL_TIMESTEPS, SAVE_FREQ)
-        print("\n训练完成！")
-        print(f"模型已保存到：{os.path.join(current_dir, 'logs', 'final_model.zip')}")
-    
+        model = train(NUM_AGENTS, TOTAL_TIMESTEPS)
     finally:
-        # 如果TensorBoard进程存在，则关闭它
-        if 'tensorboard_process' in locals():
-            tensorboard_process.terminate()
-            print("\nTensorBoard已关闭。") 
+        # 确保在训练结束或中断时关闭TensorBoard
+        print("\n关闭TensorBoard...")
+        tensorboard_process.terminate()
+        tensorboard_process.wait() 

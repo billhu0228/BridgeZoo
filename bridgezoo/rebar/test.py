@@ -13,7 +13,7 @@ def test_random_policy(config: EnvConfig = None):
     observations = env_instance.reset()
     
     # 运行环境
-    for step in range(500):
+    for step in range(env_instance.max_steps):
         # 选择当前智能体
         agent = env_instance.agent_selection
         
@@ -30,7 +30,7 @@ def test_random_policy(config: EnvConfig = None):
     env_instance.close()
 
 def test_intelligent_policy(config: EnvConfig = None):
-    """测试一个智能策略，尝试使坐标平方最大化，同时满足约束条件"""
+    """测试一个智能策略，先向上移动，再向右移动"""
     if config is None:
         config = EnvConfig(render_mode="human")
     
@@ -41,7 +41,7 @@ def test_intelligent_policy(config: EnvConfig = None):
     observations = env_instance.reset()
     
     # 运行环境
-    for step in range(500):
+    for step in range(env_instance.max_steps):
         # 选择当前智能体
         agent = env_instance.agent_selection
         agent_idx = int(agent.split('_')[1])
@@ -64,7 +64,7 @@ def test_intelligent_policy(config: EnvConfig = None):
         
         # 策略：
         # 1. 优先确保最小距离约束
-        # 2. 然后尝试使自己的坐标平方和最大化，但不超过边界
+        # 2. 然后先向上移动，再向右移动
         
         if min_distance < env_instance.min_distance:
             # 如果距离太近，向远离最近智能体的方向移动
@@ -80,35 +80,16 @@ def test_intelligent_policy(config: EnvConfig = None):
                 else:
                     action = 3  # 向下移动
         else:
-            # 距离约束已满足，尝试最大化坐标的平方
-            if abs(my_pos[0]) < env_instance.config.max_absolute_x - 0.5 or abs(my_pos[1]) < env_instance.config.max_absolute_y - 0.5:
-                # 选择可以移动的方向
-                possible_moves = []
-                if abs(my_pos[0]) < env_instance.config.max_absolute_x - 0.5:
-                    if my_pos[0] > 0:
-                        possible_moves.append(1)  # 向右
-                    else:
-                        possible_moves.append(0)  # 向左
-                if abs(my_pos[1]) < env_instance.config.max_absolute_y - 0.5:
-                    if my_pos[1] > 0:
-                        possible_moves.append(2)  # 向上
-                    else:
-                        possible_moves.append(3)  # 向下
-                
-                if possible_moves:
-                    # 随机选择一个可行的移动方向
-                    action = np.random.choice(possible_moves)
-                else:
-                    action = 4  # 不动
-            elif abs(my_pos[0]) > env_instance.config.max_absolute_x or abs(my_pos[1]) > env_instance.config.max_absolute_y:
-                # 如果超过边界，向中心移动
-                if abs(my_pos[0]) > env_instance.config.max_absolute_x:
-                    action = 0 if my_pos[0] > 0 else 1
-                else:
-                    action = 3 if my_pos[1] > 0 else 2
+            # 距离约束已满足，先向上移动，再向右移动
+            if abs(my_pos[1]) < env_instance.config.max_absolute_y - 0.5:
+                # 如果还没有到达上边界，向上移动
+                action = 2  # 向上移动
+            elif abs(my_pos[0]) < env_instance.config.max_absolute_x - 0.5:
+                # 如果已经到达上边界，向右移动
+                action = 0  # 向右移动
             else:
-                # 已经接近边界，保持不动
-                action = 4
+                # 如果已经到达边界，保持不动
+                action = 0  # 不动
         
         # 执行动作
         observations = env_instance.step(action)
@@ -127,14 +108,14 @@ if __name__ == "__main__":
         num_agents=5,
         render_mode="human",
         render_fps=60,
-        max_steps=1000,
+        max_steps=10000,
         move_size=0.2,
         window_width=1024,
         window_height=768,
         max_absolute_x=9.0,        # 所有形状通用的x范围
         max_absolute_y=4.0,        # 所有形状正常区域的y范围
-        normal_x=-8.0,              # T型和H型共用的正常区域x范围（T型为负，H型为正）
-        narrow_y=2.0,               # T型和H型共用的窄区域y范围
+        normal_x=3.0,              # T型和H型共用的正常区域x范围（T型为负，H型为正）
+        narrow_y=1.0,               # T型和H型共用的窄区域y范围
         cover=0.3
     )
     
@@ -144,6 +125,6 @@ if __name__ == "__main__":
         **base_config,
         boundary_shape=BoundaryShape.RECTANGLE,
     )
-    # test_intelligent_policy(circle_config)
-    test_random_policy(circle_config)
+    test_intelligent_policy(circle_config)
+    # test_random_policy(circle_config)
 

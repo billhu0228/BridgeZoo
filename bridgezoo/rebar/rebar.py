@@ -31,6 +31,7 @@ class EnvConfig:
     min_distance: float = 1.0         # 最小距离要求
     window_width: int = 800           # 窗口宽度
     window_height: int = 400          # 窗口高度
+    random_seed: int = None           # 随机种子，用于控制初始位置
     
     # 通用边界参数
     boundary_shape: BoundaryShape = BoundaryShape.RECTANGLE  # 边界形状
@@ -187,22 +188,31 @@ class raw_env(AECEnv):
         # 清空动作缓存
         self.cached_actions.clear()
         
-        # 根据不同边界形状初始化智能体位置
-        if self.config.boundary_shape == BoundaryShape.CIRCLE:
-            # 对于圆形边界，在圆内均匀分布
-            radius = self.config.max_absolute_x * 0.7  # 使用70%的半径来确保在边界内
-            angles = np.linspace(0, 2*np.pi, self.num_rebars, endpoint=False)
-            x_positions = radius * np.cos(angles)
-            y_positions = radius * np.sin(angles)
-        else:
-            # 其他边界形状，在x轴上均匀分布
-            x_positions = np.linspace(-self.config.max_absolute_x, self.config.max_absolute_x, self.num_rebars)
-            y_positions = np.zeros(self.num_rebars)
-        
-        self.current_positions = np.column_stack([x_positions, y_positions]).astype(np.float32)
+        # 初始化智能体位置
+        self.current_positions = self._initialize_positions()
         
         # 初始观察
         self._last_obs = self._get_obs()
+
+    def _initialize_positions(self):
+        """初始化智能体位置，使用随机种子控制随机性"""
+        if self.config.random_seed is not None:
+            np.random.seed(self.config.random_seed)
+        
+        if self.config.boundary_shape == BoundaryShape.CIRCLE:
+            # 对于圆形边界，在圆内随机分布
+            radius = self.config.max_absolute_x * 0.7  # 使用70%的半径来确保在边界内
+            angles = np.random.uniform(0, 2*np.pi, self.num_rebars)
+            x_positions = radius * np.cos(angles)
+            y_positions = radius * np.sin(angles)
+        else:
+            # 其他边界形状，只在x轴上随机分布，y保持为0
+            x_positions = np.random.uniform(-self.config.max_absolute_x, 
+                                          self.config.max_absolute_x, 
+                                          self.num_rebars)
+            y_positions = np.zeros(self.num_rebars)  # y坐标保持为0
+        
+        return np.column_stack([x_positions, y_positions]).astype(np.float32)
 
     def reset(self, seed=None, options=None):
         """重置环境"""
@@ -220,19 +230,12 @@ class raw_env(AECEnv):
         # 清空动作缓存
         self.cached_actions.clear()
         
-        # 根据不同边界形状初始化智能体位置
-        if self.config.boundary_shape == BoundaryShape.CIRCLE:
-            # 对于圆形边界，在圆内均匀分布
-            radius = self.config.max_absolute_x * 0.7  # 使用70%的半径来确保在边界内
-            angles = np.linspace(0, 2*np.pi, self.num_rebars, endpoint=False)
-            x_positions = radius * np.cos(angles)
-            y_positions = radius * np.sin(angles)
-        else:
-            # 其他边界形状，在x轴上均匀分布
-            x_positions = np.linspace(-self.config.max_absolute_x, self.config.max_absolute_x, self.num_rebars)
-            y_positions = np.zeros(self.num_rebars)
+        # 重置随机种子（如果提供了新的种子）
+        if seed is not None:
+            self.config.random_seed = seed
         
-        self.current_positions = np.column_stack([x_positions, y_positions]).astype(np.float32)
+        # 重新初始化智能体位置
+        self.current_positions = self._initialize_positions()
         
         # 选择第一个行动的智能体
         self._agent_selector = agent_selector(self.agents)
@@ -250,84 +253,46 @@ class raw_env(AECEnv):
             for agent in self.agents
         }
 
-    def step(self, action):
-        """环境步进，支持并行执行"""
-        if (
-            self.terminations[self.agent_selection]
-            or self.truncations[self.agent_selection]
-        ):
-            return self._was_dead_step(action)
+    def _calculate_reward(self) -> float:
+        """计算奖励值
         
-        agent = self.agent_selection
+        基于绝对值计算奖励，考虑：
+        1. 钢筋间距约束（平均间距越大越好）
+        2. 绝对承载力（基于二次矩/惯性矩）
         
-        # 缓存当前智能体的动作
-        self.cached_actions[agent] = action
+        返回:
+            float: 计算得到的奖励值
+        """
+        # 计算所有钢筋对之间的平均间距
+        total_spacing = 0
+        pair_count = 0
+        for i in range(self.num_rebars):
+            for j in range(i + 1, self.num_rebars):
+                dist = np.linalg.norm(self.current_positions[i] - self.current_positions[j])
+                total_spacing += dist
+                pair_count += 1
         
-        # 如果所有智能体都已经选择了动作，执行并行更新
-        if len(self.cached_actions) == len(self.agents):
-            # 同时更新所有智能体的位置
-            for agent_name, act in self.cached_actions.items():
-                agent_idx = self.agent_name_mapping[agent_name]
-                new_pos = self.current_positions[agent_idx].copy()
-                
-                if act == 0:  # 向左移动
-                    new_pos[0] -= self.move_size
-                elif act == 1:  # 向右移动
-                    new_pos[0] += self.move_size
-                elif act == 2:  # 向上移动
-                    new_pos[1] += self.move_size
-                elif act == 3:  # 向下移动
-                    new_pos[1] -= self.move_size
-                
-                # 只有在新位置在边界内时才更新位置
-                if self._is_point_in_boundary(new_pos[0], new_pos[1]):
-                    self.current_positions[agent_idx] = new_pos
-            
-            # 计算所有智能体之间的最小距离
-            min_distance = float('inf')
-            for i in range(self.num_rebars):
-                for j in range(i + 1, self.num_rebars):
-                    dist = np.linalg.norm(self.current_positions[i] - self.current_positions[j])
-                    min_distance = min(min_distance, dist)
-            
-            # 计算所有智能体的坐标平方和
-            positions_squared_sum = np.sum(self.current_positions ** 2)
-            
-            # 只检查最小距离约束
-            distance_constraint_met = min_distance >= self.min_distance
-            
-            # 计算奖励：只考虑距离约束和坐标平方和
-            if distance_constraint_met:
-                # 使用相对值计算奖励
-                max_possible_value = self.num_rebars * (self.config.max_absolute_x ** 2 + self.config.max_absolute_y ** 2)
-                reward = positions_squared_sum / max_possible_value
-            else:
-                penalty = -1.0 - (self.min_distance - min_distance)
-                reward = penalty
-            
-            # 更新所有智能体的奖励
-            for agent_name in self.agents:
-                self.rewards[agent_name] = reward
-            
-            # 清空动作缓存
-            self.cached_actions.clear()
-            
-            # 更新步数
-            self.step_count += 1
-            if self.step_count >= self.max_steps:
-                self.truncations = {agent: True for agent in self.agents}
+        # 计算平均间距
+        avg_spacing = total_spacing / pair_count if pair_count > 0 else 0
         
-        # 更新观察空间
-        self._last_obs = self._get_obs()
+        # 计算间距得分（平均间距越大越好，但需要满足最小间距要求）
+        spacing_score = min(1.0, avg_spacing / (self.min_distance * 2))  # 使用2倍最小间距作为参考值
         
-        # 选择下一个智能体
-        self.agent_selection = self._agent_selector.next()
+        # 计算二次矩（惯性矩）
+        # 假设每个钢筋的面积为1，中性轴在x轴
+        distances_to_neutral = np.abs(self.current_positions[:, 0])  # 到中性轴的距离
+        second_moment = np.sum(distances_to_neutral ** 2)  # 二次矩
         
-        # 渲染环境
-        if self.render_mode == "human":
-            self.render()
+        # 计算最大可能的二次矩（所有钢筋都在最大x距离处）
+        max_possible_moment = self.num_rebars * (self.config.max_absolute_x ** 2)
         
-        return self._last_obs
+        # 计算承载力得分
+        capacity_score = second_moment / max_possible_moment
+        
+        # 综合评分（间距约束权重0.4，承载力权重0.6）
+        reward = 0.4 * spacing_score + 0.6 * capacity_score
+        
+        return reward
 
     def _is_point_in_boundary(self, x: float, y: float) -> bool:
         """检查点是否在边界内"""
@@ -342,7 +307,9 @@ class raw_env(AECEnv):
                 return abs(y) <= self.config.max_absolute_y and x >= -self.config.max_absolute_x
             # 在右侧窄区域内（从normal_x到max_absolute_x）
             else:
-                return abs(y) <= self.config.narrow_y and x <= self.config.max_absolute_x
+                # 确保x在正确范围内，且y在窄区域内
+                return (x <= self.config.max_absolute_x and 
+                       abs(y) <= self.config.narrow_y)
         
         elif self.config.boundary_shape == BoundaryShape.H_SHAPE:
             # H型边界检查（哑铃形状）
@@ -351,10 +318,13 @@ class raw_env(AECEnv):
             
             # 在收缩区域内
             if abs_x <= self.config.normal_x:
+                # 确保y在窄区域内
                 return abs_y <= self.config.narrow_y
             # 在正常区域内
             else:
-                return abs_y <= self.config.max_absolute_y and abs_x <= self.config.max_absolute_x
+                # 确保x和y都在正常区域内
+                return (abs_x <= self.config.max_absolute_x and 
+                       abs_y <= self.config.max_absolute_y)
         
         elif self.config.boundary_shape == BoundaryShape.CIRCLE:
             # 圆形边界检查：使用max_absolute_x作为半径
@@ -365,6 +335,112 @@ class raw_env(AECEnv):
             return distance_squared <= radius_squared + epsilon
         
         return False
+
+    def _handle_boundary(self, new_pos: np.ndarray, old_pos: np.ndarray, action: int, bounce: bool = False) -> np.ndarray:
+        """处理边界问题，确保智能体在边界内
+        
+        参数:
+            new_pos: 移动后的新位置
+            old_pos: 移动前的原始位置
+            action: 执行的动作（0-左, 1-右, 2-上, 3-下, 4-不动）
+            bounce: 是否在碰到边界时反弹，True表示反弹，False表示沿边界滑行
+            
+        返回:
+            np.ndarray: 处理后的位置
+        """
+        # 检查是否在边界内
+        if not self._is_point_in_boundary(new_pos[0], new_pos[1]):
+            if bounce:
+                # 反弹模式：计算反弹后的位置
+                if self.config.boundary_shape == BoundaryShape.CIRCLE:
+                    # 对于圆形边界，沿着半径方向反弹
+                    radius = np.sqrt(new_pos[0]**2 + new_pos[1]**2)
+                    if radius > 0:  # 避免除以零
+                        scale = self.config.max_absolute_x / radius
+                        new_pos[0] *= scale
+                        new_pos[1] *= scale
+                else:
+                    # 对于其他边界形状，分别处理x和y方向的反弹
+                    # 如果超出x方向边界，反转x方向的移动
+                    if action in [0, 1]:
+                        new_pos[0] = old_pos[0] - (new_pos[0] - old_pos[0])
+                    # 如果超出y方向边界，反转y方向的移动
+                    if action in [2, 3]:
+                        new_pos[1] = old_pos[1] - (new_pos[1] - old_pos[1])
+            else:
+                # 滑行模式：将位置限制在边界内
+                if self.config.boundary_shape == BoundaryShape.CIRCLE:
+                    # 对于圆形边界，将位置限制在圆上
+                    radius = np.sqrt(new_pos[0]**2 + new_pos[1]**2)
+                    if radius > 0:  # 避免除以零
+                        scale = self.config.max_absolute_x / radius
+                        new_pos[0] *= scale
+                        new_pos[1] *= scale
+                else:
+                    # 对于其他边界形状，将位置限制在边界内
+                    if self.config.boundary_shape == BoundaryShape.T_SHAPE:
+                        # T型边界特殊处理
+                        if old_pos[0] > self.config.normal_x:  # 在右侧窄区域
+                            # 如果超出y方向边界，根据动作方向进行反弹或滑行
+                            if action in [2, 3]:  # 上下移动
+                                if new_pos[1] > self.config.narrow_y:
+                                    new_pos[1] = self.config.narrow_y
+                                elif new_pos[1] < -self.config.narrow_y:
+                                    new_pos[1] = -self.config.narrow_y
+                            else: # 左右移动
+                                if new_pos[0] > self.config.max_absolute_x:
+                                    new_pos[0] = self.config.max_absolute_x
+                                elif new_pos[0] < -self.config.normal_x:
+                                    new_pos[0] = -self.config.normal_x
+                        else: # 在左侧宽区域
+                            # 如果超出x方向边界，根据动作方向进行反弹或滑行
+                            if action in [0, 1]:  # 左右移动
+                                if new_pos[0] > self.config.normal_x:
+                                    new_pos[0] = self.config.normal_x
+                                elif new_pos[0] < -self.config.max_absolute_x:
+                                    new_pos[0] = -self.config.max_absolute_x
+                            # 如果超出y方向边界，根据动作方向进行反弹或滑行
+                            if action in [2, 3]:  # 上下移动
+                                if new_pos[1] > self.config.max_absolute_y:
+                                    new_pos[1] = self.config.max_absolute_y
+                                elif new_pos[1] < -self.config.max_absolute_y:
+                                    new_pos[1] = -self.config.max_absolute_y
+                    
+                    elif self.config.boundary_shape == BoundaryShape.H_SHAPE:
+                        assert self.config.normal_x > 0, "normal_x must be positive for H-shape"
+                        if abs(old_pos[0]) < self.config.normal_x:  # 在中间窄区域
+                            # 如果超出y方向边界，根据动作方向进行反弹或滑行
+                            if action in [2, 3]:  # 上下移动
+                                if new_pos[1] > self.config.narrow_y:
+                                    new_pos[1] = self.config.narrow_y
+                                elif new_pos[1] < -self.config.narrow_y:
+                                    new_pos[1] = -self.config.narrow_y
+                        elif old_pos[0] >= self.config.normal_x: # 在右侧宽区域
+                            if new_pos[0] > self.config.max_absolute_x:
+                                new_pos[0] = self.config.max_absolute_x
+                            elif new_pos[0] < self.config.normal_x:
+                                new_pos[0] = self.config.normal_x
+                        else: # 在左侧宽区域
+                            if action in [0, 1]:  # 左右移动
+                                if new_pos[0] < -self.config.max_absolute_x:
+                                    new_pos[0] = -self.config.max_absolute_x
+                                elif new_pos[0] > -self.config.normal_x:
+                                    new_pos[0] = -self.config.normal_x                    
+                    else:  # 矩形边界
+                        # 如果超出x方向边界，根据动作方向进行反弹或滑行
+                        if action in [0, 1]:  # 左右移动
+                            if new_pos[0] > self.config.max_absolute_x:
+                                new_pos[0] = self.config.max_absolute_x
+                            elif new_pos[0] < -self.config.max_absolute_x:
+                                new_pos[0] = -self.config.max_absolute_x
+                        # 如果超出y方向边界，根据动作方向进行反弹或滑行
+                        if action in [2, 3]:  # 上下移动
+                            if new_pos[1] > self.config.max_absolute_y:
+                                new_pos[1] = self.config.max_absolute_y
+                            elif new_pos[1] < -self.config.max_absolute_y:
+                                new_pos[1] = -self.config.max_absolute_y
+        
+        return new_pos
 
     def _world_to_screen(self, x: float, y: float) -> tuple[float, float]:
         """将世界坐标转换为屏幕坐标"""
@@ -551,6 +627,73 @@ class raw_env(AECEnv):
             pygame.draw.circle(self.screen, (0, 150, 0), 
                              (center_x, center_y), int(inner_radius), 2)
 
+    def step(self, action):
+        """环境步进，支持并行执行"""
+        if (
+            self.terminations[self.agent_selection]
+            or self.truncations[self.agent_selection]
+        ):
+            return self._was_dead_step(action)
+        
+        agent = self.agent_selection
+        
+        # 缓存当前智能体的动作
+        self.cached_actions[agent] = action
+        
+        # 如果所有智能体都已经选择了动作，执行并行更新
+        if len(self.cached_actions) == len(self.agents):
+            # 同时更新所有智能体的位置
+            for agent_name, act in self.cached_actions.items():
+                agent_idx = self.agent_name_mapping[agent_name]
+                new_pos = self.current_positions[agent_idx].copy()
+                
+                # 记录原始位置
+                old_pos = new_pos.copy()
+                
+                if act == 0:  # 向左移动
+                    new_pos[0] -= self.move_size
+                elif act == 1:  # 向右移动
+                    new_pos[0] += self.move_size
+                elif act == 2:  # 向上移动
+                    new_pos[1] += self.move_size
+                elif act == 3:  # 向下移动
+                    new_pos[1] -= self.move_size
+                
+                # 处理边界问题
+                new_pos = self._handle_boundary(new_pos, old_pos, act)
+                
+                # 更新位置
+                self.current_positions[agent_idx] = new_pos
+            
+            # 计算奖励
+            reward = self._calculate_reward()
+            
+            # 更新所有智能体的奖励
+            for agent_name in self.agents:
+                self.rewards[agent_name] = reward
+            
+            # 清空动作缓存
+            self.cached_actions.clear()
+            
+            # 更新步数
+            self.step_count += 1
+            if self.step_count >= self.max_steps:
+                self.truncations = {agent: True for agent in self.agents}
+        
+        # 更新观察空间
+        self._last_obs = self._get_obs()
+        
+        # 选择下一个智能体
+        self.agent_selection = self._agent_selector.next()
+        
+        # 渲染环境
+        if self.render_mode == "human":
+            self.render()
+        elif self.render_mode == "text":
+            self.report()
+        
+        return self._last_obs
+
     def render(self):
         """使用 Pygame 渲染环境"""
         if self.render_mode is None:
@@ -615,7 +758,17 @@ class raw_env(AECEnv):
             text_rect.center = (int(screen_x), int(screen_y) - 20)
             self.screen.blit(text_surface, text_rect)
             
-            pos_text = f"({pos[0]:.1f}, {pos[1]:.1f})"
+            # 获取当前动作
+            action_name = {
+                0: "L",  # 左
+                1: "R",  # 右
+                2: "U",  # 上
+                3: "D",  # 下
+                4: "S"   # 不动
+            }.get(self.cached_actions.get(f"agent_{i}", 4), "S")
+            
+            # 绘制位置和动作
+            pos_text = f"({pos[0]:.1f}, {pos[1]:.1f}) - {action_name}"
             pos_surface = self.small_chinese_font.render(pos_text, True, (0, 0, 0))
             pos_rect = pos_surface.get_rect()
             pos_rect.center = (int(screen_x), int(screen_y) + 20)
@@ -651,3 +804,44 @@ class raw_env(AECEnv):
             import pygame
             pygame.quit()
             self.screen = None
+
+    def report(self):
+        """以文字形式输出环境状态"""
+        # 获取当前奖励值
+        reward = list(self.rewards.values())[0] if self.rewards else 0
+        
+        # 获取当前动作
+        current_actions = []
+        for agent in self.agents:
+            if agent in self.cached_actions:
+                action = self.cached_actions[agent]
+                action_name = {
+                    0: "L",  # 左
+                    1: "R",  # 右
+                    2: "U",  # 上
+                    3: "D",  # 下
+                    4: "S"   # 不动
+                }.get(action, "S")
+                current_actions.append(f"{agent}: {action_name}")
+        
+        # 获取当前智能体
+        current_agent = self.agent_selection
+        
+        # 计算最小距离
+        min_distance = float('inf')
+        for i in range(self.num_rebars):
+            for j in range(i + 1, self.num_rebars):
+                dist = np.linalg.norm(self.current_positions[i] - self.current_positions[j])
+                min_distance = min(min_distance, dist)
+        
+        # 输出状态信息
+        print("\n" + "="*50)
+        print(f"步数: {self.step_count}")
+        print(f"当前智能体: {current_agent}")
+        print(f"当前动作: {', '.join(current_actions)}")
+        print(f"奖励值: {reward:.3f}")
+        print(f"最小距离: {min_distance:.3f}")
+        print("\n智能体位置:")
+        for i, pos in enumerate(self.current_positions):
+            print(f"智能体{i}: ({pos[0]:.3f}, {pos[1]:.3f})")
+        print("="*50 + "\n")
