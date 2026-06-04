@@ -161,6 +161,14 @@ class StagedDirectSolver:
             self.cables.append(dict(o=cb, birth_i=birth_i, birth_j=birth_j, N0=cb.tension))
             self._areas[cb.id] = cb.A
 
+    def _orig_geom(self, i: int, j: int) -> tuple[float, float, float]:
+        """单元原始坐标下的长度与方向余弦（线性小位移参考）。"""
+        xi, yi = self.coords[i]
+        xj, yj = self.coords[j]
+        dx, dy = xj - xi, yj - yi
+        L = math.hypot(dx, dy)
+        return L, dx / L, dy / L
+
     def _incremental_loads(self, step: BuildStep) -> dict[int, np.ndarray]:
         """本步新增的增量荷载（仅本步引入的自重 UDL + 索预张力等效节点力）。"""
         dF: dict[int, np.ndarray] = {}
@@ -181,10 +189,7 @@ class StagedDirectSolver:
                 add(fr.j, feq_global[3:6])
         for cb in step.new_cables:
             if cb.tension != 0.0:
-                xi, yi = self.coords[cb.i]
-                xj, yj = self.coords[cb.j]
-                L = math.hypot(xj - xi, yj - yi)
-                c, s = (xj - xi) / L, (yj - yi) / L
+                _, c, s = self._orig_geom(cb.i, cb.j)
                 add(cb.i, np.array([cb.tension * c, cb.tension * s, 0.0]))
                 add(cb.j, np.array([-cb.tension * c, -cb.tension * s, 0.0]))
         return dF
@@ -215,10 +220,7 @@ class StagedDirectSolver:
                     K[ed[a], ed[b]] += kg[a, b]
         for cb in self.cables:
             o = cb["o"]
-            xi, yi = self.coords[o.i]
-            xj, yj = self.coords[o.j]
-            L = math.hypot(xj - xi, yj - yi)
-            c, s = (xj - xi) / L, (yj - yi) / L
+            L, c, s = self._orig_geom(o.i, o.j)
             ka = o.E * o.A / L
             bvec = np.array([-c, -s, c, s])
             kg4 = ka * np.outer(bvec, bvec)
@@ -259,10 +261,7 @@ class StagedDirectSolver:
         cforce, cstress = {}, {}
         for cb in self.cables:
             o = cb["o"]
-            xi, yi = self.coords[o.i]
-            xj, yj = self.coords[o.j]
-            L = math.hypot(xj - xi, yj - yi)
-            c, s = (xj - xi) / L, (yj - yi) / L
+            L, c, s = self._orig_geom(o.i, o.j)
             dui = self.u[o.i] - cb["birth_i"]
             duj = self.u[o.j] - cb["birth_j"]
             elong = c * (duj[0] - dui[0]) + s * (duj[1] - dui[1])
@@ -274,15 +273,27 @@ class StagedDirectSolver:
 
 # ============================================================ OpenSees 后端（线性，校核用）
 class StagedOpenSeesSolver:
-    """OpenSees 逐阶段后端（corotTruss + InitStrain + setNodeDisp 切线激活），执行同一 StagedPlan。
+    """OpenSees 逐阶段后端（setNodeDisp 切线激活），执行同一 StagedPlan。
 
-    与 :mod:`bridgezoo.fem.opensees_staged` 同一稳健做法（几何精确）。自研直接刚度法为
-    线性小位移，二者在小位移下逐项吻合（成桥调索的目标即把位移压小）；在刻意放大的
-    大挠度算例下因几何非线性会有约 1% 量级差异。
+    拉索单元可切换（``cable_element``）：
+
+    - ``"linear"``（默认，研究初期）：普通线性 ``Truss``。OpenSees 中新建的 Truss 以
+      **创建时刻的变形构型**为零应变参考，故预张力直接 ``σ0 = T/A``（无需扣几何应变）。
+      此时与自研线性直接刚度法**逐项吻合到机器精度**，便于校核自研求解器。
+    - ``"corot"``（后续生产）：几何精确 ``corotTruss`` + ``InitStrain``。它以**原始节点
+      坐标**为参考，故预张力用 ``initStrain = T/(E·A) − ε_geo``。与线性自研解在小位移
+      下吻合，大挠度下体现几何非线性差异。
+
+    两种模式都用 setNodeDisp 切线激活实现梁节段零应力诞生。
     """
 
     name = "opensees"
     _TRANSF = 1
+
+    def __init__(self, cable_element: str = "linear"):
+        if cable_element not in ("linear", "corot"):
+            raise ValueError("cable_element 必须是 'linear' 或 'corot'")
+        self.cable_element = cable_element
 
     def run(self, plan: StagedPlan) -> StagedResult:
         import openseespy.opensees as ops
@@ -331,21 +342,26 @@ class StagedOpenSeesSolver:
         for fr in step.new_frames:
             ops.element("elasticBeamColumn", fr.id, fr.i, fr.j, fr.A, fr.E, fr.I, self._TRANSF)
         for cb in step.new_cables:
-            # corotTruss + InitStrain：使安装时刻轴力 = 目标张力 T（扣除几何应变）。
-            # 与 opensees_staged 同一稳健做法（corot 几何精确）；自研直接刚度法为线性，
-            # 二者在小位移下逐项吻合（成桥调索目标即压低位移）。
-            xi, yi = self.coords[cb.i]
-            xj, yj = self.coords[cb.j]
-            L0 = math.hypot(xj - xi, yj - yi)
-            uxi, uyi = ops.nodeDisp(cb.i, 1), ops.nodeDisp(cb.i, 2)
-            uxj, uyj = ops.nodeDisp(cb.j, 1), ops.nodeDisp(cb.j, 2)
-            Lcur = math.hypot((xj + uxj) - (xi + uxi), (yj + uyj) - (yi + uyi))
-            eps_geo = (Lcur - L0) / L0
-            init_strain = cb.tension / (cb.E * cb.A) - eps_geo
             emat, imat = 600000 + cb.id, 700000 + cb.id
             ops.uniaxialMaterial("Elastic", emat, cb.E)
-            ops.uniaxialMaterial("InitStrainMaterial", imat, emat, float(init_strain))
-            ops.element("corotTruss", cb.id, cb.i, cb.j, cb.A, imat)
+            if self.cable_element == "linear":
+                # 线性 Truss：以创建时刻变形构型为零应变参考 → σ0 = T/A（无需扣几何应变）。
+                # 与自研线性直接刚度法逐项一致（机器精度）。
+                sigma0 = cb.tension / cb.A
+                ops.uniaxialMaterial("InitStressMaterial", imat, emat, float(sigma0))
+                ops.element("Truss", cb.id, cb.i, cb.j, cb.A, imat)
+            else:
+                # corotTruss：以原始坐标为参考 → initStrain = T/(EA) − ε_geo。
+                xi, yi = self.coords[cb.i]
+                xj, yj = self.coords[cb.j]
+                L0 = math.hypot(xj - xi, yj - yi)
+                uxi, uyi = ops.nodeDisp(cb.i, 1), ops.nodeDisp(cb.i, 2)
+                uxj, uyj = ops.nodeDisp(cb.j, 1), ops.nodeDisp(cb.j, 2)
+                Lcur = math.hypot((xj + uxj) - (xi + uxi), (yj + uyj) - (yi + uyi))
+                eps_geo = (Lcur - L0) / L0
+                init_strain = cb.tension / (cb.E * cb.A) - eps_geo
+                ops.uniaxialMaterial("InitStrainMaterial", imat, emat, float(init_strain))
+                ops.element("corotTruss", cb.id, cb.i, cb.j, cb.A, imat)
             self._areas[cb.id] = cb.A
             self._cable_ids.append(cb.id)
 

@@ -41,7 +41,9 @@
 - [x] `staged.StagedPlan`：后端无关施工计划（节点切线附着 / 装段 / 张索）
 - [x] `staged.StagedDirectSolver`：自研直接刚度法的**增量变刚度**求解器（切线激活 +
   位移锁定 + 索力历程）——RL 内核
-- [x] `staged.StagedOpenSeesSolver`：OpenSees 后端（corotTruss）执行同一计划，校核用
+- [x] `staged.StagedOpenSeesSolver`：OpenSees 后端，**可切换索单元** `cable_element`：
+  `"linear"`（普通 Truss，与自研同为线性 → 研究初期逐项对照）/ `"corot"`（corotTruss
+  几何精确 → 后续生产）
 - [x] `scripts/validate_staged.py` + `tests/test_staged.py`：自研 vs OpenSees，stage-1
   误差 ~0.02%，大挠度算例 ~1.3%（线性 vs 几何精确，符合预期）
 

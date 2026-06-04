@@ -33,16 +33,16 @@ def default_pretension(n, seg_len, H, wg):
     return [wg * seg_len * math.hypot(i * seg_len, H) / H for i in range(1, n + 1)]
 
 
-def run(n: int, tol_rel: float) -> bool:
-    wg = 4.7e5
-    seg_len, H = 8.0, 20.0
+def run(n: int, tol_rel: float, cable_element: str = "linear", wg: float = 1.0e5) -> bool:
+    seg_len, H = 8.0, 65.0
     strands = [20] * n
     pre = default_pretension(n, seg_len, H, wg)
     plan = build_staged_cantilever(n_seg=n, seg_len=seg_len, tower_height=H, wg=wg,
                                    strands=strands, pretension=pre)
 
     rd = StagedDirectSolver().run(plan)
-    ro = StagedOpenSeesSolver().run(plan)
+    ro = StagedOpenSeesSolver(cable_element=cable_element).run(plan)
+    print(f"OpenSees 索单元：{cable_element}（linear=与自研逐项一致，corot=几何精确）")
 
     # 逐阶段挠度对比：打印各阶段"当前悬臂端"，误差在所有共同节点上取最大
     print("=== 当前悬臂端竖向挠度 (mm)：direct vs opensees ===")
@@ -87,11 +87,15 @@ def run(n: int, tol_rel: float) -> bool:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="逐阶段施工：自研 vs OpenSees 交叉校核")
-    parser.add_argument("--n", type=int, default=6)
-    parser.add_argument("--tol", type=float, default=2e-2,
-                        help="相对阈值；自研为线性、OpenSees 为几何精确，大挠度算例约 1~2%")
+    parser.add_argument("--n", type=int, default=12)
+    parser.add_argument("--wg", type=float, default=1.0e5, help="主梁自重线荷载 (N/m)；越大挠度越大")
+    parser.add_argument("--cable-element", choices=["linear", "corot"], default="linear",
+                        help="OpenSees 索单元：linear（与自研同为线性）/ corot（几何精确）")
+    parser.add_argument("--tol", type=float, default=None,
+                        help="相对阈值；缺省时 linear→2e-2，corot→5e-2（误差随挠度增大）")
     args = parser.parse_args()
-    sys.exit(0 if run(args.n, args.tol) else 1)
+    tol = args.tol if args.tol is not None else (2e-2 if args.cable_element == "linear" else 5e-2)
+    sys.exit(0 if run(args.n, tol, args.cable_element, args.wg) else 1)
 
 
 if __name__ == "__main__":
