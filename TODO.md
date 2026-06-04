@@ -36,14 +36,21 @@
 - [x] `scripts/validate_fem.py`：成桥工况两后端逐项对比 → **相对误差 ~1e-14，通过**
 - [x] `tests/test_linear_frame.py`：简支/悬臂解析解 + 单索预张力 + OpenSees 交叉校核
 
-**施工阶段（变刚度）—— OpenSees 侧已实现，自研侧待办**
+**施工阶段（变刚度 + 切线激活）✅**
 - [x] `opensees_staged`：切线激活 + 顺序加载（已验证 staged≠one-shot，索力历程）
-- [ ] 自研直接刚度法的**逐阶段变刚度**版本（切线激活/位移锁定）+ 与 opensees_staged 对比
-- [ ] `staged_builder.build_stages`（几何 → 施工阶段序列）
+- [x] `staged.StagedPlan`：后端无关施工计划（节点切线附着 / 装段 / 张索）
+- [x] `staged.StagedDirectSolver`：自研直接刚度法的**增量变刚度**求解器（切线激活 +
+  位移锁定 + 索力历程）——RL 内核
+- [x] `staged.StagedOpenSeesSolver`：OpenSees 后端（corotTruss）执行同一计划，校核用
+- [x] `scripts/validate_staged.py` + `tests/test_staged.py`：自研 vs OpenSees，stage-1
+  误差 ~0.02%，大挠度算例 ~1.3%（线性 vs 几何精确，符合预期）
+
+**剩余**
+- [ ] `staged_builder.build_stages`：由全桥 `BridgeGeometry` 生成施工阶段（对称双悬臂/合龙）
 - [ ] `tools/profile_fem.py`：单 episode 耗时基准 < 1~2 ms
 
-> 一次成桥（完成态）线性求解已闭环并通过机器精度校核；下一步把"变刚度逐阶段"
-> 也做进自研求解器并与 OpenSees 施工阶段结果对齐。
+> 一次成桥（机器精度一致）与逐阶段施工（小位移 ~0.02% 一致）两条线均已闭环。
+> 自研求解器可独立支撑 RL 训练，OpenSees 仅作离线校核。
 
 ---
 
