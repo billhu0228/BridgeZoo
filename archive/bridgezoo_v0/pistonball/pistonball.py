@@ -95,7 +95,7 @@ _image_library = {}
 
 FPS = 20
 
-__all__ = [ "env", "parallel_env", "raw_env"]
+__all__ = ["env", "parallel_env", "raw_env"]
 
 
 def get_image(path):
@@ -135,15 +135,9 @@ class raw_env(AECEnv, EzPickle):
             ball_mass=0.75,
             ball_friction=0.3,
             ball_elasticity=1.5,
-
-            beam_w=10.0,
-            beam_h=1.0,
-            num_cables_per_side=30,
-            anchor_height=80,
             max_cycles=125,
             render_mode=None,
             fps=10,
-            DEF_SCALE=10,
     ):
         EzPickle.__init__(
             self,
@@ -153,15 +147,9 @@ class raw_env(AECEnv, EzPickle):
             ball_mass=ball_mass,
             ball_friction=ball_friction,
             ball_elasticity=ball_elasticity,
-
-            beam_w=beam_w,
-            beam_h=beam_h,
-            num_cables_per_side=num_cables_per_side,
-            anchor_height=anchor_height,
             max_cycles=max_cycles,
             render_mode=render_mode,
             fps=fps,
-            DEF_SCALE=DEF_SCALE,
         )
         self.dt = 1.0 / FPS
         self.n_pistons = n_pistons
@@ -646,6 +634,7 @@ class raw_env(AECEnv, EzPickle):
 
             self.lastX = ball_min_x
             self.frames += 1
+            print(self.frames)
         else:
             self._clear_rewards()
 

@@ -4,10 +4,11 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bridgezoo"
-version = "0.0.7"
-description = "A Gymnasium style bridge environment."
+version = "0.1.0"
+description = "基于 MAPPO 的二维斜拉桥正向施工调索强化学习研究框架"
 readme = "README.md"
 license = { file = "LICENCE" }
+requires-python = ">=3.10"
 authors = [
     { name = "BillHu", email = "billhu0228@icloud.com" }
 ]
@@ -15,15 +16,32 @@ maintainers = [
     { name = "BillHu", email = "billhu0228@icloud.com" }
 ]
 dependencies = [
-    "pygame>=2.6.1",
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "torch>=2.0",
+    "gymnasium>=0.29",
     "pettingzoo>=1.24.3",
+    "pygame>=2.6.1",
     "ezdxf>=1.3.4",
-    "openseespy>=3.5.0.0"
+    "tensorboard>=2.13",
+    "matplotlib>=3.7",
 ]
 
-[tool.setuptools.packages.find]
-where = ["."]
+[project.optional-dependencies]
+# FEM 校核所需（仅离线对比用，非训练主线）
+ref = ["openseespy>=3.5.0.0"]
+# 开发 / 测试
+dev = ["pytest>=7.0", "pytest-cov>=4.0"]
 
 [project.urls]
 homepage = "https://github.com/billhu0228/BridgeZOO"
 repository = "https://github.com/billhu0228/BridgeZOO"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["bridgezoo*"]
+exclude = ["archive*", "tests*", "scripts*", "tools*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"

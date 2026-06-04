@@ -1,0 +1,7 @@
+# 开发 / 测试依赖
+-r requirements.txt
+pytest>=7.0
+pytest-cov>=4.0
+
+# FEM 校核（线性求解器 vs OpenSees）
+openseespy>=3.5.0.0

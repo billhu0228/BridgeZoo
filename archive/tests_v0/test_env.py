@@ -1,6 +1,6 @@
 import numpy as np
 
-from bridgezoo import cablebridge_v2
+from bridgezoo import cablebridge_v2, pistonball_v6
 
 
 def run(env_func, num_games, **kwargs):
@@ -14,14 +14,9 @@ def run(env_func, num_games, **kwargs):
             for a in env.agents:
                 rewards[a] += env.rewards[a]
             if termination or truncation:
-                break
+                act = None
             else:
                 act = env.unwrapped.action_space(agent).sample()
-            # action = np.array([0.999,])
-            # action = np.clip(action, -0.999, 0.999)
-            # action = action.reshape(
-            #     1,
-            # )
             env.step(act)
         print(rewards)
     env.close()
@@ -40,5 +35,5 @@ if __name__ == "__main__":
         fps=10,
     )
 
-    env_kwargs['render_mode'] = 'text'
+    env_kwargs["render_mode"] = "human"
     run(env_fn, num_games=1, **env_kwargs)
