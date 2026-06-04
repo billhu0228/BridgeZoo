@@ -43,3 +43,7 @@ htmlcov/
 Thumbs.db
 
 # 注：.idea/ 暂保留在版本控制中（历史已跟踪），如需移出见 TODO.md
+
+# 脚本生成的示例图（建议用 --plot results/xxx.png 输出到 results/）
+/scripts/*.png
+/*.png

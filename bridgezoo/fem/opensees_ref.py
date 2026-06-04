@@ -18,7 +18,10 @@ import sys
 from contextlib import contextmanager
 
 import ezdxf
-from openseespy.opensees import *  # noqa: F401,F403  (OpenSees 全局函数式 API)
+
+# 说明：openseespy 为可选重依赖（且其编译 DLL 对 Python 版本敏感）。这里**不在模块顶层
+# 导入**，而是在真正求解时（FEM.opensees 内）惰性导入 ``import openseespy.opensees as ops``，
+# 这样在没有/无法加载 openseespy 的环境里仍可 import 本模块、组装模型（build_oneshot_fem）。
 
 
 @contextmanager
@@ -106,68 +109,134 @@ class FEM:
 
         求解失败时返回全零列表（与历史行为一致）。
         """
+        import openseespy.opensees as ops  # 惰性导入：仅求解时需要 openseespy
+
         with suppress_openseespy_output(True):
-            wipe()
-            model("basic", "-ndm", 2, "-ndf", 3)
+            ops.wipe()
+            ops.model("basic", "-ndm", 2, "-ndf", 3)
             for nd in self.nodes:
-                node(nd["id"], nd["x"], nd["y"])
+                ops.node(nd["id"], nd["x"], nd["y"])
                 if nd["id"] > 1000:
-                    fix(nd["id"], 1, 1, 1)
-            fix(1, 0, 1, 0)  # 桥台
-            fix(self.cab_per_side // 2 + 2, 0, 1, 0)  # 索塔
-            fix(self.cab_per_side + 3, 1, 0, 1)  # 跨中
-            fix(self.cab_per_side // 2 * 3 + 4, 0, 1, 0)  # 索塔
-            fix(self.cab_per_side * 2 + 5, 0, 1, 0)  # 桥台
-            geomTransf("Linear", 1)
+                    ops.fix(nd["id"], 1, 1, 1)
+            ops.fix(1, 0, 1, 0)  # 桥台
+            ops.fix(self.cab_per_side // 2 + 2, 0, 1, 0)  # 索塔
+            ops.fix(self.cab_per_side + 3, 1, 0, 1)  # 跨中
+            ops.fix(self.cab_per_side // 2 * 3 + 4, 0, 1, 0)  # 索塔
+            ops.fix(self.cab_per_side * 2 + 5, 0, 1, 0)  # 桥台
+            ops.geomTransf("Linear", 1)
             A = self.materials[1]["A"]
             E = self.materials[1]["E"]
             Iz = self.materials[1]["I"]
             # 定义拉索属性
             Es = 1.95e11  # 弹性模量，单位：Pa (N/m²)
             As = 0.00014
-            uniaxialMaterial("Elastic", 2, Es)
+            ops.uniaxialMaterial("Elastic", 2, Es)
             for ed in self.elements:
                 if ed["type"] == 1:
-                    element("elasticBeamColumn", ed["id"], ed["node1"], ed["node2"], A, E, Iz, 1)
+                    ops.element("elasticBeamColumn", ed["id"], ed["node1"], ed["node2"], A, E, Iz, 1)
                 else:
                     n1 = next(n for n in self.nodes if n["id"] == ed["node1"])
                     mat = self.materials[n1["id"] % 1000 + 1000]
-                    uniaxialMaterial("InitStressMaterial", ed["id"], 2, float(mat["sigma"] * 1e6))
+                    ops.uniaxialMaterial("InitStressMaterial", ed["id"], 2, float(mat["sigma"] * 1e6))
                     area = As * mat["Ns"]  # 截面面积，单位：m²
-                    element("corotTruss", ed["id"], ed["node1"], ed["node2"], area, ed["id"])
+                    ops.element("corotTruss", ed["id"], ed["node1"], ed["node2"], area, ed["id"])
             # 设置均布荷载
-            timeSeries("Linear", 1)
-            pattern("Plain", 1, 1)
+            ops.timeSeries("Linear", 1)
+            ops.pattern("Plain", 1, 1)
             for i in range(1, self.cab_per_side * 2 + 4):
-                eleLoad("-ele", i, "-type", "-beamUniform", -self.Wg)
-            system("ProfileSPD")
-            constraints("Plain")
-            numberer("RCM")
-            test("NormUnbalance", 1.0e-6, 100, 2)
+                ops.eleLoad("-ele", i, "-type", "-beamUniform", -self.Wg)
+            ops.system("ProfileSPD")
+            ops.constraints("Plain")
+            ops.numberer("RCM")
+            ops.test("NormUnbalance", 1.0e-6, 100, 2)
             steps = 100
-            integrator("LoadControl", 1.0 / steps)
-            algorithm("Newton")
-            analysis("Static")
-            ret = analyze(steps)
+            ops.integrator("LoadControl", 1.0 / steps)
+            ops.algorithm("Newton")
+            ops.analysis("Static")
+            ret = ops.analyze(steps)
             res = []
             e_res = []
             for nd in self.nodes:
                 if nd["id"] < 1000:
-                    res.append(nodeDisp(nd["id"])[1])
+                    res.append(ops.nodeDisp(nd["id"])[1])
             for i in range(self.cab_per_side // 2):
                 eid = 1001 + i
-                fx, fy = eleForce(eid)[0:2]
+                fx, fy = ops.eleForce(eid)[0:2]
                 mat = self.materials[eid]
                 sig = (fx ** 2 + fy ** 2) ** 0.5 / (mat["Ns"] * As)
                 e_res.append(sig * 1e-6)
             for i in range(self.cab_per_side // 2):
                 eid = 2000 + self.cab_per_side // 2 - i
-                fx, fy = eleForce(eid)[0:2]
+                fx, fy = ops.eleForce(eid)[0:2]
                 mat = self.materials[eid]
                 sig = (fx ** 2 + fy ** 2) ** 0.5 / (mat["Ns"] * As)
                 e_res.append(sig * 1e-6)
 
-            wipe()
+            ops.wipe()
             if ret != 0:
                 return [0 for _ in res], [0 for _ in res]
             return res, e_res
+
+
+def build_oneshot_fem(geometry, cable_sigma, cable_sizes):
+    """由 :class:`bridgezoo.envs.geometry.BridgeGeometry` 组装一次成桥 :class:`FEM`。
+
+    节点/单元/材料编号约定与历史 ``extract_fem_model`` 完全一致（见 geometry.py 文档），
+    以保证与历史结果及自写求解器可交叉校核。
+
+    Parameters
+    ----------
+    geometry : BridgeGeometry
+        桥梁几何（提供 x_positions、塔顶锚点、截面/材料、自重 wg 等）。
+    cable_sigma : Sequence[float]
+        长度 N（=num_cables_per_side）的各索初应力 (MPa)。
+    cable_sizes : Sequence[float|int]
+        长度 N 的各索股数。
+
+    Returns
+    -------
+    FEM
+    """
+    N = geometry.num_cables_per_side
+    nbp = geometry.num_beam_points  # = N + 3
+
+    fem = FEM(N, geometry.wg, cable_sigma)
+
+    # 梁节点（id 1..2N+5，按 x 升序）与梁单元（id 1..2N+4）
+    for i, x in enumerate(geometry.x_positions):
+        fem.add_node(i + 1, float(x), 0.0)
+    for i in range(len(geometry.x_positions) - 1):
+        fem.add_element(i + 1, i + 1, i + 2, 1, 1)  # 梁单元，类型1，材料1
+
+    # 索塔锚点 + 拉索单元（左塔 1001+i / 2001+i，右塔 3001+i / 4001+i）
+    for i in range(N // 2):
+        lx, ly = float(geometry.left_tower_pts[i, 0]), float(geometry.left_tower_pts[i, 1])
+        rx, ry = float(geometry.right_tower_pts[i, 0]), float(geometry.right_tower_pts[i, 1])
+        fem.add_node(1001 + i, lx, ly)
+        fem.add_node(3001 + i, rx, ry)
+
+        beam_index_left = i + 2
+        beam_index_right = nbp + 1
+        fem.add_element(1001 + i, 1001 + i, beam_index_left, 2, 1001 + i)
+        fem.add_element(2001 + i, 1001 + i, nbp - 1 - i, 2, 1001 + i)
+        fem.add_element(3001 + i, 3001 + i, beam_index_right + i, 2, 1001 + i)
+        fem.add_element(4001 + i, 3001 + i, nbp * 2 - 2 - i, 2, 1001 + i)
+
+        fem.add_material(1001 + i, {"Ns": cable_sizes[i], "sigma": cable_sigma[i]})
+        fem.add_material(2001 + i, {"Ns": cable_sizes[N - 1 - i], "sigma": cable_sigma[N - 1 - i]})
+        fem.add_material(3001 + i, {"Ns": cable_sizes[i], "sigma": cable_sigma[i]})
+        fem.add_material(4001 + i, {"Ns": cable_sizes[N - 1 - i], "sigma": cable_sigma[N - 1 - i]})
+
+    fem.add_element_type(1, "Beam")
+    fem.add_element_type(2, "Cable")
+    fem.add_material(
+        1,
+        {
+            "E": geometry.beam_E,
+            "A": geometry.beam_area,
+            "I": geometry.beam_Iz,
+            "W": geometry.beam_w,
+            "H": geometry.beam_h,
+        },
+    )
+    return fem
