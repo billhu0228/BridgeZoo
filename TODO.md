@@ -26,16 +26,24 @@
 
 ---
 
-## M1 —— 线性变刚度求解器（项目基石）
+## M1 —— 线性求解器（项目基石）
 
-- [ ] `linear_frame.FrameElement.local_stiffness`（梁单元刚度 + 坐标变换）
-- [ ] `linear_frame.CableElement.axial_stiffness`（索轴向刚度）
-- [ ] `StagedFrameModel.activate / apply_incremental_load / apply_cable_pretension`
-- [ ] `StagedFrameModel.solve_increment / accumulate`（增量求解 + 位移锁定）
-- [ ] `staged_builder.build_stages`（几何 → 施工阶段序列，编号与 OpenSees 一致）
-- [ ] `tests/test_linear_frame.py`：简支梁/单索解析解、逐阶段 vs OpenSees
-- [ ] `scripts/validate_fem.py`：误差表，达标阈值（位移 2% / 索力 3%）→ 论文 E1
-- [ ] `tools/profile_fem.py`：单 episode < 1~2 ms
+**后端无关架构（一套结构定义，两种后端，结果一致）✅**
+- [x] `model.StructuralModel` / `SolveResult`：与求解器无关的结构 IR
+- [x] `builder.build_cable_bridge`：由 `BridgeGeometry` 构建结构模型
+- [x] `linear_frame.DirectStiffnessSolver`：自研二维直接刚度法（梁+索+均布荷载+预张力）
+- [x] `opensees_backend.OpenSeesSolver`：OpenSees 线性后端（Truss+InitStress，对照用）
+- [x] `scripts/validate_fem.py`：成桥工况两后端逐项对比 → **相对误差 ~1e-14，通过**
+- [x] `tests/test_linear_frame.py`：简支/悬臂解析解 + 单索预张力 + OpenSees 交叉校核
+
+**施工阶段（变刚度）—— OpenSees 侧已实现，自研侧待办**
+- [x] `opensees_staged`：切线激活 + 顺序加载（已验证 staged≠one-shot，索力历程）
+- [ ] 自研直接刚度法的**逐阶段变刚度**版本（切线激活/位移锁定）+ 与 opensees_staged 对比
+- [ ] `staged_builder.build_stages`（几何 → 施工阶段序列）
+- [ ] `tools/profile_fem.py`：单 episode 耗时基准 < 1~2 ms
+
+> 一次成桥（完成态）线性求解已闭环并通过机器精度校核；下一步把"变刚度逐阶段"
+> 也做进自研求解器并与 OpenSees 施工阶段结果对齐。
 
 ---
 

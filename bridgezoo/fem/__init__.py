@@ -1,15 +1,30 @@
 """结构有限元求解子包。
 
-包含两套求解器，职责分离：
+**一套结构定义，两种求解后端，结果一致**（用于校核自研求解器）：
 
-- :mod:`bridgezoo.fem.linear_frame` —— 自写轻量线性 2D 框架求解器（**RL 内核**，
-  追求速度），支持每施工阶段重装配刚度矩阵、线性增量求解并累加锁定位移。
-- :mod:`bridgezoo.fem.staged_builder` —— 由桥梁几何参数生成施工阶段序列与每阶段
-  激活的节点/单元集合。
-- :mod:`bridgezoo.fem.opensees_ref` —— 基于 OpenSeesPy 的"一次成桥"参考求解器，
-  **仅用于正确性校核**，不进入 RL 训练回路。
+- :mod:`bridgezoo.fem.model` —— 与求解器无关的结构模型 IR（``StructuralModel`` /
+  ``SolveResult``）。
+- :mod:`bridgezoo.fem.builder` —— 由 ``BridgeGeometry`` 构建 ``StructuralModel``。
+- :mod:`bridgezoo.fem.linear_frame` —— 自研二维直接刚度法后端（``DirectStiffnessSolver``）。
+- :mod:`bridgezoo.fem.opensees_backend` —— OpenSees 后端（``OpenSeesSolver``），线性公式，
+  用于交叉校核。
+- :mod:`bridgezoo.fem.opensees_staged` —— 施工阶段（切线激活、几何非线性）OpenSees 模型。
+- :mod:`bridgezoo.fem.opensees_ref` —— 历史"一次成桥"参考求解器（corotTruss）。
+- :mod:`bridgezoo.fem.staged_builder` —— 施工阶段序列（骨架，M1/M2）。
 
-参见 ``docs/DESIGN_MAPPO.md`` 第 3、4 节。
+参见 ``docs/DESIGN_MAPPO.md`` 第 3、4 节、``docs/ARCHITECTURE.md``。
 """
 
-__all__ = ["linear_frame", "staged_builder", "opensees_ref"]
+from bridgezoo.fem.model import StructuralModel, SolveResult
+
+__all__ = [
+    "StructuralModel",
+    "SolveResult",
+    "model",
+    "builder",
+    "linear_frame",
+    "opensees_backend",
+    "opensees_staged",
+    "opensees_ref",
+    "staged_builder",
+]

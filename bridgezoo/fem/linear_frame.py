@@ -1,170 +1,207 @@
-"""自写轻量线性 2D 框架求解器（RL 内核，里程碑 M1）。
+"""自研轻量二维直接刚度法求解器（求解后端之一）。
 
-设计动机
---------
-MAPPO 训练需要数十万~数百万次环境步，每步都要做结构分析。若每步重建 OpenSees
-模型，开销不可接受。本模块用直接刚度法（direct stiffness method）实现一个**线性**
-2D 框架求解器，单次装配 + 求解控制在毫秒级。
+消费 :class:`bridgezoo.fem.model.StructuralModel`，返回 :class:`bridgezoo.fem.model.SolveResult`，
+与 :mod:`bridgezoo.fem.opensees_backend` 接口一致、结果应一致（用于交叉校核）。
 
-核心物理点（务必遵守）
-----------------------
-正向逐阶段施工中，**结构刚度矩阵 K 随施工阶段与拉索股数不断变化**：
+单元
+----
+- 梁：2D Euler-Bernoulli 框架单元，局部 6 自由度 ``[u_i, v_i, θ_i, u_j, v_j, θ_j]``，
+  含轴向 + 弯曲刚度，按单元方向角做坐标变换。
+- 索：仅受轴力的二节点杆，按方向余弦组装到两端平动自由度；初始轴力（预张力）以
+  等效节点力施加，最终索力 = 预张力 + EA/L·轴向伸长。
 
-1. 每进入一个新阶段，新增的梁段/索按**上一阶段变形后的构型**接入（新单元的无应力
-   长度在安装时刻定义，之后的增量才使其受力 —— 实现位移"锁定"/lock-in）。
-2. 用当前激活集合（含当前股数 → 当前索面积）**重新装配** ``K_k``。
-3. 组装本阶段**增量荷载** ``ΔF_k``（新增梁段自重 + 本阶段张拉等效力）。
-4. 解 ``K_k · Δu_k = ΔF_k``（稀疏直接法，缓存符号结构）。
-5. **累加** ``u ← u + Δu_k``，并更新各索轴力。
+荷载
+----
+- 节点荷载直接进入荷载向量。
+- 梁单元局部横向均布荷载 :class:`MemberUDL`：采用**一致等效节点荷载**（fixed-end），
+  保证节点位移与 OpenSees ``eleLoad -beamUniform`` 一致；单元端力回收时扣除等效项。
 
-因此不能用脱离动作的单一全局影响矩阵；但每阶段拓扑固定、规模很小，逐阶段线性求解
-即可。固定股数下张拉→响应是线性的，可选地为加速预计算"每阶段张拉影响矩阵"。
+仅依赖 numpy；规模小（DOF<~数百）用稠密直接求解即可，后续大模型可换 scipy.sparse。
+本求解器面向**线性、小位移**分析（成桥/单阶段）；逐阶段变刚度的扩展见 staged_builder。
 
-单元约定
---------
-- 节点：3 自由度 (u, v, θ)。
-- 梁：Euler-Bernoulli 框架单元，参数 (EA, EI, L)。
-- 索：二节点桁架（只受拉），等效轴向刚度 ``E_s * A_s * n``，张拉以初应变/等效节点
-  力施加；求解后轴力 ≤ 0 视为松弛（交由环境层做安全惩罚，本求解器只如实返回）。
-
-参见 ``docs/DESIGN_MAPPO.md`` 第 3、4 节。校核见 ``scripts/validate_fem.py``。
+参见 ``docs/DESIGN_MAPPO.md`` 第 4 节。
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Iterable
+import math
 
 import numpy as np
 
-# TODO(M1): 大模型时切换为 scipy.sparse + splu；当前规模 (DOF<~150) 稠密即可。
+from bridgezoo.fem.model import SolveResult, StructuralModel
 
 
-@dataclass
-class Node:
-    """节点：编号、平面坐标，以及全局自由度索引 (u, v, θ)。"""
-
-    id: int
-    x: float
-    y: float
-    dofs: tuple[int, int, int] | None = None
-
-
-@dataclass
-class FrameElement:
-    """梁单元（Euler-Bernoulli），属性 EA、EI。"""
-
-    id: int
-    n1: int
-    n2: int
-    EA: float
-    EI: float
-
-    def local_stiffness(self, dx: float, dy: float):
-        """返回该单元在全局坐标系下的 6x6 刚度矩阵。
-
-        TODO(M1): 标准框架单元刚度 + 坐标变换 T^T k T。
-        """
-        raise NotImplementedError("TODO(M1): FrameElement.local_stiffness")
+def _frame_local_stiffness(E, A, I, L):
+    """2D 框架单元局部刚度矩阵 (6x6)，DOF 顺序 [u_i,v_i,θ_i,u_j,v_j,θ_j]。"""
+    EA_L = E * A / L
+    EI = E * I
+    L2, L3 = L * L, L * L * L
+    k = np.zeros((6, 6))
+    # 轴向
+    k[0, 0] = k[3, 3] = EA_L
+    k[0, 3] = k[3, 0] = -EA_L
+    # 弯曲 + 剪切（Euler-Bernoulli）
+    k[1, 1] = k[4, 4] = 12 * EI / L3
+    k[1, 4] = k[4, 1] = -12 * EI / L3
+    k[1, 2] = k[2, 1] = 6 * EI / L2
+    k[1, 5] = k[5, 1] = 6 * EI / L2
+    k[4, 2] = k[2, 4] = -6 * EI / L2
+    k[4, 5] = k[5, 4] = -6 * EI / L2
+    k[2, 2] = k[5, 5] = 4 * EI / L
+    k[2, 5] = k[5, 2] = 2 * EI / L
+    return k
 
 
-@dataclass
-class CableElement:
-    """索单元（二节点桁架）。
+def _frame_transform(c, s):
+    """单元坐标变换矩阵 T (6x6)，使 d_local = T @ d_global。"""
+    T = np.zeros((6, 6))
+    R = np.array([[c, s, 0.0], [-s, c, 0.0], [0.0, 0.0, 1.0]])
+    T[0:3, 0:3] = R
+    T[3:6, 3:6] = R
+    return T
 
-    ``area = A_s * n`` 随股数 ``n`` 变化，故会改变全局刚度矩阵。``pretension`` 为
-    安装/张拉时刻施加的初张力 (N)，以等效节点力 + 初应变方式进入增量荷载。
+
+def _udl_fixed_end_local(wy, L):
+    """局部横向均布荷载 wy 的一致等效节点荷载向量 (6,)。
+
+    ``[0, wy*L/2, wy*L^2/12, 0, wy*L/2, -wy*L^2/12]``（与 OpenSees beamUniform Wy 一致）。
     """
-
-    id: int
-    n1: int
-    n2: int
-    Es: float
-    area: float
-    pretension: float = 0.0
-
-    def axial_stiffness(self, dx: float, dy: float):
-        """返回该索在全局坐标系下的 4x4 轴向刚度矩阵（仅平动自由度）。
-
-        TODO(M1): k = (Es*area/L) * 外积(方向余弦)。
-        """
-        raise NotImplementedError("TODO(M1): CableElement.axial_stiffness")
+    return np.array([0.0, wy * L / 2.0, wy * L * L / 12.0, 0.0, wy * L / 2.0, -wy * L * L / 12.0])
 
 
-@dataclass
-class StagedFrameModel:
-    """逐阶段（变刚度）线性框架求解器。
+class DirectStiffnessSolver:
+    """二维直接刚度法线性静力求解后端。"""
 
-    典型用法（环境层每个施工阶段调用一次）::
+    name = "direct"
 
-        m = StagedFrameModel()
-        m.add_node(...); m.add_frame(...); m.add_cable(...)
-        m.set_support(node_id, ux, uy, rz)
-        m.activate(stage_elements)            # 本阶段激活的单元集合
-        m.apply_incremental_load(dF)          # 新增自重等
-        m.apply_cable_pretension(elem_id, T)  # 本阶段张拉
-        du = m.solve_increment()              # 解 K_k Δu = ΔF_k
-        u_total, cable_forces = m.accumulate()
+    def solve(self, model: StructuralModel) -> SolveResult:
+        nodes = list(model.nodes.values())
+        node_ids = [n.id for n in nodes]
+        idx = {nid: k for k, nid in enumerate(node_ids)}  # node id -> 0..nnode-1
+        ndof = 3 * len(nodes)
 
-    Notes
-    -----
-    - ``self.u`` 维护累加的总位移；``solve_increment`` 只解增量并叠加。
-    - 每次 ``activate`` 后重建自由度映射与刚度矩阵（刚度随阶段/股数变化）。
-    """
+        K = np.zeros((ndof, ndof))
+        F = np.zeros(ndof)
 
-    nodes: dict[int, Node] = field(default_factory=dict)
-    frames: dict[int, FrameElement] = field(default_factory=dict)
-    cables: dict[int, CableElement] = field(default_factory=dict)
-    supports: dict[int, tuple[bool, bool, bool]] = field(default_factory=dict)
-    active: set[int] = field(default_factory=set)
-    u: np.ndarray | None = None  # 累加总位移 (n_dof,)
+        def dofs_of(nid):
+            b = 3 * idx[nid]
+            return [b, b + 1, b + 2]
 
-    # ------------------------------------------------------------------ 建模
-    def add_node(self, node_id: int, x: float, y: float) -> None:
-        self.nodes[node_id] = Node(node_id, x, y)
+        # ---------- 组装梁单元 ----------
+        for m in model.frames.values():
+            xi, yi = model.node_xy(m.i)
+            xj, yj = model.node_xy(m.j)
+            dx, dy = xj - xi, yj - yi
+            L = math.hypot(dx, dy)
+            c, s = dx / L, dy / L
+            kl = _frame_local_stiffness(m.E, m.A, m.I, L)
+            T = _frame_transform(c, s)
+            kg = T.T @ kl @ T
+            ed = dofs_of(m.i) + dofs_of(m.j)
+            for a in range(6):
+                for b in range(6):
+                    K[ed[a], ed[b]] += kg[a, b]
+            # 单元均布荷载等效节点荷载
+            udl = model.member_udls.get(m.id)
+            if udl is not None:
+                feq_local = _udl_fixed_end_local(udl.wy, L)
+                feq_global = T.T @ feq_local
+                for a in range(6):
+                    F[ed[a]] += feq_global[a]
 
-    def add_frame(self, elem_id: int, n1: int, n2: int, EA: float, EI: float) -> None:
-        self.frames[elem_id] = FrameElement(elem_id, n1, n2, EA, EI)
+        # ---------- 组装索单元（轴力杆 + 预张力等效节点力）----------
+        for cab in model.cables.values():
+            xi, yi = model.node_xy(cab.i)
+            xj, yj = model.node_xy(cab.j)
+            dx, dy = xj - xi, yj - yi
+            L = math.hypot(dx, dy)
+            c, s = dx / L, dy / L
+            ka = cab.E * cab.A / L
+            b = np.array([-c, -s, c, s])
+            kg4 = ka * np.outer(b, b)
+            td = [dofs_of(cab.i)[0], dofs_of(cab.i)[1], dofs_of(cab.j)[0], dofs_of(cab.j)[1]]
+            for a in range(4):
+                for d in range(4):
+                    K[td[a], td[d]] += kg4[a, d]
+            # 预张力 N0：对 i 施加指向 j 的力，对 j 施加指向 i 的力
+            N0 = cab.pretension
+            if N0 != 0.0:
+                F[td[0]] += N0 * c
+                F[td[1]] += N0 * s
+                F[td[2]] += -N0 * c
+                F[td[3]] += -N0 * s
 
-    def add_cable(self, elem_id: int, n1: int, n2: int, Es: float, area: float) -> None:
-        self.cables[elem_id] = CableElement(elem_id, n1, n2, Es, area)
+        # ---------- 节点荷载 ----------
+        for nl in model.nodal_loads:
+            d = dofs_of(nl.node)
+            F[d[0]] += nl.fx
+            F[d[1]] += nl.fy
+            F[d[2]] += nl.mz
 
-    def set_support(self, node_id: int, ux: bool, uy: bool, rz: bool) -> None:
-        """设置约束（True 表示该方向固定）。"""
-        self.supports[node_id] = (ux, uy, rz)
+        # ---------- 约束 ----------
+        fixed = np.zeros(ndof, dtype=bool)
+        for sp in model.supports.values():
+            d = dofs_of(sp.node)
+            if sp.ux:
+                fixed[d[0]] = True
+            if sp.uy:
+                fixed[d[1]] = True
+            if sp.rz:
+                fixed[d[2]] = True
+        # 自动约束无刚度的自由转动自由度（如仅连索的自由节点），避免奇异
+        for p in range(ndof):
+            if not fixed[p] and abs(K[p, p]) < 1e-30 and np.allclose(K[p, :], 0.0):
+                fixed[p] = True
 
-    # -------------------------------------------------------------- 阶段求解
-    def activate(self, element_ids: Iterable[int]) -> None:
-        """设置当前阶段激活的单元集合并重建自由度编号/刚度结构。
+        free = np.where(~fixed)[0]
+        u = np.zeros(ndof)
+        converged = True
+        if free.size > 0:
+            Kff = K[np.ix_(free, free)]
+            Ff = F[free]
+            try:
+                u[free] = np.linalg.solve(Kff, Ff)
+            except np.linalg.LinAlgError:
+                converged = False
 
-        TODO(M1): 仅对激活单元涉及的节点编号自由度，组装当前 K_k。
-        """
-        raise NotImplementedError("TODO(M1): StagedFrameModel.activate")
+        # ---------- 结果回收 ----------
+        result = SolveResult(backend=self.name, converged=converged)
+        for n in nodes:
+            d = dofs_of(n.id)
+            result.disp[n.id] = (u[d[0]], u[d[1]], u[d[2]])
 
-    def apply_incremental_load(self, loads: dict[int, tuple[float, float, float]]) -> None:
-        """累加本阶段增量节点荷载 (Fx, Fy, Mz)。
+        for m in model.frames.values():
+            xi, yi = model.node_xy(m.i)
+            xj, yj = model.node_xy(m.j)
+            dx, dy = xj - xi, yj - yi
+            L = math.hypot(dx, dy)
+            c, s = dx / L, dy / L
+            kl = _frame_local_stiffness(m.E, m.A, m.I, L)
+            T = _frame_transform(c, s)
+            ed = dofs_of(m.i) + dofs_of(m.j)
+            d_global = u[ed]
+            d_local = T @ d_global
+            f_local = kl @ d_local
+            udl = model.member_udls.get(m.id)
+            if udl is not None:
+                f_local = f_local - _udl_fixed_end_local(udl.wy, L)
+            result.frame_force[m.id] = tuple(float(v) for v in f_local)
 
-        TODO(M1): 含梁段自重 -> 等效节点力（也可用单元均布荷载固端力）。
-        """
-        raise NotImplementedError("TODO(M1): StagedFrameModel.apply_incremental_load")
+        for cab in model.cables.values():
+            xi, yi = model.node_xy(cab.i)
+            xj, yj = model.node_xy(cab.j)
+            dx, dy = xj - xi, yj - yi
+            L = math.hypot(dx, dy)
+            c, s = dx / L, dy / L
+            di, dj = dofs_of(cab.i), dofs_of(cab.j)
+            elong = c * (u[dj[0]] - u[di[0]]) + s * (u[dj[1]] - u[di[1]])
+            N = cab.pretension + cab.E * cab.A / L * elong
+            result.cable_force[cab.id] = float(N)
+            result.cable_stress[cab.id] = float(N / cab.A)
 
-    def apply_cable_pretension(self, elem_id: int, tension: float) -> None:
-        """对指定索施加本阶段张拉力，折算为等效节点增量荷载。
+        return result
 
-        TODO(M1): 沿索方向施加 ±T 等效节点力，并记录用于轴力回算。
-        """
-        raise NotImplementedError("TODO(M1): StagedFrameModel.apply_cable_pretension")
 
-    def solve_increment(self) -> np.ndarray:
-        """解 ``K_k Δu_k = ΔF_k`` 并叠加到累加位移。返回本阶段增量 Δu。
-
-        TODO(M1): 施加边界条件 -> 缩减自由度 -> 直接求解 -> 还原 -> self.u += du。
-        """
-        raise NotImplementedError("TODO(M1): StagedFrameModel.solve_increment")
-
-    def accumulate(self) -> tuple[np.ndarray, dict[int, float]]:
-        """返回 (各梁节点累加竖向位移, {索单元id: 轴力})。
-
-        TODO(M1): 由 self.u 提取竖向位移；由索两端相对位移 + 初张力回算轴力。
-        """
-        raise NotImplementedError("TODO(M1): StagedFrameModel.accumulate")
+def solve(model: StructuralModel) -> SolveResult:
+    """便捷函数：用直接刚度法求解。"""
+    return DirectStiffnessSolver().solve(model)
