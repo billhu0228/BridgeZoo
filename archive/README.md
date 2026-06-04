@@ -5,7 +5,7 @@
 
 | 子目录 | 内容 |
 |--------|------|
-| `bridgezoo_v0/` | 旧 `bridgezoo` 包：`cablebridge/`（含一次成桥 `fem.py`、AEC 环境 `cablebridge2.py` 等）、`pistonball/`、`resection/` 及版本别名文件 |
+| `bridgezoo_v0/` | 旧 `bridgezoo` 包：`cablebridge/`（含一次成桥 `fem.py`、AEC 环境 `cablebridge2.py` 等）、`pistonball/`、`resection/`、`rebar/`（钢筋布置 RL 子项目）及版本别名文件 |
 | `tests_v0/` | 旧 `test/` 目录下的脚本与参考数据 |
 | `backup/` | 更早的零散实验脚本（多版本 cablebridge、di 环境、力学/求解试验等） |
 
