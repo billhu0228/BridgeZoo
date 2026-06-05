@@ -20,10 +20,11 @@
 BridgeZoo/
 ├── bridgezoo/                 # 主包
 │   ├── __init__.py            # 版本 / 包说明
-│   ├── fem/                   # 结构有限元
-│   │   ├── linear_frame.py    # ★自写线性变刚度求解器（RL 内核，M1）
-│   │   ├── staged_builder.py  # 几何 → 施工阶段序列（M1/M2）
-│   │   └── opensees_ref.py    # OpenSees 一次成桥参考解（仅校核）
+│   ├── fem/                   # 结构有限元（两种分析模式镜像对称）
+│   │   ├── model.py           # 求解器无关 IR（StructuralModel/SolveResult）
+│   │   ├── kernels.py         # 共享单元数值核（刚度/变换/等效荷载）
+│   │   ├── completed/         # 一次成桥：direct.py（★自写）+ opensees.py
+│   │   └── staged/            # 分阶段施工：plan/builder/direct/opensees/completed/sequence（★RL 内核）
 │   ├── envs/                  # 多智能体环境
 │   │   ├── geometry.py        # ★桥梁几何/截面（已实现，唯一真源）
 │   │   ├── cable_agent.py     # 索智能体状态/动作/观测（M2）
@@ -46,7 +47,7 @@ BridgeZoo/
 │   └── reference/simple_beam.mct  # MIDAS 校核参考
 ├── tests/                     # pytest（testpaths=["tests"]）
 │   ├── test_geometry.py       # ★已实现并通过
-│   ├── test_linear_frame.py   # skip → M1
+│   ├── test_completed_direct.py  # 直接刚度法解析解 + OpenSees 交叉校核
 │   ├── test_env.py            # skip → M2
 │   └── test_mappo.py          # skip → M3
 ├── docs/
@@ -87,5 +88,5 @@ step(actions)  // 每次推进一个施工阶段
 
 ## 编号约定（务必一致）
 
-`geometry.py` 文档中固定了梁/塔节点与梁/索单元的 id 约定，`linear_frame`、
-`staged_builder`、`opensees_ref` 三者必须共用同一套编号，否则无法交叉校核。
+成桥/施工两套模型各自固定梁/塔节点与梁/索单元的 id 约定（`staged.builder` 为施工模型真源，
+`completed/` 经 `staged.completed` 由同一施工计划派生），同模式内两后端必须共用同一套编号，否则无法交叉校核。

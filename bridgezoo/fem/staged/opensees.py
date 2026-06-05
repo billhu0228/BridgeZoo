@@ -11,12 +11,12 @@ import math
 
 import numpy as np
 
+from bridgezoo.fem.kernels import _gravity_feq_global
 from bridgezoo.fem.staged.plan import (
     StagedPlan,
     StagedResult,
     StagedStepRecord,
     _attach_geometry,
-    _gravity_feq_global,
 )
 
 

@@ -14,7 +14,11 @@ import math
 
 import numpy as np
 
-from bridgezoo.fem.linear_frame import _frame_local_stiffness, _frame_transform
+from bridgezoo.fem.kernels import (
+    _frame_local_stiffness,
+    _frame_transform,
+    _gravity_feq_global,
+)
 from bridgezoo.fem.staged.plan import (
     BalanceDof,
     BuildStep,
@@ -23,7 +27,6 @@ from bridgezoo.fem.staged.plan import (
     StagedResult,
     StagedStepRecord,
     _attach_geometry,
-    _gravity_feq_global,
 )
 
 

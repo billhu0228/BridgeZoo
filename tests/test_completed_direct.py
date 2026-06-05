@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 
 from bridgezoo.fem.model import StructuralModel
-from bridgezoo.fem.linear_frame import DirectStiffnessSolver
+from bridgezoo.fem.completed import CompletedDirectSolver
 
 
 E = 2.0e11
@@ -18,7 +18,7 @@ A = 1.0e-2
 
 
 def _solve(model):
-    return DirectStiffnessSolver().solve(model)
+    return CompletedDirectSolver().solve(model)
 
 
 # ----------------------------------------------------------- 解析解对比
@@ -87,8 +87,8 @@ def test_cable_bridge_matches_opensees():
     成桥模型由施工计划派生（单塔双悬臂半桥），与施工阶段模型同源。
     """
     pytest.importorskip("openseespy", reason="需要 openseespy")
-    from bridgezoo.fem.opensees_backend import OpenSeesSolver
-    from bridgezoo.fem.staged import build_oneshot_model, build_staged_cantilever
+    from bridgezoo.fem.completed import CompletedOpenSeesSolver
+    from bridgezoo.fem.staged import build_completed_model, build_staged_cantilever
 
     n, strand_area, strands = 6, 1.4e-4, 20
     pretension = 600.0 * 1e6 * strand_area * strands  # 初应力 600 MPa → 预张力
@@ -98,10 +98,10 @@ def test_cable_bridge_matches_opensees():
         strands=[strands] * n,
         pretension=[pretension] * n,
     )
-    model, _ = build_oneshot_model(plan)
+    model, _ = build_completed_model(plan)
 
-    rd = DirectStiffnessSolver().solve(model)
-    ro = OpenSeesSolver().solve(model)
+    rd = CompletedDirectSolver().solve(model)
+    ro = CompletedOpenSeesSolver().solve(model)
 
     # 竖向位移
     for nid in model.nodes:

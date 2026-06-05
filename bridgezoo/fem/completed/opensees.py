@@ -1,6 +1,6 @@
-"""OpenSees 求解后端：消费与求解器无关的 :class:`StructuralModel`。
+"""一次成桥（完成态）OpenSees 求解后端：消费与求解器无关的 :class:`StructuralModel`。
 
-与 :mod:`bridgezoo.fem.linear_frame`（自研直接刚度法）接口一致、结果应一致，用于
+与 :mod:`bridgezoo.fem.completed.direct`（自研直接刚度法）接口一致、结果应一致，用于
 **交叉校核自研求解器**。为保证可比性，本后端刻意采用与自研求解器相同的**线性、
 小位移**力学假设：
 
@@ -43,7 +43,7 @@ def _suppress(suppress=True):
             sys.stdout, sys.stderr = o, e
 
 
-class OpenSeesSolver:
+class CompletedOpenSeesSolver:
     """OpenSees 线性静力求解后端。"""
 
     name = "opensees"
@@ -124,4 +124,4 @@ class OpenSeesSolver:
 
 def solve(model: StructuralModel, verbose: bool = False) -> SolveResult:
     """便捷函数：用 OpenSees 求解。"""
-    return OpenSeesSolver(verbose=verbose).solve(model)
+    return CompletedOpenSeesSolver(verbose=verbose).solve(model)

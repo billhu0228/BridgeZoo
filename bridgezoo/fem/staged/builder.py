@@ -25,10 +25,10 @@ from __future__ import annotations
 from bridgezoo.fem.staged.plan import (
     BalanceDof,
     BuildStep,
+    CompletedState,
     NewCable,
     NewFrame,
     NewNode,
-    OneShotState,
     StagedPlan,
 )
 
@@ -137,12 +137,12 @@ def build_staged_cantilever(
         BalanceDof(sides[0]["tip"], 0, 0.0),
         BalanceDof(sides[0]["tip"], 2, 0.0),
     ], record=True))
-    plan.oneshot = _build_oneshot_state(plan, left_tip=sides[1]["tip"], right_tip=sides[0]["tip"])
+    plan.completed = _build_completed_state(plan, left_tip=sides[1]["tip"], right_tip=sides[0]["tip"])
 
     return plan
 
 
-def _build_oneshot_state(plan: StagedPlan, left_tip: int, right_tip: int) -> OneShotState:
+def _build_completed_state(plan: StagedPlan, left_tip: int, right_tip: int) -> CompletedState:
     nodes = list(plan.init_nodes)
     frames = []
     cables = []
@@ -160,7 +160,7 @@ def _build_oneshot_state(plan: StagedPlan, left_tip: int, right_tip: int) -> One
         (left_tip, False, True, False),
         (right_tip, True, False, True),
     ]
-    return OneShotState(
+    return CompletedState(
         nodes=nodes,
         frames=frames,
         cables=cables,

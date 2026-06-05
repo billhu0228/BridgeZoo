@@ -30,11 +30,11 @@
 
 **后端无关架构（一套结构定义，两种后端，结果一致）✅**
 - [x] `model.StructuralModel` / `SolveResult`：与求解器无关的结构 IR
-- [x] `builder.build_cable_bridge`：由 `BridgeGeometry` 构建结构模型
-- [x] `linear_frame.DirectStiffnessSolver`：自研二维直接刚度法（梁+索+均布荷载+预张力）
-- [x] `opensees_backend.OpenSeesSolver`：OpenSees 线性后端（Truss+InitStress，对照用）
+- [x] `staged.build_completed_model`：由施工计划派生成桥 `StructuralModel`
+- [x] `completed.direct.CompletedDirectSolver`：自研二维直接刚度法（梁+索+均布荷载+预张力）
+- [x] `completed.opensees.CompletedOpenSeesSolver`：OpenSees 线性后端（Truss+InitStress，对照用）
 - [x] `scripts/validate_fem.py`：成桥工况两后端逐项对比 → **相对误差 ~1e-14，通过**
-- [x] `tests/test_linear_frame.py`：简支/悬臂解析解 + 单索预张力 + OpenSees 交叉校核
+- [x] `tests/test_completed_direct.py`：简支/悬臂解析解 + 单索预张力 + OpenSees 交叉校核
 
 **施工阶段（变刚度 + 切线激活）✅**
 - [x] `opensees_staged`：切线激活 + 顺序加载（已验证 staged≠one-shot，索力历程）
@@ -108,5 +108,5 @@
 
 - [ ] 复查并更新 CI（`.github/workflows/publish.yml`）以适配新结构
 - [ ] 决定是否将 `.idea/` 移出版本控制
-- [ ] 大模型时 `linear_frame` 切换 `scipy.sparse` + 缓存因子分解
+- [ ] 大模型时直接刚度法（`completed.direct`/`staged.direct`）切换 `scipy.sparse` + 缓存因子分解
 - [ ] 类型标注与 `ruff`/`mypy` 配置（可选）

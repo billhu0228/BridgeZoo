@@ -25,10 +25,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-import numpy as np
-
-from bridgezoo.fem.linear_frame import _frame_transform
-
 
 # ============================================================ 施工计划(IR)
 @dataclass
@@ -89,10 +85,10 @@ class BuildStep:
 
 
 @dataclass
-class OneShotState:
-    """Completed-bridge state derived from the staged construction plan."""
+class CompletedState:
+    """由分阶段施工计划派生的成桥（完成态）结构状态。"""
 
-    label: str = "oneshot"
+    label: str = "completed"
     nodes: list[NewNode] = field(default_factory=list)
     frames: list[NewFrame] = field(default_factory=list)
     cables: list[NewCable] = field(default_factory=list)
@@ -106,7 +102,7 @@ class StagedPlan:
     init_nodes: list[NewNode] = field(default_factory=list)        # 阶段0已存在的节点
     supports: list[tuple[int, bool, bool, bool]] = field(default_factory=list)
     steps: list[BuildStep] = field(default_factory=list)
-    oneshot: OneShotState | None = None
+    completed: CompletedState | None = None
 
 
 # ============================================================ 结果
@@ -141,22 +137,6 @@ class StagedResult:
 
 
 # ============================================================ 共享辅助(两后端复用)
-def _gravity_feq_global(gy: float, c: float, s: float, L: float) -> np.ndarray:
-    """**全局竖向**重力线荷载 gy(向下为负)的一致等效节点荷载(全局 6 向量)。
-
-    重力 (0, gy) 投影到单元局部:横向 Wy=gy*c、轴向 Wx=gy*s(局部 x 沿单元方向 (c,s),
-    局部 y 为 (-s, c));再按一致固端力转回全局。水平梁 (s=0) 时退化为 Wy=gy*c。
-    解决了"局部横向荷载"在反向(-x)梁上方向翻转、导致左右自重不对称的问题。
-    """
-    q_t = gy * c   # 局部横向
-    q_a = gy * s   # 局部轴向
-    feq_local = np.array([
-        q_a * L / 2.0, q_t * L / 2.0, q_t * L * L / 12.0,
-        q_a * L / 2.0, q_t * L / 2.0, -q_t * L * L / 12.0,
-    ])
-    return _frame_transform(c, s).T @ feq_local
-
-
 def _attach_geometry(result: StagedResult, plan: StagedPlan) -> None:
     """把施工计划的静态几何(节点坐标、索连接、锚点/梁节点分类)写入结果。"""
     nodes: list[NewNode] = list(plan.init_nodes)

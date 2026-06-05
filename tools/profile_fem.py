@@ -1,6 +1,6 @@
 """基准测试线性求解器单步耗时（里程碑 M1）。
 
-确认 :mod:`bridgezoo.fem.linear_frame` 的单个 episode（≈2N 阶段）耗时满足 RL 采样
+确认 :mod:`bridgezoo.fem.staged.direct` 的单个 episode（≈2N 阶段）耗时满足 RL 采样
 要求（目标 < 1~2 ms）。用法::
 
     python -m tools.profile_fem --n 6 --iters 1000

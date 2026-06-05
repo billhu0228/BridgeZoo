@@ -1,7 +1,7 @@
-"""自研轻量二维直接刚度法求解器（求解后端之一）。
+"""一次成桥（完成态）自研二维直接刚度法求解器（求解后端之一）。
 
 消费 :class:`bridgezoo.fem.model.StructuralModel`，返回 :class:`bridgezoo.fem.model.SolveResult`，
-与 :mod:`bridgezoo.fem.opensees_backend` 接口一致、结果应一致（用于交叉校核）。
+与 :mod:`bridgezoo.fem.completed.opensees` 接口一致、结果应一致（用于交叉校核）。
 
 单元
 ----
@@ -17,7 +17,8 @@
   保证节点位移与 OpenSees ``eleLoad -beamUniform`` 一致；单元端力回收时扣除等效项。
 
 仅依赖 numpy；规模小（DOF<~数百）用稠密直接求解即可，后续大模型可换 scipy.sparse。
-本求解器面向**线性、小位移**分析（成桥/单阶段）；逐阶段变刚度的扩展见 staged_builder。
+本求解器面向**线性、小位移**分析（成桥/单阶段）；逐阶段变刚度的扩展见
+:mod:`bridgezoo.fem.staged`。底层单元核来自 :mod:`bridgezoo.fem.kernels`。
 
 参见 ``docs/DESIGN_MAPPO.md`` 第 4 节。
 """
@@ -28,48 +29,15 @@ import math
 
 import numpy as np
 
+from bridgezoo.fem.kernels import (
+    _frame_local_stiffness,
+    _frame_transform,
+    _udl_fixed_end_local,
+)
 from bridgezoo.fem.model import SolveResult, StructuralModel
 
 
-def _frame_local_stiffness(E, A, I, L):
-    """2D 框架单元局部刚度矩阵 (6x6)，DOF 顺序 [u_i,v_i,θ_i,u_j,v_j,θ_j]。"""
-    EA_L = E * A / L
-    EI = E * I
-    L2, L3 = L * L, L * L * L
-    k = np.zeros((6, 6))
-    # 轴向
-    k[0, 0] = k[3, 3] = EA_L
-    k[0, 3] = k[3, 0] = -EA_L
-    # 弯曲 + 剪切（Euler-Bernoulli）
-    k[1, 1] = k[4, 4] = 12 * EI / L3
-    k[1, 4] = k[4, 1] = -12 * EI / L3
-    k[1, 2] = k[2, 1] = 6 * EI / L2
-    k[1, 5] = k[5, 1] = 6 * EI / L2
-    k[4, 2] = k[2, 4] = -6 * EI / L2
-    k[4, 5] = k[5, 4] = -6 * EI / L2
-    k[2, 2] = k[5, 5] = 4 * EI / L
-    k[2, 5] = k[5, 2] = 2 * EI / L
-    return k
-
-
-def _frame_transform(c, s):
-    """单元坐标变换矩阵 T (6x6)，使 d_local = T @ d_global。"""
-    T = np.zeros((6, 6))
-    R = np.array([[c, s, 0.0], [-s, c, 0.0], [0.0, 0.0, 1.0]])
-    T[0:3, 0:3] = R
-    T[3:6, 3:6] = R
-    return T
-
-
-def _udl_fixed_end_local(wy, L):
-    """局部横向均布荷载 wy 的一致等效节点荷载向量 (6,)。
-
-    ``[0, wy*L/2, wy*L^2/12, 0, wy*L/2, -wy*L^2/12]``（与 OpenSees beamUniform Wy 一致）。
-    """
-    return np.array([0.0, wy * L / 2.0, wy * L * L / 12.0, 0.0, wy * L / 2.0, -wy * L * L / 12.0])
-
-
-class DirectStiffnessSolver:
+class CompletedDirectSolver:
     """二维直接刚度法线性静力求解后端。"""
 
     name = "direct"
@@ -204,4 +172,4 @@ class DirectStiffnessSolver:
 
 def solve(model: StructuralModel) -> SolveResult:
     """便捷函数：用直接刚度法求解。"""
-    return DirectStiffnessSolver().solve(model)
+    return CompletedDirectSolver().solve(model)

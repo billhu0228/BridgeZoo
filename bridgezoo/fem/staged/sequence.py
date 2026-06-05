@@ -2,7 +2,7 @@
 
 把 :class:`bridgezoo.envs.geometry.BridgeGeometry` 翻译成一串"施工阶段"，每个阶段
 描述：本阶段新增/激活的节点与单元、边界条件的变化、本阶段的张拉动作槽位。环境层据此
-驱动 :class:`bridgezoo.fem.linear_frame.StagedFrameModel` 逐阶段求解。
+驱动 :class:`bridgezoo.fem.staged.direct.StagedDirectSolver` 逐阶段求解。
 
 施工序列（对称悬臂拼装 + 二次张拉，N = 单侧索对数）::
 

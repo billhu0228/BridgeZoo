@@ -1,4 +1,4 @@
-"""Plot one-shot completed-bridge balance using the staged model parameters.
+"""Plot completed-bridge balance using the staged model parameters.
 
 This script builds the same geometry, cable layout, material properties, and
 loads as ``build_staged_cantilever`` with the defaults from
@@ -24,12 +24,11 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 PROJECT_ROOT = Path(ROOT)
 
-from bridgezoo.fem.linear_frame import DirectStiffnessSolver
+from bridgezoo.fem.completed import CompletedDirectSolver, CompletedOpenSeesSolver
 from bridgezoo.fem.model import SolveResult, StructuralModel
-from bridgezoo.fem.opensees_backend import OpenSeesSolver
 from bridgezoo.fem.staged import (
     StagedDirectSolver,
-    build_oneshot_model,
+    build_completed_model,
     build_staged_cantilever,
 )
 from scripts.plot_staged_deck_growth import MODEL_DEFAULTS, default_pretension
@@ -39,8 +38,8 @@ VERTICAL_SUPPORT_NODE = 201
 MIDSPAN_NODE = 200
 
 
-def build_oneshot_from_staged_params(args) -> tuple[StructuralModel, dict]:
-    """Build a completed-bridge one-shot model from the staged plan geometry."""
+def build_completed_from_staged_params(args) -> tuple[StructuralModel, dict]:
+    """Build a completed-bridge model from the staged plan geometry."""
 
     n = args.n
     strands = [args.strands] * n
@@ -68,18 +67,18 @@ def build_oneshot_from_staged_params(args) -> tuple[StructuralModel, dict]:
         pretension=pretension,
     )
 
-    model, meta = build_oneshot_model(plan, name=f"oneshot_from_staged_N{n}")
+    model, meta = build_completed_model(plan, name=f"completed_from_staged_N{n}")
     meta["pretension"] = pretension
     meta["plan"] = plan
     return model, meta
 
 
 def run(args) -> dict:
-    model, meta = build_oneshot_from_staged_params(args)
-    solver = OpenSeesSolver() if args.backend == "opensees" else DirectStiffnessSolver()
+    model, meta = build_completed_from_staged_params(args)
+    solver = CompletedOpenSeesSolver() if args.backend == "opensees" else CompletedDirectSolver()
     result = solver.solve(model)
 
-    print("One-shot completed bridge model:")
+    print("Completed bridge model:")
     print(f"  {model.summary()}")
     print(
         f"  n={args.n}, left spacing={args.left_spacing:g} m, "
@@ -101,7 +100,7 @@ def run(args) -> dict:
 
 
 def _print_deck_result(result: SolveResult, meta: dict) -> None:
-    print("\n=== Deck deflection, one-shot balance ===")
+    print("\n=== Deck deflection, completed balance ===")
     uy_values = []
     for nid in meta["deck_ids"]:
         x = meta["coords"][nid][0]
@@ -115,7 +114,7 @@ def _print_deck_result(result: SolveResult, meta: dict) -> None:
 
 
 def _print_cable_result(result: SolveResult) -> None:
-    print("\n=== Cable force/stress, one-shot balance ===")
+    print("\n=== Cable force/stress, completed balance ===")
     for cid in sorted(result.cable_force):
         force = result.cable_force[cid]
         stress = result.cable_stress[cid]
@@ -156,7 +155,7 @@ def _plot_balance_state(model: StructuralModel, result: SolveResult, meta: dict,
 
     fig, ax = plt.subplots(figsize=(12, 5.8))
     ax.plot(xs, ys0, color="0.65", lw=1.8, marker="o", ms=3, label="design deck")
-    ax.plot(xs, ys, color="#d55e00", lw=2.6, marker="o", ms=4, label=f"one-shot deck x{scale:g}")
+    ax.plot(xs, ys, color="#d55e00", lw=2.6, marker="o", ms=4, label=f"completed deck x{scale:g}")
     ax.plot([0.0, 0.0], [0.0, tower_top], color="0.35", lw=3.0, label="tower")
     ax.plot(
         [coords[nid][0] for nid in meta["anchor_ids"]],
@@ -183,7 +182,7 @@ def _plot_balance_state(model: StructuralModel, result: SolveResult, meta: dict,
         )
         first_cable = False
 
-    ax.set_title("One-shot completed bridge balance state")
+    ax.set_title("Completed bridge balance state")
     ax.set_xlabel("x [m]")
     ax.set_ylabel(f"y [m], vertical displacement x{scale:g}")
     ax.set_xlim(min(xs) - 0.08 * span, max(xs) + 0.08 * span)
@@ -193,7 +192,7 @@ def _plot_balance_state(model: StructuralModel, result: SolveResult, meta: dict,
     fig.tight_layout()
     fig.savefig(out_path, dpi=140)
     plt.close(fig)
-    print(f"\nSaved one-shot balance plot: {out_path}")
+    print(f"\nSaved completed balance plot: {out_path}")
 
 
 def _max_diff(pairs: list[tuple[float, float]]) -> tuple[float, float]:
@@ -202,34 +201,34 @@ def _max_diff(pairs: list[tuple[float, float]]) -> tuple[float, float]:
     return max_abs, max_abs / max(scale, 1e-12)
 
 
-def _compare_with_staged_final(oneshot: SolveResult, meta: dict) -> None:
+def _compare_with_staged_final(completed: SolveResult, meta: dict) -> None:
     plan = meta["plan"]
     staged = StagedDirectSolver().run(plan)
     final = staged.records[-1]
 
-    deck_pairs = [(oneshot.disp[nid][1], final.disp[nid][1]) for nid in meta["deck_ids"]]
+    deck_pairs = [(completed.disp[nid][1], final.disp[nid][1]) for nid in meta["deck_ids"]]
     force_pairs = [
-        (oneshot.cable_force[cid], final.cable_force[cid])
+        (completed.cable_force[cid], final.cable_force[cid])
         for cid in sorted(meta["cable_nodes"])
-        if cid in oneshot.cable_force and cid in final.cable_force
+        if cid in completed.cable_force and cid in final.cable_force
     ]
     stress_pairs = [
-        (oneshot.cable_stress[cid], final.cable_stress[cid])
+        (completed.cable_stress[cid], final.cable_stress[cid])
         for cid in sorted(meta["cable_nodes"])
-        if cid in oneshot.cable_stress and cid in final.cable_stress
+        if cid in completed.cable_stress and cid in final.cable_stress
     ]
 
     uy_abs, uy_rel = _max_diff(deck_pairs)
     force_abs, force_rel = _max_diff(force_pairs)
     stress_abs, stress_rel = _max_diff(stress_pairs)
-    print("\n=== One-shot vs staged final direct comparison ===")
+    print("\n=== Completed vs staged final direct comparison ===")
     print(f"  deck uy max diff     : {uy_abs * 1000:.6f} mm ({uy_rel * 100:.6f}%)")
     print(f"  cable force max diff : {force_abs / 1e3:.6f} kN ({force_rel * 100:.6f}%)")
     print(f"  cable stress max diff: {stress_abs / 1e6:.6f} MPa ({stress_rel * 100:.6f}%)")
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Plot one-shot completed-bridge balance with staged geometry.")
+    parser = argparse.ArgumentParser(description="Plot completed-bridge balance with staged geometry.")
     parser.add_argument("--n", type=int, default=MODEL_DEFAULTS["n"], help="Number of cables per side.")
     parser.add_argument("--backend", choices=["direct", "opensees"], default="direct")
     parser.add_argument("--strands", type=int, default=20, help="Strands per cable.")
@@ -243,7 +242,7 @@ def main() -> None:
     parser.add_argument("--right-spacing", type=float, default=MODEL_DEFAULTS["right_spacing"])
     parser.add_argument("--right-end", type=float, default=MODEL_DEFAULTS["right_end"])
     parser.add_argument("--wg", type=float, default=MODEL_DEFAULTS["wg"], help="Girder self-weight line load [N/m].")
-    parser.add_argument("--plot", type=str, default="results/oneshot_balance.png")
+    parser.add_argument("--plot", type=str, default="results/completed_balance.png")
     parser.add_argument("--scale", type=float, default=15.0, help="Vertical displacement plot scale.")
     parser.add_argument("--compare-staged", action=argparse.BooleanOptionalAction, default=True)
     args = parser.parse_args()

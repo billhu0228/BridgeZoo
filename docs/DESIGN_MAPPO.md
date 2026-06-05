@@ -91,7 +91,7 @@
 
 为支撑数十万~数百万环境步，自写**轻量直接刚度法 2D 框架求解器**（numpy/scipy），替代每步重建 OpenSees 模型的高开销。
 
-### 4.1 模块 `bridgezoo/fem/linear_frame.py`
+### 4.1 模块 `bridgezoo/fem/completed/direct.py`（成桥）与 `bridgezoo/fem/staged/direct.py`（施工，RL 内核）
 
 - 单元：
   - `FrameElement2D`（梁，6 DOF，`EA, EI, L`，标准转换矩阵）。
@@ -207,9 +207,10 @@ for iter in range(num_iters):
 ```
 bridgezoo/
   fem/
-    linear_frame.py        # 自写线性 2D 框架求解器（核心，速度）
-    staged_builder.py      # 由几何参数 → 施工阶段序列 + 每阶段单元集
-    opensees_ref.py        # 现 fem.py 迁移，仅用于校核
+    model.py               # 求解器无关 IR（StructuralModel/SolveResult）
+    kernels.py             # 共享单元数值核（刚度/变换/等效荷载）
+    completed/             # 一次成桥：direct.py（自写）+ opensees.py
+    staged/                # 分阶段施工：plan/builder/direct（RL 内核）/opensees/completed/sequence
   envs/
     cable_construction.py   # 新环境：正向施工 + 两次张拉（PettingZoo ParallelEnv）
     cable_agent.py          # CableAgent：状态/动作/局部奖励
@@ -229,7 +230,7 @@ scripts/
 docs/
   DESIGN_MAPPO.md          # 本文
 tests/
-  test_linear_frame.py     # 单元测试 + 与 OpenSees 数值对比
+  test_completed_direct.py # 直接刚度法解析解 + 与 OpenSees 数值对比
   test_env.py              # 环境 API/掩码/对称性
 ```
 
@@ -269,7 +270,7 @@ tests/
 | 阶段 | 交付物 | 验收 |
 |------|--------|------|
 | M0 设计 | 本文 + 接口确认 | 评审通过 |
-| M1 求解器 | `linear_frame.py` + `staged_builder.py` + 校核脚本 | vs OpenSees 误差 < 阈值（如位移 2%、索力 3%） |
+| M1 求解器 | `completed/` + `staged/` 求解器 + 校核脚本 | vs OpenSees 误差 < 阈值（如位移 2%、索力 3%） |
 | M2 环境 | `cable_construction.py` + 测试 | API/掩码/对称性通过；随机策略可跑通整个施工序列 |
 | M3 MAPPO | `mappo/*` + `resection` 冒烟 | 玩具环境收敛，验证算法正确 |
 | M4 训练 | 主结果 E2 | MAPPO 在 N=6 收敛，成桥指标达标 |

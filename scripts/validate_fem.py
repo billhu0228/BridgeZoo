@@ -1,8 +1,8 @@
 """交叉校核：同一结构定义，自研直接刚度法 vs OpenSees，结果应一致。
 
 流程：由 :func:`bridgezoo.fem.staged.build_staged_cantilever` 的施工计划派生出成桥
-(完成态) ``StructuralModel``（:func:`bridgezoo.fem.staged.build_oneshot_model`），
-分别交给 :class:`DirectStiffnessSolver` 与 :class:`OpenSeesSolver` 求解，逐项对比节点
+(完成态) ``StructuralModel``（:func:`bridgezoo.fem.staged.build_completed_model`），
+分别交给 :class:`CompletedDirectSolver` 与 :class:`CompletedOpenSeesSolver` 求解，逐项对比节点
 位移、梁端力、索力，输出最大绝对/相对误差并按阈值判定通过。这是论文实验 E1 的证据。
 
 > 校核对象为单塔双悬臂半桥（与施工阶段模型同源）。
@@ -25,9 +25,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-from bridgezoo.fem.linear_frame import DirectStiffnessSolver
-from bridgezoo.fem.opensees_backend import OpenSeesSolver
-from bridgezoo.fem.staged import build_oneshot_model, build_staged_cantilever
+from bridgezoo.fem.completed import CompletedDirectSolver, CompletedOpenSeesSolver
+from bridgezoo.fem.staged import build_completed_model, build_staged_cantilever
 
 # 单股钢绞线截面积 (m²)，与 build_staged_cantilever 的默认一致，用于把目标初应力换算为预张力。
 STRAND_AREA = 1.4e-4
@@ -59,11 +58,11 @@ def run(n: int, sigma: float, strands: int, tol_rel: float) -> bool:
         strands=[int(strands)] * n,
         pretension=[pretension] * n,
     )
-    model, _ = build_oneshot_model(plan)
+    model, _ = build_completed_model(plan)
     print("结构定义：", model.summary())
 
-    r_direct = DirectStiffnessSolver().solve(model)
-    r_ops = OpenSeesSolver().solve(model)
+    r_direct = CompletedDirectSolver().solve(model)
+    r_ops = CompletedOpenSeesSolver().solve(model)
     print(f"求解状态：direct converged={r_direct.converged}, opensees converged={r_ops.converged}")
 
     # 位移竖向分量
@@ -90,7 +89,7 @@ def run(n: int, sigma: float, strands: int, tol_rel: float) -> bool:
     print(f"    direct  ={r_direct.cable_force[1001] / 1e3:10.3f}  opensees={r_ops.cable_force[1001] / 1e3:10.3f}")
 
     ok = max(dr, fr, cr) < tol_rel
-    print(f"\n判定：{'通过 ✅' if ok else '未通过 ❌'}  (相对误差阈值 {tol_rel:.1e})")
+    print(f"\n判定：{'通过 [PASS]' if ok else '未通过 [FAIL]'}  (相对误差阈值 {tol_rel:.1e})")
     return ok
 
 
