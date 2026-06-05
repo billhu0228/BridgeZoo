@@ -10,6 +10,24 @@ def _plan(n=3, wg=5.0e4, **kw):
     return build_staged_cantilever(n_seg=n, wg=wg, strands=[20] * n, pretension=pre, **kw)
 
 
+def test_first_increment_combines_segment_and_cable_only():
+    plan = _plan(3)
+    labels = [step.label for step in plan.steps]
+    assert labels[:4] == ["cable1", "seg2", "cable2", "seg3"]
+
+    first = plan.steps[0]
+    assert first.record
+    assert len(first.new_nodes) == 2
+    assert len(first.new_frames) == 2
+    assert len(first.new_cables) == 2
+
+    second = plan.steps[1]
+    assert second.label == "seg2"
+    assert not second.record
+    assert len(second.new_frames) == 2
+    assert not second.new_cables
+
+
 def test_direct_runs_and_records():
     n = 3
     r = StagedDirectSolver().run(_plan(n))

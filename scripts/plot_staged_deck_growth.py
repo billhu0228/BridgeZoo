@@ -38,6 +38,20 @@ from bridgezoo.fem.staged import (
     build_staged_cantilever,
 )
 
+MODEL_DEFAULTS = {
+    "n": 6,
+    "anchor_base": 20.0,
+    "anchor_spacing": 2.0,
+    "anchor_free": 3.0,
+    "left_start": 10.0,
+    "left_spacing": 8.0,
+    "left_end": 4.0,
+    "right_start": 10.0,
+    "right_spacing": 12.0,
+    "right_end": 4.0,
+    "wg": 1.0e5,
+}
+
 
 def default_pretension(n, anchor_base, anchor_spacing, right_start, right_spacing, wg):
     """各索目标张力（粗估）：竖向分量约平衡一节段自重（用右侧几何作代表）。"""
@@ -245,7 +259,7 @@ def _plot_animation(result, n, scale, out, frames_dir, fps) -> None:
 def main() -> None:
     p = argparse.ArgumentParser(description="绘制逐阶段双悬臂主梁增长与变形过程（扇面索）")
     p.add_argument("--n", type=int, default=6, help="每侧索数")
-    p.add_argument("--backend", choices=["direct", "opensees"], default="opensees")
+    p.add_argument("--backend", choices=["direct", "opensees"], default="direct")
     # 扇面锚点
     p.add_argument("--anchor-base", type=float, default=20.0, help="参数a：最低锚点高度")
     p.add_argument("--anchor-spacing", type=float, default=2.0, help="参数b：锚点间距")
@@ -260,8 +274,8 @@ def main() -> None:
     p.add_argument("--wg", type=float, default=1.0e5, help="主梁自重线荷载 [N/m]")
     p.add_argument("--scale", type=float, default=15.0, help="竖向位移绘图放大倍数")
     p.add_argument("--fps", type=int, default=1)
-    p.add_argument("--out", type=str, default="results/staged_deck_growth_ops.gif")
-    p.add_argument("--frames-dir", type=str, default="results/frames")
+    p.add_argument("--out", type=str, default="results/staged_deck_growth_dir.gif")
+    p.add_argument("--frames-dir", type=str, default="results/frames2")
     args = p.parse_args()
     run(args)
 
