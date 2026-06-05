@@ -29,31 +29,41 @@ from bridgezoo.fem.staged import (
 )
 
 
-def default_pretension(n, seg_len, H, wg):
-    return [wg * seg_len * math.hypot(i * seg_len, H) / H for i in range(1, n + 1)]
+def default_pretension(n, anchor_base, anchor_spacing, right_start, right_spacing, wg):
+    """各索目标张力（粗估）：竖向分量约平衡一节段自重（用右侧几何作代表）。"""
+    out = []
+    for i in range(1, n + 1):
+        h = anchor_base + (i - 1) * anchor_spacing
+        dist = right_start + (i - 1) * right_spacing
+        out.append(2.0 * wg * right_spacing * math.hypot(dist, h) / h)
+    return out
 
 
 def run(n: int, tol_rel: float, cable_element: str = "linear", wg: float = 1.0e5) -> bool:
-    seg_len, H = 8.0, 65.0
+    anchor_base, anchor_spacing, right_start, right_spacing = 25.0, 3.0, 6.0, 8.0
     strands = [20] * n
-    pre = default_pretension(n, seg_len, H, wg)
-    plan = build_staged_cantilever(n_seg=n, seg_len=seg_len, tower_height=H, wg=wg,
-                                   strands=strands, pretension=pre)
+    pre = default_pretension(n, anchor_base, anchor_spacing, right_start, right_spacing, wg)
+    plan = build_staged_cantilever(
+        n_seg=n, anchor_base_height=anchor_base, anchor_spacing=anchor_spacing,
+        right_start=right_start, right_spacing=right_spacing, wg=wg,
+        strands=strands, pretension=pre,
+    )
 
     rd = StagedDirectSolver().run(plan)
     ro = StagedOpenSeesSolver(cable_element=cable_element).run(plan)
     print(f"OpenSees 索单元：{cable_element}（linear=与自研逐项一致，corot=几何精确）")
 
-    # 逐阶段挠度对比：打印各阶段"当前悬臂端"，误差在所有共同节点上取最大
+    # 逐阶段挠度对比：打印各阶段"当前两侧悬臂端"，误差在所有梁节点上取最大
+    deck_ids = set(rd.deck_ids)
     print("=== 当前悬臂端竖向挠度 (mm)：direct vs opensees ===")
     max_disp_abs = 0.0
     disp_scale = 1e-12
     for a, b in zip(rd.records, ro.records):
-        deck = [nid for nid in a.disp if 0 < nid < 900]   # 排除锚点 999/根部 0
-        tip = max(deck) if deck else 0
+        present = [nid for nid in deck_ids if nid in a.disp]
+        tip = max(present, key=lambda k: abs(rd.coords[k][0])) if present else 0
         da, db = a.disp[tip][1], b.disp[tip][1]
-        print(f"  {a.label:7s} (tip n{tip}): direct={da*1000:9.3f}  opensees={db*1000:9.3f}  Δ={(da-db)*1000:+.2e}")
-        for nid in a.disp:
+        print(f"  {a.label:7s} (端 n{tip}): direct={da*1000:9.3f}  opensees={db*1000:9.3f}  Δ={(da-db)*1000:+.2e}")
+        for nid in present:
             max_disp_abs = max(max_disp_abs, abs(a.disp[nid][1] - b.disp[nid][1]))
             disp_scale = max(disp_scale, abs(a.disp[nid][1]), abs(b.disp[nid][1]))
 

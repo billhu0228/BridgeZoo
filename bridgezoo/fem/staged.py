@@ -52,7 +52,7 @@ class NewFrame:
     E: float
     A: float
     I: float
-    udl_wy: float = 0.0  # 本步施加的局部横向均布荷载（自重）
+    udl_wy: float = 0.0  # 本步施加的**全局竖向**均布荷载（自重，向下为负；按单元方向投影到局部）
 
 
 @dataclass
@@ -97,6 +97,11 @@ class StagedStepRecord:
 class StagedResult:
     backend: str
     records: list[StagedStepRecord] = field(default_factory=list)
+    # 静态几何信息（供可视化/后处理使用，免去外部按 id 反推坐标）
+    coords: dict[int, tuple[float, float]] = field(default_factory=dict)   # {node_id: (x, y)}
+    cable_nodes: dict[int, tuple[int, int]] = field(default_factory=dict)  # {cable_id: (i, j)}
+    anchor_ids: list[int] = field(default_factory=list)                    # 塔上锚点 node id
+    deck_ids: list[int] = field(default_factory=list)                      # 主梁 node id（含根部）
 
     def cable_stress_history(self) -> dict[int, list[tuple[str, float]]]:
         out: dict[int, list[tuple[str, float]]] = {}
@@ -107,6 +112,38 @@ class StagedResult:
 
     def final_disp(self) -> dict[int, tuple[float, float, float]]:
         return self.records[-1].disp if self.records else {}
+
+
+def _gravity_feq_global(gy: float, c: float, s: float, L: float) -> np.ndarray:
+    """**全局竖向**重力线荷载 gy（向下为负）的一致等效节点荷载（全局 6 向量）。
+
+    重力 (0, gy) 投影到单元局部：横向 Wy=gy*c、轴向 Wx=gy*s（局部 x 沿单元方向 (c,s)，
+    局部 y 为 (-s, c)）；再按一致固端力转回全局。水平梁 (s=0) 时退化为 Wy=gy*c。
+    解决了"局部横向荷载"在反向（-x）梁上方向翻转、导致左右自重不对称的问题。
+    """
+    q_t = gy * c   # 局部横向
+    q_a = gy * s   # 局部轴向
+    feq_local = np.array([
+        q_a * L / 2.0, q_t * L / 2.0, q_t * L * L / 12.0,
+        q_a * L / 2.0, q_t * L / 2.0, -q_t * L * L / 12.0,
+    ])
+    return _frame_transform(c, s).T @ feq_local
+
+
+def _attach_geometry(result: StagedResult, plan: StagedPlan) -> None:
+    """把施工计划的静态几何（节点坐标、索连接、锚点/梁节点分类）写入结果。"""
+    nodes: list[NewNode] = list(plan.init_nodes)
+    for step in plan.steps:
+        nodes.extend(step.new_nodes)
+    for nd in nodes:
+        result.coords[nd.id] = (nd.x, nd.y)
+        if nd.y > 1e-9:
+            result.anchor_ids.append(nd.id)   # 塔上锚点（y>0）
+        else:
+            result.deck_ids.append(nd.id)     # 主梁节点（y≈0，含根部）
+    for step in plan.steps:
+        for cb in step.new_cables:
+            result.cable_nodes[cb.id] = (cb.i, cb.j)
 
 
 # ============================================================ 自研直接刚度法（增量）
@@ -135,6 +172,7 @@ class StagedDirectSolver:
             self._solve_increment(dF)
             if step.record:
                 result.records.append(self._record(step.label))
+        _attach_geometry(result, plan)
         return result
 
     # --------------------------------------------------------------
@@ -179,12 +217,8 @@ class StagedDirectSolver:
 
         for fr in step.new_frames:
             if fr.udl_wy != 0.0:
-                xi, yi = self.coords[fr.i]
-                xj, yj = self.coords[fr.j]
-                L = math.hypot(xj - xi, yj - yi)
-                c, s = (xj - xi) / L, (yj - yi) / L
-                feq_local = _udl_fixed_end_local(fr.udl_wy, L)
-                feq_global = _frame_transform(c, s).T @ feq_local
+                L, c, s = self._orig_geom(fr.i, fr.j)
+                feq_global = _gravity_feq_global(fr.udl_wy, c, s, L)
                 add(fr.i, feq_global[0:3])
                 add(fr.j, feq_global[3:6])
         for cb in step.new_cables:
@@ -322,6 +356,7 @@ class StagedOpenSeesSolver:
             self._apply_and_solve(step)
             if step.record:
                 result.records.append(self._record(step.label))
+        _attach_geometry(result, plan)
         return result
 
     def _activate(self, step, fixed):
@@ -380,7 +415,12 @@ class StagedOpenSeesSolver:
             ops.pattern("Plain", pat, ts)
             for fr in step.new_frames:
                 if fr.udl_wy != 0.0:
-                    ops.eleLoad("-ele", fr.id, "-type", "-beamUniform", fr.udl_wy)
+                    # 全局重力 → 局部 (Wy=gy*c, Wx=gy*s)，使反向梁自重方向也正确
+                    xi, yi = self.coords[fr.i]
+                    xj, yj = self.coords[fr.j]
+                    Lf = math.hypot(xj - xi, yj - yi)
+                    c, s = (xj - xi) / Lf, (yj - yi) / Lf
+                    ops.eleLoad("-ele", fr.id, "-type", "-beamUniform", fr.udl_wy * c, fr.udl_wy * s)
         ops.system("BandGeneral")
         ops.numberer("Plain")
         ops.constraints("Transformation")
@@ -410,54 +450,115 @@ class StagedOpenSeesSolver:
 
 
 # ============================================================ 施工计划构建器
+# ---- 节点 / 单元编号约定（n = 每侧索数；要求 n < 90）----
+#   根部(0#)节点         : 0
+#   塔上锚点 i (1..n)     : 300 + i            （y = anchor_base + (i-1)*anchor_spacing）
+#   右侧索点 i (1..n)     : i                  （x = +(right_start + (i-1)*right_spacing)）
+#   右侧自由端(终止段端)  : 200
+#   左侧索点 i (1..n)     : 100 + i            （x = −(left_start + (i-1)*left_spacing)）
+#   左侧自由端            : 201
+#   右侧梁单元 i          : 10 + i  ；右终止段梁: 90
+#   左侧梁单元 i          : 110 + i ；左终止段梁: 190
+#   右侧索 i              : 1000 + i ；左侧索 i : 2000 + i
+
+_ROOT = 0
+
+
+def _anchor_id(i: int) -> int:
+    return 300 + i
+
+
 def build_staged_cantilever(
     n_seg: int = 6,
-    seg_len: float = 8.0,
-    tower_height: float = 20.0,
+    # —— 塔上锚点（扇面）——
+    anchor_base_height: float = 20.0,   # 参数 a：最低锚点高度（自梁面 y=0 起算）
+    anchor_spacing: float = 3.0,        # 参数 b：相邻锚点竖向间距（向上）
+    anchor_top_free: float = 5.0,       # 参数 c：最高锚点之上的自由高度（仅供绘塔参考）
+    # —— 主梁双悬臂（左右可不同；以塔 x=0 为参考）——
+    left_start: float = 6.0,            # 参数1(左)：塔到第 1 索点距离
+    left_spacing: float = 8.0,          # 参数2(左)：相邻索点间距
+    left_end: float = 4.0,              # 参数3(左)：末索点到悬臂自由端距离（无索）
+    right_start: float = 6.0,           # 参数1(右)
+    right_spacing: float = 8.0,         # 参数2(右)
+    right_end: float = 4.0,             # 参数3(右)
+    # —— 截面 / 材料 ——
     beam_E: float = 20e9,
     beam_A: float = 10.0,
     beam_Iz: float = 10.0 / 12.0,
-    wg: float = 4.7e5,
+    wg: float = 1.0e5,
     cable_Es: float = 1.95e11,
     strand_area: float = 1.4e-4,
-    strands: list[int] | None = None,
-    pretension: list[float] | None = None,
+    strands: list[int] | None = None,       # 长度 n，左右同索号共用
+    pretension: list[float] | None = None,  # 长度 n，左右同索号共用
 ) -> StagedPlan:
-    """构建单悬臂斜拉桥的施工计划（装节段→张索，逐段推进）。
+    """构建**对称双悬臂 + 扇面索**斜拉桥的施工计划。
 
-    与 :class:`bridgezoo.fem.opensees_staged.StagedCantileverCableBridge` 同场景，但用
-    后端无关的 :class:`StagedPlan` 表达，可同时交给自研/OpenSees 两后端求解对比。
+    - 塔上锚点呈扇面：第 i 索锚在高度 ``a + (i-1)*b``（内侧低、外侧高），顶部留自由高 c。
+    - 主梁自塔向两侧成对悬臂；左右各 n 个索点，间距等几何可不同（start/spacing/end）。
+    - 索点：第 i 索点距塔 ``start + (i-1)*spacing``；``start`` 为塔到首索点的无索引段，
+      ``end`` 为末索点到自由端的无索终止段。
+    - 施工步序（平衡悬臂）：每阶段同时装两侧第 i 节段（切线激活）+ 同时张两侧第 i 对索；
+      最后装两侧终止段（无索）。塔为刚性（锚点固定），根部 0# 块固接（x=0 全固定）。
+
+    strands / pretension 长度均为 n，左右同索号共用（如需左右各异，后续可扩展为按侧传入）。
     """
     strands = strands or [20] * n_seg
     pretension = pretension or [0.0] * n_seg
-    L, H = seg_len, tower_height
-    ANCHOR, ROOT = 999, 0
+    assert len(strands) == n_seg and len(pretension) == n_seg, "strands/pretension 长度须 = n_seg"
+    assert n_seg < 90, "当前编号方案要求 n_seg < 90"
 
-    plan = StagedPlan(name=f"staged_cantilever_N{n_seg}")
-    plan.init_nodes = [NewNode(ANCHOR, 0.0, H), NewNode(ROOT, 0.0, 0.0)]
-    plan.supports = [(ANCHOR, True, True, True), (ROOT, True, True, True)]
+    plan = StagedPlan(name=f"staged_double_cantilever_N{n_seg}")
 
-    prev = ROOT
+    # 初始：根部 0# 块 + 塔上 n 个锚点（均固定）
+    plan.init_nodes = [NewNode(_ROOT, 0.0, 0.0)]
+    plan.supports = [(_ROOT, True, True, True)]
     for i in range(1, n_seg + 1):
-        node_i = i
-        # 步：装节段 i（切线激活）+ 自重
-        plan.steps.append(
-            BuildStep(
-                label=f"seg{i}",
-                new_nodes=[NewNode(node_i, i * L, 0.0, attach=prev)],
-                new_frames=[NewFrame(10 + i, prev, node_i, beam_E, beam_A, beam_Iz, udl_wy=-wg)],
-                record=False,
-            )
-        )
-        # 步：装索 i 并张拉到目标张力
+        hy = anchor_base_height + (i - 1) * anchor_spacing
+        plan.init_nodes.append(NewNode(_anchor_id(i), 0.0, hy))
+        plan.supports.append((_anchor_id(i), True, True, True))
+
+    # 各侧索点 x 坐标（左为负）与单元 id 偏移
+    def side_x(i: int, start: float, spacing: float, sign: int) -> float:
+        return sign * (start + (i - 1) * spacing)
+
+    sides = [
+        dict(sign=+1, start=right_start, spacing=right_spacing, end=right_end,
+             node=lambda i: i, tip=200, frame=lambda i: 10 + i, tip_frame=90, cable=lambda i: 1000 + i),
+        dict(sign=-1, start=left_start, spacing=left_spacing, end=left_end,
+             node=lambda i: 100 + i, tip=201, frame=lambda i: 110 + i, tip_frame=190, cable=lambda i: 2000 + i),
+    ]
+
+    prev = {+1: _ROOT, -1: _ROOT}
+    # 逐节段：每阶段同时装两侧第 i 节段，再同时张两侧第 i 对索
+    for i in range(1, n_seg + 1):
+        seg_nodes, seg_frames = [], []
+        for sd in sides:
+            nid = sd["node"](i)
+            x = side_x(i, sd["start"], sd["spacing"], sd["sign"])
+            seg_nodes.append(NewNode(nid, x, 0.0, attach=prev[sd["sign"]]))
+            seg_frames.append(NewFrame(sd["frame"](i), prev[sd["sign"]], nid,
+                                       beam_E, beam_A, beam_Iz, udl_wy=-wg))
+        plan.steps.append(BuildStep(label=f"seg{i}", new_nodes=seg_nodes, new_frames=seg_frames, record=False))
+
         area = strand_area * strands[i - 1]
-        plan.steps.append(
-            BuildStep(
-                label=f"cable{i}",
-                new_cables=[NewCable(1000 + i, ANCHOR, node_i, cable_Es, area, tension=pretension[i - 1])],
-                record=True,
-            )
-        )
-        prev = node_i
+        seg_cables = [
+            NewCable(sd["cable"](i), _anchor_id(i), sd["node"](i), cable_Es, area, tension=pretension[i - 1])
+            for sd in sides
+        ]
+        plan.steps.append(BuildStep(label=f"cable{i}", new_cables=seg_cables, record=True))
+
+        for sd in sides:
+            prev[sd["sign"]] = sd["node"](i)
+
+    # 终止段（两侧自由端，无索）
+    tip_nodes, tip_frames = [], []
+    for sd in sides:
+        last_node = sd["node"](n_seg)
+        last_x = side_x(n_seg, sd["start"], sd["spacing"], sd["sign"])
+        tip_x = last_x + sd["sign"] * sd["end"]
+        tip_nodes.append(NewNode(sd["tip"], tip_x, 0.0, attach=last_node))
+        tip_frames.append(NewFrame(sd["tip_frame"], last_node, sd["tip"],
+                                   beam_E, beam_A, beam_Iz, udl_wy=-wg))
+    plan.steps.append(BuildStep(label="tip", new_nodes=tip_nodes, new_frames=tip_frames, record=True))
 
     return plan
