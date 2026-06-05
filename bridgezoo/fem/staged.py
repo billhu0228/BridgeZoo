@@ -66,6 +66,21 @@ class NewCable:
 
 
 @dataclass
+class NodalLoad:
+    node: int
+    fx: float = 0.0
+    fy: float = 0.0
+    mz: float = 0.0
+
+
+@dataclass
+class BalanceDof:
+    node: int
+    dof: int  # 0=ux, 1=uy, 2=rz
+    target: float = 0.0
+
+
+@dataclass
 class BuildStep:
     """一次施工动作（= 一次增量求解）。"""
 
@@ -73,6 +88,8 @@ class BuildStep:
     new_nodes: list[NewNode] = field(default_factory=list)
     new_frames: list[NewFrame] = field(default_factory=list)
     new_cables: list[NewCable] = field(default_factory=list)
+    nodal_loads: list[NodalLoad] = field(default_factory=list)
+    balance_dofs: list[BalanceDof] = field(default_factory=list)
     record: bool = True
 
 
@@ -169,7 +186,7 @@ class StagedDirectSolver:
         for step in plan.steps:
             self._activate(step)
             dF = self._incremental_loads(step)
-            self._solve_increment(dF)
+            self._solve_increment(dF, step.balance_dofs)
             if step.record:
                 result.records.append(self._record(step.label))
         _attach_geometry(result, plan)
@@ -186,6 +203,11 @@ class StagedDirectSolver:
             self.u[nd.id] = np.array([uI[0] - dy * rzI, uI[1] + dx * rzI, rzI])
         else:
             self.u[nd.id] = np.zeros(3)
+        fx = self.fixed.get(nd.id)
+        if fx is not None:
+            for k, is_fixed in enumerate(fx):
+                if is_fixed:
+                    self.u[nd.id][k] = 0.0
 
     def _activate(self, step: BuildStep) -> None:
         for nd in step.new_nodes:
@@ -226,9 +248,11 @@ class StagedDirectSolver:
                 _, c, s = self._orig_geom(cb.i, cb.j)
                 add(cb.i, np.array([cb.tension * c, cb.tension * s, 0.0]))
                 add(cb.j, np.array([-cb.tension * c, -cb.tension * s, 0.0]))
+        for nl in step.nodal_loads:
+            add(nl.node, np.array([nl.fx, nl.fy, nl.mz], dtype=float))
         return dF
 
-    def _solve_increment(self, dF: dict[int, np.ndarray]) -> None:
+    def _solve_increment(self, dF: dict[int, np.ndarray], balance_dofs: list[BalanceDof] | None = None) -> None:
         active = list(self.coords.keys())
         idx = {nid: k for k, nid in enumerate(active)}
         ndof = 3 * len(active)
@@ -284,7 +308,31 @@ class StagedDirectSolver:
         free = np.where(~fixed)[0]
         du = np.zeros(ndof)
         if free.size > 0:
-            du[free] = np.linalg.solve(K[np.ix_(free, free)], F[free])
+            Kff = K[np.ix_(free, free)]
+            Ff = F[free]
+            if balance_dofs:
+                current = np.zeros(ndof)
+                for nid in active:
+                    d = dofs(nid)
+                    current[d] = self.u[nid]
+                control = []
+                target = []
+                for bd in balance_dofs:
+                    gdof = dofs(bd.node)[bd.dof]
+                    if fixed[gdof]:
+                        raise ValueError(f"balance dof is already fixed: node={bd.node}, dof={bd.dof}")
+                    control.append(int(np.where(free == gdof)[0][0]))
+                    target.append(float(bd.target))
+                base_du = np.linalg.solve(Kff, Ff)
+                unit = np.zeros((free.size, len(control)))
+                for j, pos in enumerate(control):
+                    unit[pos, j] = 1.0
+                flex_cols = np.linalg.solve(Kff, unit)
+                flex = flex_cols[control, :]
+                rhs = np.array(target) - current[free[control]] - base_du[control]
+                balance_load = np.linalg.solve(flex, rhs)
+                Ff = Ff + unit @ balance_load
+            du[free] = np.linalg.solve(Kff, Ff)
 
         for nid in active:
             d = dofs(nid)
@@ -336,6 +384,8 @@ class StagedOpenSeesSolver:
         self.coords: dict[int, tuple[float, float]] = {}
         self._areas: dict[int, float] = {}
         self._cable_ids: list[int] = []
+        self.frames: list[NewFrame] = []
+        self.cables: list[NewCable] = []
         self._pat = 0
 
         ops.wipe()
@@ -343,6 +393,7 @@ class StagedOpenSeesSolver:
         ops.geomTransf("Linear", self._TRANSF)
 
         fixed = {sp[0]: (sp[1], sp[2], sp[3]) for sp in plan.supports}
+        self.fixed = fixed
         for nd in plan.init_nodes:
             ops.node(nd.id, nd.x, nd.y)
             self.coords[nd.id] = (nd.x, nd.y)
@@ -373,9 +424,13 @@ class StagedOpenSeesSolver:
                 ops.setNodeDisp(nd.id, 3, rzI, "-commit")
             if nd.id in fixed:
                 fx = fixed[nd.id]
+                for k, is_fixed in enumerate(fx, start=1):
+                    if is_fixed:
+                        ops.setNodeDisp(nd.id, k, 0.0, "-commit")
                 ops.fix(nd.id, int(fx[0]), int(fx[1]), int(fx[2]))
         for fr in step.new_frames:
             ops.element("elasticBeamColumn", fr.id, fr.i, fr.j, fr.A, fr.E, fr.I, self._TRANSF)
+            self.frames.append(fr)
         for cb in step.new_cables:
             emat, imat = 600000 + cb.id, 700000 + cb.id
             ops.uniaxialMaterial("Elastic", emat, cb.E)
@@ -399,6 +454,118 @@ class StagedOpenSeesSolver:
                 ops.element("corotTruss", cb.id, cb.i, cb.j, cb.A, imat)
             self._areas[cb.id] = cb.A
             self._cable_ids.append(cb.id)
+            self.cables.append(cb)
+
+    def _step_loads(self, step) -> dict[int, np.ndarray]:
+        dF: dict[int, np.ndarray] = {}
+
+        def add(nid, vec):
+            dF.setdefault(nid, np.zeros(3))
+            dF[nid] += vec
+
+        for fr in step.new_frames:
+            if fr.udl_wy != 0.0:
+                xi, yi = self.coords[fr.i]
+                xj, yj = self.coords[fr.j]
+                L = math.hypot(xj - xi, yj - yi)
+                c, s = (xj - xi) / L, (yj - yi) / L
+                feq_global = _gravity_feq_global(fr.udl_wy, c, s, L)
+                add(fr.i, feq_global[0:3])
+                add(fr.j, feq_global[3:6])
+        for nl in step.nodal_loads:
+            add(nl.node, np.array([nl.fx, nl.fy, nl.mz], dtype=float))
+        return dF
+
+    def _balance_loads(self, step, dF: dict[int, np.ndarray]) -> dict[int, np.ndarray]:
+        if not step.balance_dofs:
+            return {}
+
+        active = list(self.coords.keys())
+        idx = {nid: k for k, nid in enumerate(active)}
+        ndof = 3 * len(active)
+        K = np.zeros((ndof, ndof))
+        F = np.zeros(ndof)
+        current = np.zeros(ndof)
+
+        def dofs(nid):
+            b = 3 * idx[nid]
+            return [b, b + 1, b + 2]
+
+        for fr in self.frames:
+            xi, yi = self.coords[fr.i]
+            xj, yj = self.coords[fr.j]
+            L = math.hypot(xj - xi, yj - yi)
+            c, s = (xj - xi) / L, (yj - yi) / L
+            kl = _frame_local_stiffness(fr.E, fr.A, fr.I, L)
+            T = _frame_transform(c, s)
+            kg = T.T @ kl @ T
+            ed = dofs(fr.i) + dofs(fr.j)
+            for a in range(6):
+                for b in range(6):
+                    K[ed[a], ed[b]] += kg[a, b]
+
+        for cb in self.cables:
+            xi, yi = self.coords[cb.i]
+            xj, yj = self.coords[cb.j]
+            L = math.hypot(xj - xi, yj - yi)
+            c, s = (xj - xi) / L, (yj - yi) / L
+            ka = cb.E * cb.A / L
+            bvec = np.array([-c, -s, c, s])
+            kg4 = ka * np.outer(bvec, bvec)
+            td = [dofs(cb.i)[0], dofs(cb.i)[1], dofs(cb.j)[0], dofs(cb.j)[1]]
+            for a in range(4):
+                for d in range(4):
+                    K[td[a], td[d]] += kg4[a, d]
+
+        for nid, vec in dF.items():
+            d = dofs(nid)
+            F[d[0]] += vec[0]
+            F[d[1]] += vec[1]
+            F[d[2]] += vec[2]
+
+        for nid in active:
+            d = dofs(nid)
+            current[d[0]] = self.ops.nodeDisp(nid, 1)
+            current[d[1]] = self.ops.nodeDisp(nid, 2)
+            current[d[2]] = self.ops.nodeDisp(nid, 3)
+
+        fixed = np.zeros(ndof, dtype=bool)
+        for nid, fx in self.fixed.items():
+            if nid in idx:
+                d = dofs(nid)
+                for k in range(3):
+                    if fx[k]:
+                        fixed[d[k]] = True
+        for p in range(ndof):
+            if not fixed[p] and abs(K[p, p]) < 1e-30 and np.allclose(K[p, :], 0.0):
+                fixed[p] = True
+
+        free = np.where(~fixed)[0]
+        Kff = K[np.ix_(free, free)]
+        Ff = F[free]
+        control = []
+        target = []
+        for bd in step.balance_dofs:
+            gdof = dofs(bd.node)[bd.dof]
+            if fixed[gdof]:
+                raise ValueError(f"balance dof is already fixed: node={bd.node}, dof={bd.dof}")
+            control.append(int(np.where(free == gdof)[0][0]))
+            target.append(float(bd.target))
+
+        base_du = np.linalg.solve(Kff, Ff)
+        unit = np.zeros((free.size, len(control)))
+        for j, pos in enumerate(control):
+            unit[pos, j] = 1.0
+        flex_cols = np.linalg.solve(Kff, unit)
+        flex = flex_cols[control, :]
+        rhs = np.array(target) - current[free[control]] - base_du[control]
+        loads = np.linalg.solve(flex, rhs)
+
+        out: dict[int, np.ndarray] = {}
+        for bd, value in zip(step.balance_dofs, loads):
+            out.setdefault(bd.node, np.zeros(3))
+            out[bd.node][bd.dof] += value
+        return out
 
     def _apply_and_solve(self, step):
         ops = self.ops
@@ -409,7 +576,9 @@ class StagedOpenSeesSolver:
         ops.wipeAnalysis()
         self._pat += 1
         ts = pat = 10000 + self._pat
-        has_load = any(fr.udl_wy != 0.0 for fr in step.new_frames)
+        dF = self._step_loads(step)
+        balance_loads = self._balance_loads(step, dF)
+        has_load = any(fr.udl_wy != 0.0 for fr in step.new_frames) or bool(step.nodal_loads) or bool(balance_loads)
         if has_load:
             ops.timeSeries("Linear", ts)
             ops.pattern("Plain", pat, ts)
@@ -421,6 +590,10 @@ class StagedOpenSeesSolver:
                     Lf = math.hypot(xj - xi, yj - yi)
                     c, s = (xj - xi) / Lf, (yj - yi) / Lf
                     ops.eleLoad("-ele", fr.id, "-type", "-beamUniform", fr.udl_wy * c, fr.udl_wy * s)
+            for nl in step.nodal_loads:
+                ops.load(nl.node, nl.fx, nl.fy, nl.mz)
+            for nid, vec in balance_loads.items():
+                ops.load(nid, float(vec[0]), float(vec[1]), float(vec[2]))
         ops.system("BandGeneral")
         ops.numberer("Plain")
         ops.constraints("Transformation")
@@ -507,11 +680,12 @@ def build_staged_cantilever(
     assert len(strands) == n_seg and len(pretension) == n_seg, "strands/pretension 长度须 = n_seg"
     assert n_seg < 90, "当前编号方案要求 n_seg < 90"
 
-    plan = StagedPlan(name=f"staged_double_cantilever_N{n_seg}")
+    plan = StagedPlan(name=f"staged_half_bridge_N{n_seg}")
 
     # 初始：根部 0# 块 + 塔上 n 个锚点（均固定）
     plan.init_nodes = [NewNode(_ROOT, 0.0, 0.0)]
-    plan.supports = [(_ROOT, True, True, True)]
+    # Tower-deck joint: keep translations coupled, release deck rotation.
+    plan.supports = [(_ROOT, True, True, False)]
     for i in range(1, n_seg + 1):
         hy = anchor_base_height + (i - 1) * anchor_spacing
         plan.init_nodes.append(NewNode(_anchor_id(i), 0.0, hy))
@@ -527,7 +701,6 @@ def build_staged_cantilever(
         dict(sign=-1, start=left_start, spacing=left_spacing, end=left_end,
              node=lambda i: 100 + i, tip=201, frame=lambda i: 110 + i, tip_frame=190, cable=lambda i: 2000 + i),
     ]
-
     prev = {+1: _ROOT, -1: _ROOT}
     # 逐节段：每阶段同时装两侧第 i 节段，再同时张两侧第 i 对索
     for i in range(1, n_seg + 1):
@@ -559,6 +732,11 @@ def build_staged_cantilever(
         tip_nodes.append(NewNode(sd["tip"], tip_x, 0.0, attach=last_node))
         tip_frames.append(NewFrame(sd["tip_frame"], last_node, sd["tip"],
                                    beam_E, beam_A, beam_Iz, udl_wy=-wg))
-    plan.steps.append(BuildStep(label="tip", new_nodes=tip_nodes, new_frames=tip_frames, record=True))
+    plan.steps.append(BuildStep(label="tip_free", new_nodes=tip_nodes, new_frames=tip_frames, record=True))
+    plan.steps.append(BuildStep(label="closure_balance", balance_dofs=[
+        BalanceDof(sides[1]["tip"], 1, 0.0),  # left vertical support target: uy = 0
+        BalanceDof(sides[0]["tip"], 0, 0.0),  # right closure symmetry target: ux = 0
+        BalanceDof(sides[0]["tip"], 2, 0.0),  # right closure symmetry target: rz = 0
+    ], record=True))
 
     return plan

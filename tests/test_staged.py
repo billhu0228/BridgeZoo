@@ -1,12 +1,3 @@
-"""逐阶段施工求解器测试（对称双悬臂 + 扇面索）。
-
-1. 自研直接刚度法的运行/记录与索力历程结构（不需 openseespy）。
-2. OpenSees 交叉校核（importorskip）：同一施工计划，自研 vs OpenSees
-   （linear 索单元逐项一致 < 0.5%；corot 几何精确 < 1%，小位移算例）。
-"""
-
-import math
-
 import pytest
 
 from bridgezoo.fem.staged import StagedDirectSolver, build_staged_cantilever
@@ -22,15 +13,12 @@ def _plan(n=3, wg=5.0e4, **kw):
 def test_direct_runs_and_records():
     n = 3
     r = StagedDirectSolver().run(_plan(n))
-    # n 个 cable 记录 + 1 个 tip 记录
-    assert len(r.records) == n + 1
-    assert r.records[-1].label == "tip"
+    assert len(r.records) == n + 2
+    assert r.records[-2].label == "tip_free"
+    assert r.records[-1].label == "closure_balance"
     hist = r.cable_stress_history()
-    # 右侧首索(1001) 自 stage1 起，经 n 个 cable 步 + tip = n+1 条历程
-    assert len(hist[1001]) == n + 1
-    # 右侧第 n 索(1000+n) 仅在最后一个 cable 步与 tip 出现 = 2 条
-    assert len(hist[1000 + n]) == 2
-    # 几何信息已附带
+    assert len(hist[1001]) == n + 2
+    assert len(hist[1000 + n]) == 3
     assert set(r.anchor_ids) == {301, 302, 303}
     assert RIGHT_TIP in r.deck_ids and LEFT_TIP in r.deck_ids
     assert r.cable_nodes[1001] == (301, 1)
@@ -38,19 +26,30 @@ def test_direct_runs_and_records():
 
 
 def test_direct_stress_history_evolves():
-    """首索安装后，其应力随后续节段/张索而变化（历程非平凡，且全程受拉）。"""
     r = StagedDirectSolver().run(_plan(4))
     series = [s for _, s in r.cable_stress_history()[1001]]
-    assert len(series) == 5  # n 个 cable 步 + tip
-    assert max(series) - min(series) > 1e6  # 应力确有变化（>1 MPa）
-    assert all(s > 0 for s in series)       # 全程受拉
+    assert len(series) == 6
+    assert max(series) - min(series) > 1e6
+    assert all(s > 0 for s in series)
 
 
-def test_symmetric_plan_is_symmetric():
-    """左右几何相同 → 两侧悬臂端挠度对称（自研，纯几何）。"""
-    r = StagedDirectSolver().run(_plan(4))  # 默认左右对称
+def test_half_bridge_boundary_conditions_are_applied():
+    plan = _plan(4)
+    supports = {nid: (ux, uy, rz) for nid, ux, uy, rz in plan.supports}
+    assert supports[0] == (True, True, False)
+    assert RIGHT_TIP not in supports
+    assert LEFT_TIP not in supports
+
+    r = StagedDirectSolver().run(plan)
+    tip_free = r.records[-2]
+    assert tip_free.label == "tip_free"
+    assert abs(tip_free.disp[LEFT_TIP][1]) > 1e-12
+
     last = r.records[-1]
-    assert math.isclose(last.disp[RIGHT_TIP][1], last.disp[LEFT_TIP][1], rel_tol=1e-9, abs_tol=1e-9)
+    assert last.label == "closure_balance"
+    assert abs(last.disp[RIGHT_TIP][0]) < 1e-12
+    assert abs(last.disp[RIGHT_TIP][2]) < 1e-12
+    assert abs(last.disp[LEFT_TIP][1]) < 1e-12
 
 
 def _assert_match(rd, ro, rtol):
@@ -65,8 +64,7 @@ def _assert_match(rd, ro, rtol):
 
 
 def test_staged_matches_opensees_linear():
-    """自研(线性) vs OpenSees(线性 Truss)，小位移下逐项吻合 < 0.5%。"""
-    pytest.importorskip("openseespy", reason="需要 openseespy")
+    pytest.importorskip("openseespy", reason="requires openseespy")
     from bridgezoo.fem.staged import StagedOpenSeesSolver
 
     plan = _plan(4, wg=3.0e4)
@@ -76,8 +74,7 @@ def test_staged_matches_opensees_linear():
 
 
 def test_staged_matches_opensees_corot():
-    """自研(线性) vs OpenSees(corotTruss 几何精确)，小位移下 < 1%。"""
-    pytest.importorskip("openseespy", reason="需要 openseespy")
+    pytest.importorskip("openseespy", reason="requires openseespy")
     from bridgezoo.fem.staged import StagedOpenSeesSolver
 
     plan = _plan(4, wg=3.0e4)

@@ -163,7 +163,7 @@ def _plot_animation(result, n, scale, out, frames_dir, fps) -> None:
 
         tips = [nid for nid in (200, 201) if nid in rec.disp]
         tiptxt = "  ".join(f"{'右' if t == 200 else '左'}端 dy={rec.disp[t][1] * 1000:.1f}mm" for t in tips)
-        ax.set_title(f"正向逐阶段双悬臂施工：{rec.label}   {tiptxt}")
+        ax.set_title(f"正向逐阶段半桥施工：{rec.label}   {tiptxt}")
         ax.set_xlabel("x [m]")
         ax.set_ylabel(f"y [m]  (位移放大 {scale:g} 倍)")
         ax.set_xlim(xmin, xmax)
@@ -190,7 +190,7 @@ def _plot_animation(result, n, scale, out, frames_dir, fps) -> None:
 def main() -> None:
     p = argparse.ArgumentParser(description="绘制逐阶段双悬臂主梁增长与变形过程（扇面索）")
     p.add_argument("--n", type=int, default=6, help="每侧索数")
-    p.add_argument("--backend", choices=["direct", "opensees"], default="direct")
+    p.add_argument("--backend", choices=["direct", "opensees"], default="opensees")
     # 扇面锚点
     p.add_argument("--anchor-base", type=float, default=20.0, help="参数a：最低锚点高度")
     p.add_argument("--anchor-spacing", type=float, default=2.0, help="参数b：锚点间距")
@@ -205,8 +205,8 @@ def main() -> None:
     p.add_argument("--wg", type=float, default=1.0e5, help="主梁自重线荷载 [N/m]")
     p.add_argument("--scale", type=float, default=15.0, help="竖向位移绘图放大倍数")
     p.add_argument("--fps", type=int, default=1)
-    p.add_argument("--out", type=str, default="results/staged_deck_growth_dir.gif")
-    p.add_argument("--frames-dir", type=str, default=None)
+    p.add_argument("--out", type=str, default="results/staged_deck_growth_ops.gif")
+    p.add_argument("--frames-dir", type=str, default="results/frames")
     args = p.parse_args()
     run(args)
 
