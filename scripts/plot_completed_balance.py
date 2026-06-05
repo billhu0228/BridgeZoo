@@ -47,6 +47,8 @@ def build_completed_from_staged_params(args) -> tuple[StructuralModel, dict]:
         n,
         args.anchor_base,
         args.anchor_spacing,
+        args.left_start,
+        args.left_spacing,
         args.right_start,
         args.right_spacing,
         args.wg,

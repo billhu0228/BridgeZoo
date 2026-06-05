@@ -22,6 +22,8 @@ each side:
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
+
 from bridgezoo.fem.staged.plan import (
     BalanceDof,
     BuildStep,
@@ -37,6 +39,68 @@ _ROOT = 0
 
 def _anchor_id(i: int) -> int:
     return 300 + i
+
+
+def _right_cable_id(i: int) -> int:
+    return 1000 + i
+
+
+def _left_cable_id(i: int) -> int:
+    return 2000 + i
+
+
+def _is_sequence_value(value) -> bool:
+    return isinstance(value, Sequence) and not isinstance(value, (str, bytes))
+
+
+def _normalize_pretension(pretension, n_seg: int) -> list[tuple[float, float]]:
+    """Return stage-major ``(right, left)`` pretensions.
+
+    Backward compatible inputs with ``n_seg`` scalar values still mean the same
+    target force is applied to the right and left cable of each construction
+    stage.  New independent inputs may be supplied either as ``n_seg`` pairs or
+    as a flat stage-major sequence: ``right1, left1, right2, left2, ...``.
+    """
+
+    if pretension is None:
+        return [(0.0, 0.0)] * n_seg
+
+    if isinstance(pretension, Mapping):
+        pairs = []
+        missing = []
+        for i in range(1, n_seg + 1):
+            right_id = _right_cable_id(i)
+            left_id = _left_cable_id(i)
+            if right_id not in pretension:
+                missing.append(right_id)
+            if left_id not in pretension:
+                missing.append(left_id)
+            if right_id in pretension and left_id in pretension:
+                pairs.append((float(pretension[right_id]), float(pretension[left_id])))
+        if missing:
+            raise ValueError(f"pretension mapping is missing cable ids: {missing}")
+        return pairs
+
+    values = list(pretension)
+    if len(values) == n_seg:
+        pairs = []
+        for value in values:
+            if _is_sequence_value(value):
+                if len(value) != 2:
+                    raise ValueError("each paired pretension value must contain exactly 2 entries: (right, left)")
+                pairs.append((float(value[0]), float(value[1])))
+            else:
+                force = float(value)
+                pairs.append((force, force))
+        return pairs
+
+    if len(values) == 2 * n_seg:
+        return [(float(values[2 * k]), float(values[2 * k + 1])) for k in range(n_seg)]
+
+    raise ValueError(
+        "pretension length must be n_seg for paired input, 2*n_seg for independent "
+        "stage-major input, or a mapping keyed by cable id"
+    )
 
 
 def build_staged_cantilever(
@@ -60,7 +124,7 @@ def build_staged_cantilever(
     cable_Es: float = 1.95e11,
     strand_area: float = 1.4e-4,
     strands: list[int] | None = None,
-    pretension: list[float] | None = None,
+    pretension: Sequence[float | Sequence[float]] | Mapping[int, float] | None = None,
 ) -> StagedPlan:
     """Build a symmetric staged double-cantilever cable-stayed bridge plan.
 
@@ -72,8 +136,9 @@ def build_staged_cantilever(
 
     _ = anchor_top_free  # Geometry metadata for plotting callers; no plan DOF uses it.
     strands = strands or [20] * n_seg
-    pretension = pretension or [0.0] * n_seg
-    assert len(strands) == n_seg and len(pretension) == n_seg, "strands/pretension length must equal n_seg"
+    pretension_pairs = _normalize_pretension(pretension, n_seg)
+    if len(strands) != n_seg:
+        raise ValueError("strands length must equal n_seg")
     assert n_seg < 90, "current numbering convention requires n_seg < 90"
 
     plan = StagedPlan(name=f"staged_half_bridge_N{n_seg}")
@@ -91,9 +156,9 @@ def build_staged_cantilever(
 
     sides = [
         dict(sign=+1, start=right_start, spacing=right_spacing, end=right_end,
-             node=lambda i: i, tip=200, frame=lambda i: 10 + i, tip_frame=90, cable=lambda i: 1000 + i),
+             node=lambda i: i, tip=200, frame=lambda i: 10 + i, tip_frame=90, cable=_right_cable_id),
         dict(sign=-1, start=left_start, spacing=left_spacing, end=left_end,
-             node=lambda i: 100 + i, tip=201, frame=lambda i: 110 + i, tip_frame=190, cable=lambda i: 2000 + i),
+             node=lambda i: 100 + i, tip=201, frame=lambda i: 110 + i, tip_frame=190, cable=_left_cable_id),
     ]
 
     prev = {+1: _ROOT, -1: _ROOT}
@@ -107,9 +172,10 @@ def build_staged_cantilever(
                                        beam_E, beam_A, beam_Iz, udl_wy=-wg))
 
         area = strand_area * strands[i - 1]
+        right_tension, left_tension = pretension_pairs[i - 1]
         seg_cables = [
-            NewCable(sd["cable"](i), _anchor_id(i), sd["node"](i), cable_Es, area, tension=pretension[i - 1])
-            for sd in sides
+            NewCable(sides[0]["cable"](i), _anchor_id(i), sides[0]["node"](i), cable_Es, area, tension=right_tension),
+            NewCable(sides[1]["cable"](i), _anchor_id(i), sides[1]["node"](i), cable_Es, area, tension=left_tension),
         ]
 
         if i == 1:

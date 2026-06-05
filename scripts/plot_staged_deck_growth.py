@@ -53,14 +53,25 @@ MODEL_DEFAULTS = {
 }
 
 
-def default_pretension(n, anchor_base, anchor_spacing, right_start, right_spacing, wg):
-    """各索目标张力（粗估）：竖向分量约平衡一节段自重（用右侧几何作代表）。"""
+def default_pretension(
+    n,
+    anchor_base,
+    anchor_spacing,
+    left_start,
+    left_spacing,
+    right_start,
+    right_spacing,
+    wg,
+):
+    """各索目标张力（粗估）：按左右各自几何估计每根索的竖向平衡分量。"""
     out = []
     for i in range(1, n + 1):
         h = anchor_base + (i - 1) * anchor_spacing
-        dist = right_start + (i - 1) * right_spacing
-        L = math.hypot(dist, h)
-        out.append(wg * right_spacing * L / h)
+        right_dist = right_start + (i - 1) * right_spacing
+        left_dist = left_start + (i - 1) * left_spacing
+        right_len = math.hypot(right_dist, h)
+        left_len = math.hypot(left_dist, h)
+        out.append((wg * right_spacing * right_len / h, wg * left_spacing * left_len / h))
     return out
 
 
@@ -68,7 +79,14 @@ def run(args) -> None:
     n = args.n
     strands = [20] * n
     pretension = default_pretension(
-        n, args.anchor_base, args.anchor_spacing, args.right_start, args.right_spacing, args.wg
+        n,
+        args.anchor_base,
+        args.anchor_spacing,
+        args.left_start,
+        args.left_spacing,
+        args.right_start,
+        args.right_spacing,
+        args.wg,
     )
     plan = build_staged_cantilever(
         n_seg=n,

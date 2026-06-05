@@ -8,7 +8,7 @@ from scripts.plot_completed_balance import (
     VERTICAL_SUPPORT_NODE,
     build_completed_from_staged_params,
 )
-from scripts.plot_staged_deck_growth import MODEL_DEFAULTS
+from scripts.plot_staged_deck_growth import MODEL_DEFAULTS, default_pretension
 
 
 def _args(**kw):
@@ -60,6 +60,62 @@ def test_staged_builder_creates_completed_state():
     assert len(plan.completed.cables) == 2 * n
     assert len(plan.completed.supports) == n + 3
     assert not plan.completed.nodal_loads
+
+
+def test_staged_builder_keeps_legacy_pair_pretension():
+    plan = build_staged_cantilever(n_seg=2, strands=[20, 20], pretension=[1.0e6, 2.0e6])
+    cables = {cb.id: cb.tension for cb in plan.completed.cables}
+
+    assert cables[1001] == 1.0e6
+    assert cables[2001] == 1.0e6
+    assert cables[1002] == 2.0e6
+    assert cables[2002] == 2.0e6
+
+
+def test_staged_builder_accepts_independent_left_right_pretension_pairs():
+    plan = build_staged_cantilever(
+        n_seg=2,
+        strands=[20, 20],
+        pretension=[(1.0e6, 1.5e6), (2.0e6, 2.5e6)],
+    )
+    cables = {cb.id: cb.tension for cb in plan.completed.cables}
+
+    assert cables[1001] == 1.0e6
+    assert cables[2001] == 1.5e6
+    assert cables[1002] == 2.0e6
+    assert cables[2002] == 2.5e6
+
+
+def test_staged_builder_accepts_flat_independent_pretension():
+    plan = build_staged_cantilever(n_seg=2, strands=[20, 20], pretension=[1.0e6, 1.5e6, 2.0e6, 2.5e6])
+    cables = {cb.id: cb.tension for cb in plan.completed.cables}
+
+    assert cables[1001] == 1.0e6
+    assert cables[2001] == 1.5e6
+    assert cables[1002] == 2.0e6
+    assert cables[2002] == 2.5e6
+
+
+def test_default_pretension_uses_left_and_right_geometry():
+    pretension = default_pretension(
+        2,
+        anchor_base=32.0,
+        anchor_spacing=2.0,
+        left_start=12.0,
+        left_spacing=8.0,
+        right_start=12.0,
+        right_spacing=12.0,
+        wg=1.0e5,
+    )
+    plan = build_staged_cantilever(n_seg=2, strands=[20, 20], pretension=pretension)
+    cables = {cb.id: cb.tension for cb in plan.completed.cables}
+
+    assert len(pretension) == 2
+    assert pretension[0][0] != pretension[0][1]
+    assert cables[1001] == pretension[0][0]
+    assert cables[2001] == pretension[0][1]
+    assert cables[1002] == pretension[1][0]
+    assert cables[2002] == pretension[1][1]
 
 
 def test_completed_projects_gravity_for_left_and_right_member_directions():

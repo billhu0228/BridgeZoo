@@ -70,6 +70,8 @@ def run(args, tol_rel: float) -> bool:
         n,
         args.anchor_base,
         args.anchor_spacing,
+        args.left_start,
+        args.left_spacing,
         args.right_start,
         args.right_spacing,
         args.wg,
