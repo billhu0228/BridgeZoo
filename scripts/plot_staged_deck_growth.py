@@ -46,7 +46,7 @@ def default_pretension(n, anchor_base, anchor_spacing, right_start, right_spacin
         h = anchor_base + (i - 1) * anchor_spacing
         dist = right_start + (i - 1) * right_spacing
         L = math.hypot(dist, h)
-        out.append(2.0 * wg * right_spacing * L / h)
+        out.append(wg * right_spacing * L / h)
     return out
 
 
@@ -193,19 +193,19 @@ def main() -> None:
     p.add_argument("--backend", choices=["direct", "opensees"], default="direct")
     # 扇面锚点
     p.add_argument("--anchor-base", type=float, default=20.0, help="参数a：最低锚点高度")
-    p.add_argument("--anchor-spacing", type=float, default=3.0, help="参数b：锚点间距")
-    p.add_argument("--anchor-free", type=float, default=5.0, help="参数c：顶部自由高度")
+    p.add_argument("--anchor-spacing", type=float, default=2.0, help="参数b：锚点间距")
+    p.add_argument("--anchor-free", type=float, default=3.0, help="参数c：顶部自由高度")
     # 双悬臂（左右）
-    p.add_argument("--left-start", type=float, default=6.0)
+    p.add_argument("--left-start", type=float, default=10.0)
     p.add_argument("--left-spacing", type=float, default=8.0)
     p.add_argument("--left-end", type=float, default=4.0)
-    p.add_argument("--right-start", type=float, default=6.0)
-    p.add_argument("--right-spacing", type=float, default=8.0)
+    p.add_argument("--right-start", type=float, default=10.0)
+    p.add_argument("--right-spacing", type=float, default=12.0)
     p.add_argument("--right-end", type=float, default=4.0)
     p.add_argument("--wg", type=float, default=1.0e5, help="主梁自重线荷载 [N/m]")
     p.add_argument("--scale", type=float, default=15.0, help="竖向位移绘图放大倍数")
     p.add_argument("--fps", type=int, default=1)
-    p.add_argument("--out", type=str, default="results/staged_deck_growth.gif")
+    p.add_argument("--out", type=str, default="results/staged_deck_growth_dir.gif")
     p.add_argument("--frames-dir", type=str, default=None)
     args = p.parse_args()
     run(args)
