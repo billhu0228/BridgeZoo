@@ -69,6 +69,6 @@ def build_stages(geometry) -> list[ConstructionStage]:
     list[ConstructionStage]
 
     TODO(M1/M2): 依据 geometry 的节点/单元编号约定，按上面的施工序列生成阶段列表，
-    与 :mod:`bridgezoo.fem.opensees_ref` 的编号保持一致以便校核。
+    与 :mod:`bridgezoo.fem.oneshot.opensees_ref` 的编号保持一致以便校核。
     """
     raise NotImplementedError("TODO(M1/M2): staged_builder.build_stages")

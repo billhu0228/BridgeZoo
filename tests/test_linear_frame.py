@@ -85,8 +85,8 @@ def test_cable_bridge_matches_opensees():
     """同一斜拉桥 StructuralModel：直接刚度法 vs OpenSees，逐项一致。"""
     pytest.importorskip("openseespy", reason="需要 openseespy")
     from bridgezoo.envs.geometry import BridgeGeometry
-    from bridgezoo.fem.builder import build_cable_bridge
-    from bridgezoo.fem.opensees_backend import OpenSeesSolver
+    from bridgezoo.fem.oneshot.builder import build_cable_bridge
+    from bridgezoo.fem.oneshot.opensees_backend import OpenSeesSolver
 
     geom = BridgeGeometry(num_cables_per_side=6)
     model = build_cable_bridge(geom, [600.0] * 6, [20] * 6)

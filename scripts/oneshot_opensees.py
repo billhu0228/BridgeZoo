@@ -1,7 +1,7 @@
 """一次成桥（one-shot）OpenSees 计算示例。
 
 构建一个基本的二维斜拉桥模型（由 :class:`BridgeGeometry` 给出几何），假定一组
-均匀的拉索初应力与股数，调用 :mod:`bridgezoo.fem.opensees_ref` 做**一次性成桥**
+均匀的拉索初应力与股数，调用 :mod:`bridgezoo.fem.oneshot.opensees_ref` 做**一次性成桥**
 静力分析，并提取代表性结果：
 
 - 主梁线形（各梁节点竖向位移）；
@@ -33,7 +33,7 @@ if ROOT not in sys.path:
 import numpy as np
 
 from bridgezoo.envs.geometry import BridgeGeometry
-from bridgezoo.fem.opensees_ref import build_oneshot_fem
+from bridgezoo.fem.oneshot.opensees_ref import build_oneshot_fem
 
 
 def run(n: int, sigma: float, strands: int, plot: str | None) -> dict:

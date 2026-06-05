@@ -1,7 +1,7 @@
 """自研轻量二维直接刚度法求解器（求解后端之一）。
 
 消费 :class:`bridgezoo.fem.model.StructuralModel`，返回 :class:`bridgezoo.fem.model.SolveResult`，
-与 :mod:`bridgezoo.fem.opensees_backend` 接口一致、结果应一致（用于交叉校核）。
+与 :mod:`bridgezoo.fem.oneshot.opensees_backend` 接口一致、结果应一致（用于交叉校核）。
 
 单元
 ----

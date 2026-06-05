@@ -2,7 +2,7 @@
 
 这是"**一套结构定义**"的落点：调用一次得到 :class:`StructuralModel`，即可分别交给
 直接刚度法或 OpenSees 后端求解并对比。节点/单元编号沿用历史约定（见 geometry.py），
-便于与 :func:`bridgezoo.fem.opensees_ref.build_oneshot_fem` 对照。
+便于与 :func:`bridgezoo.fem.oneshot.opensees_ref.build_oneshot_fem` 对照。
 """
 
 from __future__ import annotations

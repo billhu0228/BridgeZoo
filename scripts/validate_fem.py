@@ -23,9 +23,9 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from bridgezoo.envs.geometry import BridgeGeometry
-from bridgezoo.fem.builder import build_cable_bridge
+from bridgezoo.fem.oneshot.builder import build_cable_bridge
 from bridgezoo.fem.linear_frame import DirectStiffnessSolver
-from bridgezoo.fem.opensees_backend import OpenSeesSolver
+from bridgezoo.fem.oneshot.opensees_backend import OpenSeesSolver
 
 
 def _max_abs_diff(a: dict, b: dict):

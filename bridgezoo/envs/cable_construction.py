@@ -11,7 +11,7 @@
   + 势能塑形（potential-based，鼓励每次张拉改善线形）。
 
 力学内核用 :class:`bridgezoo.fem.linear_frame.StagedFrameModel`，阶段序列由
-:func:`bridgezoo.fem.staged_builder.build_stages` 生成。
+:func:`bridgezoo.fem.staged.sequence.build_stages` 生成。
 
 参见 ``docs/DESIGN_MAPPO.md`` 第 5 节。
 """

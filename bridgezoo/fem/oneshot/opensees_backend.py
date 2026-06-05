@@ -9,7 +9,7 @@
   ``corotTruss``——避免几何非线性带来的差异，确保与线性直接刚度法逐项对齐。
 - 均布荷载：``eleLoad -beamUniform Wy``（局部横向），与直接刚度法一致等效节点荷载对应。
 
-> 注意：施工阶段分析（几何非线性、切线激活）请用 :mod:`bridgezoo.fem.opensees_staged`，
+> 注意：施工阶段分析（几何非线性、切线激活）请用 :mod:`bridgezoo.fem.staged`，
 > 那里用 corotTruss。本后端专注于"成桥/单阶段线性"工况的对照。
 
 需要 openseespy（惰性导入；其 DLL 对 Python 版本敏感，建议 3.11–3.13）。
