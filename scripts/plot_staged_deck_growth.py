@@ -39,14 +39,14 @@ from bridgezoo.fem.staged import (
 )
 
 MODEL_DEFAULTS = {
-    "n": 6,
-    "anchor_base": 20.0,
+    "n": 8,
+    "anchor_base": 32.0,
     "anchor_spacing": 2.0,
-    "anchor_free": 3.0,
-    "left_start": 10.0,
+    "anchor_free": 10.0,
+    "left_start": 12.0,
     "left_spacing": 8.0,
     "left_end": 4.0,
-    "right_start": 10.0,
+    "right_start": 12.0,
     "right_spacing": 12.0,
     "right_end": 4.0,
     "wg": 1.0e5,
@@ -175,6 +175,8 @@ def _plot_animation(result, n, scale, out, frames_dir, fps) -> None:
         out_path.parent.mkdir(parents=True, exist_ok=True)
     if frames_path is not None:
         frames_path.mkdir(parents=True, exist_ok=True)
+        for stale in frames_path.glob("stage_*.png"):
+            stale.unlink()
 
     # 画幅范围（含塔、所有梁节点、放大后的变形）
     xs_all = [coords[nid][0] for nid in result.deck_ids]
@@ -258,24 +260,24 @@ def _plot_animation(result, n, scale, out, frames_dir, fps) -> None:
 
 def main() -> None:
     p = argparse.ArgumentParser(description="绘制逐阶段双悬臂主梁增长与变形过程（扇面索）")
-    p.add_argument("--n", type=int, default=6, help="每侧索数")
-    p.add_argument("--backend", choices=["direct", "opensees"], default="direct")
+    p.add_argument("--n", type=int, default=MODEL_DEFAULTS["n"], help="每侧索数")
+    p.add_argument("--backend", choices=["direct", "opensees"], default="opensees")
     # 扇面锚点
-    p.add_argument("--anchor-base", type=float, default=20.0, help="参数a：最低锚点高度")
-    p.add_argument("--anchor-spacing", type=float, default=2.0, help="参数b：锚点间距")
-    p.add_argument("--anchor-free", type=float, default=3.0, help="参数c：顶部自由高度")
+    p.add_argument("--anchor-base", type=float, default=MODEL_DEFAULTS["anchor_base"], help="参数a：最低锚点高度")
+    p.add_argument("--anchor-spacing", type=float, default=MODEL_DEFAULTS["anchor_spacing"], help="参数b：锚点间距")
+    p.add_argument("--anchor-free", type=float, default=MODEL_DEFAULTS["anchor_free"], help="参数c：顶部自由高度")
     # 双悬臂（左右）
-    p.add_argument("--left-start", type=float, default=10.0)
-    p.add_argument("--left-spacing", type=float, default=8.0)
-    p.add_argument("--left-end", type=float, default=4.0)
-    p.add_argument("--right-start", type=float, default=10.0)
-    p.add_argument("--right-spacing", type=float, default=12.0)
-    p.add_argument("--right-end", type=float, default=4.0)
-    p.add_argument("--wg", type=float, default=1.0e5, help="主梁自重线荷载 [N/m]")
-    p.add_argument("--scale", type=float, default=15.0, help="竖向位移绘图放大倍数")
+    p.add_argument("--left-start", type=float, default=MODEL_DEFAULTS["left_start"])
+    p.add_argument("--left-spacing", type=float, default=MODEL_DEFAULTS["left_spacing"])
+    p.add_argument("--left-end", type=float, default=MODEL_DEFAULTS["left_end"])
+    p.add_argument("--right-start", type=float, default=MODEL_DEFAULTS["right_start"])
+    p.add_argument("--right-spacing", type=float, default=MODEL_DEFAULTS["right_spacing"])
+    p.add_argument("--right-end", type=float, default=MODEL_DEFAULTS["right_end"])
+    p.add_argument("--wg", type=float, default=MODEL_DEFAULTS["wg"], help="主梁自重线荷载 [N/m]")
+    p.add_argument("--scale", type=float, default=10.0, help="竖向位移绘图放大倍数")
     p.add_argument("--fps", type=int, default=1)
-    p.add_argument("--out", type=str, default="results/staged_deck_growth_dir.gif")
-    p.add_argument("--frames-dir", type=str, default="results/frames2")
+    p.add_argument("--out", type=str, default="results/staged_deck_growth_ops.gif")
+    p.add_argument("--frames-dir", type=str, default="results/frames")
     args = p.parse_args()
     run(args)
 
