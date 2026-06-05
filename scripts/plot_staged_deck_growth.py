@@ -89,6 +89,59 @@ def _present_deck(result, record) -> list[int]:
     return sorted(ids, key=lambda nid: result.coords[nid][0])
 
 
+def _force_label(fx: float, fy: float, mz: float) -> str:
+    parts = []
+    if abs(fx) > 1e-9:
+        parts.append(f"Fx={fx / 1e3:.1f} kN")
+    if abs(fy) > 1e-9:
+        parts.append(f"Fy={fy / 1e3:.1f} kN")
+    if abs(mz) > 1e-9:
+        parts.append(f"Mz={mz / 1e3:.1f} kN*m")
+    return "\n".join(parts)
+
+
+def _draw_applied_loads(ax, result, rec, scale: float, span: float) -> None:
+    loads = getattr(rec, "applied_loads", {})
+    if not loads:
+        return
+
+    force_norms = [math.hypot(fx, fy) for fx, fy, _ in loads.values()]
+    max_force = max(force_norms + [1.0])
+    arrow_len = 0.08 * span
+    first_arrow = True
+
+    for nid, (fx, fy, mz) in loads.items():
+        if nid not in rec.disp or nid not in result.coords:
+            continue
+        x = result.coords[nid][0]
+        y = result.coords[nid][1] + rec.disp[nid][1] * scale
+        fmag = math.hypot(fx, fy)
+
+        if fmag > 1e-9:
+            dx = arrow_len * fx / max_force
+            dy = arrow_len * fy / max_force
+            ax.annotate(
+                "",
+                xy=(x + dx, y + dy),
+                xytext=(x, y),
+                arrowprops=dict(arrowstyle="->", lw=2.2, color="#7b3294"),
+            )
+            if first_arrow:
+                ax.plot([], [], color="#7b3294", lw=2.2, label="闭合外荷载")
+                first_arrow = False
+
+        if abs(mz) > 1e-9:
+            symbol = "Mz+" if mz > 0 else "Mz-"
+            ax.text(x, y + 0.06 * span, symbol, color="#7b3294",
+                    ha="center", va="center", fontsize=18, fontweight="bold")
+
+        label = _force_label(fx, fy, mz)
+        if label:
+            ax.text(x + 0.015 * span, y + 0.025 * span, label,
+                    color="#4a1486", fontsize=8,
+                    bbox=dict(boxstyle="round,pad=0.25", fc="white", ec="#7b3294", alpha=0.88))
+
+
 def _plot_animation(result, n, scale, out, frames_dir, fps) -> None:
     import matplotlib
 
@@ -115,7 +168,7 @@ def _plot_animation(result, n, scale, out, frames_dir, fps) -> None:
     all_y = [coords[nid][1] + rec.disp[nid][1] * scale
              for rec in records for nid in result.deck_ids if nid in rec.disp]
     span = (max(xs_all) - min(xs_all)) or 1.0
-    xmin, xmax = min(xs_all) - 0.06 * span, max(xs_all) + 0.06 * span
+    xmin, xmax = min(xs_all) - 0.12 * span, max(xs_all) + 0.12 * span
     ymin = min(all_y + [0.0]) - 0.10 * tower_top
     ymax = max(all_y + [tower_top]) + 0.10 * tower_top
 
@@ -163,6 +216,8 @@ def _plot_animation(result, n, scale, out, frames_dir, fps) -> None:
 
         tips = [nid for nid in (200, 201) if nid in rec.disp]
         tiptxt = "  ".join(f"{'右' if t == 200 else '左'}端 dy={rec.disp[t][1] * 1000:.1f}mm" for t in tips)
+        if k == len(records) - 1:
+            _draw_applied_loads(ax, result, rec, scale, span)
         ax.set_title(f"正向逐阶段半桥施工：{rec.label}   {tiptxt}")
         ax.set_xlabel("x [m]")
         ax.set_ylabel(f"y [m]  (位移放大 {scale:g} 倍)")

@@ -108,6 +108,7 @@ class StagedStepRecord:
     disp: dict[int, tuple[float, float, float]]
     cable_force: dict[int, float]
     cable_stress: dict[int, float]
+    applied_loads: dict[int, tuple[float, float, float]] = field(default_factory=dict)
 
 
 @dataclass
@@ -186,6 +187,7 @@ class StagedDirectSolver:
         for step in plan.steps:
             self._activate(step)
             dF = self._incremental_loads(step)
+            self._last_applied_loads = self._explicit_nodal_loads(step)
             self._solve_increment(dF, step.balance_dofs)
             if step.record:
                 result.records.append(self._record(step.label))
@@ -251,6 +253,14 @@ class StagedDirectSolver:
         for nl in step.nodal_loads:
             add(nl.node, np.array([nl.fx, nl.fy, nl.mz], dtype=float))
         return dF
+
+    @staticmethod
+    def _explicit_nodal_loads(step: BuildStep) -> dict[int, np.ndarray]:
+        loads: dict[int, np.ndarray] = {}
+        for nl in step.nodal_loads:
+            loads.setdefault(nl.node, np.zeros(3))
+            loads[nl.node] += np.array([nl.fx, nl.fy, nl.mz], dtype=float)
+        return loads
 
     def _solve_increment(self, dF: dict[int, np.ndarray], balance_dofs: list[BalanceDof] | None = None) -> None:
         active = list(self.coords.keys())
@@ -332,6 +342,9 @@ class StagedDirectSolver:
                 rhs = np.array(target) - current[free[control]] - base_du[control]
                 balance_load = np.linalg.solve(flex, rhs)
                 Ff = Ff + unit @ balance_load
+                for bd, value in zip(balance_dofs, balance_load):
+                    self._last_applied_loads.setdefault(bd.node, np.zeros(3))
+                    self._last_applied_loads[bd.node][bd.dof] += float(value)
             du[free] = np.linalg.solve(Kff, Ff)
 
         for nid in active:
@@ -350,7 +363,8 @@ class StagedDirectSolver:
             N = cb["N0"] + o.E * o.A / L * elong
             cforce[o.id] = float(N)
             cstress[o.id] = float(N / o.A)
-        return StagedStepRecord(label=label, disp=disp, cable_force=cforce, cable_stress=cstress)
+        loads = {nid: tuple(float(x) for x in vec) for nid, vec in getattr(self, "_last_applied_loads", {}).items()}
+        return StagedStepRecord(label=label, disp=disp, cable_force=cforce, cable_stress=cstress, applied_loads=loads)
 
 
 # ============================================================ OpenSees 后端（线性，校核用）
@@ -456,6 +470,14 @@ class StagedOpenSeesSolver:
             self._cable_ids.append(cb.id)
             self.cables.append(cb)
 
+    @staticmethod
+    def _explicit_nodal_loads(step) -> dict[int, np.ndarray]:
+        loads: dict[int, np.ndarray] = {}
+        for nl in step.nodal_loads:
+            loads.setdefault(nl.node, np.zeros(3))
+            loads[nl.node] += np.array([nl.fx, nl.fy, nl.mz], dtype=float)
+        return loads
+
     def _step_loads(self, step) -> dict[int, np.ndarray]:
         dF: dict[int, np.ndarray] = {}
 
@@ -547,6 +569,10 @@ class StagedOpenSeesSolver:
         ts = pat = 10000 + self._pat
         dF = self._step_loads(step)
         balance_loads = self._balance_loads(step, dF)
+        self._last_applied_loads = self._explicit_nodal_loads(step)
+        for nid, vec in balance_loads.items():
+            self._last_applied_loads.setdefault(nid, np.zeros(3))
+            self._last_applied_loads[nid] += vec
         ops.wipeAnalysis()
         has_load = any(fr.udl_wy != 0.0 for fr in step.new_frames) or bool(step.nodal_loads) or bool(balance_loads)
         if has_load:
@@ -589,7 +615,8 @@ class StagedOpenSeesSolver:
                     break
             cforce[cid] = N
             cstress[cid] = N / self._areas[cid]
-        return StagedStepRecord(label=label, disp=disp, cable_force=cforce, cable_stress=cstress)
+        loads = {nid: tuple(float(x) for x in vec) for nid, vec in getattr(self, "_last_applied_loads", {}).items()}
+        return StagedStepRecord(label=label, disp=disp, cable_force=cforce, cable_stress=cstress, applied_loads=loads)
 
 
 # ============================================================ 施工计划构建器

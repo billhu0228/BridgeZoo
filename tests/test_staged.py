@@ -52,15 +52,25 @@ def test_half_bridge_boundary_conditions_are_applied():
     assert abs(last.disp[LEFT_TIP][1]) < 1e-12
 
 
-def _assert_match(rd, ro, rtol):
-    hd = {c: v[-1][1] for c, v in rd.cable_stress_history().items()}
-    ho = {c: v[-1][1] for c, v in ro.cable_stress_history().items()}
+def _assert_match(rd, ro, rtol, history_index=-2, record_index=-2):
+    hd = {c: v[history_index][1] for c, v in rd.cable_stress_history().items()}
+    ho = {c: v[history_index][1] for c, v in ro.cable_stress_history().items()}
     scale = max(abs(v) for v in hd.values())
     for c in hd:
         assert abs(hd[c] - ho[c]) < rtol * scale
-    for tip in (RIGHT_TIP, LEFT_TIP):
-        da, db = rd.records[-1].disp[tip][1], ro.records[-1].disp[tip][1]
-        assert abs(da - db) <= rtol * max(abs(da), abs(db), 1e-9)
+    da_rec, db_rec = rd.records[record_index], ro.records[record_index]
+    nodes = set(da_rec.disp) & set(db_rec.disp)
+    y_scale = max(max(abs(da_rec.disp[nid][1]), abs(db_rec.disp[nid][1]), 1e-9) for nid in nodes)
+    for nid in nodes:
+        assert abs(da_rec.disp[nid][1] - db_rec.disp[nid][1]) <= rtol * y_scale
+
+
+def _assert_opensees_closure_residual(ro):
+    last = ro.records[-1]
+    assert last.label == "closure_balance"
+    assert abs(last.disp[LEFT_TIP][1]) < 1e-10
+    assert abs(last.disp[RIGHT_TIP][0]) < 1e-10
+    assert abs(last.disp[RIGHT_TIP][2]) < 1e-10
 
 
 def test_staged_matches_opensees_linear():
@@ -71,6 +81,7 @@ def test_staged_matches_opensees_linear():
     rd = StagedDirectSolver().run(plan)
     ro = StagedOpenSeesSolver(cable_element="linear").run(plan)
     _assert_match(rd, ro, rtol=5e-3)
+    _assert_opensees_closure_residual(ro)
 
 
 def test_staged_matches_opensees_corot():
@@ -81,3 +92,4 @@ def test_staged_matches_opensees_corot():
     rd = StagedDirectSolver().run(plan)
     ro = StagedOpenSeesSolver(cable_element="corot").run(plan)
     _assert_match(rd, ro, rtol=1e-2)
+    _assert_opensees_closure_residual(ro)
