@@ -1,8 +1,11 @@
 """交叉校核：同一结构定义，自研直接刚度法 vs OpenSees，结果应一致。
 
-流程：用 :func:`bridgezoo.fem.builder.build_cable_bridge` 构建**一个** ``StructuralModel``，
+流程：由 :func:`bridgezoo.fem.staged.build_staged_cantilever` 的施工计划派生出成桥
+(完成态) ``StructuralModel``（:func:`bridgezoo.fem.staged.build_oneshot_model`），
 分别交给 :class:`DirectStiffnessSolver` 与 :class:`OpenSeesSolver` 求解，逐项对比节点
 位移、梁端力、索力，输出最大绝对/相对误差并按阈值判定通过。这是论文实验 E1 的证据。
+
+> 校核对象为单塔双悬臂半桥（与施工阶段模型同源）。
 
 用法::
 
@@ -22,10 +25,12 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-from bridgezoo.envs.geometry import BridgeGeometry
-from bridgezoo.fem.oneshot.builder import build_cable_bridge
 from bridgezoo.fem.linear_frame import DirectStiffnessSolver
-from bridgezoo.fem.oneshot.opensees_backend import OpenSeesSolver
+from bridgezoo.fem.opensees_backend import OpenSeesSolver
+from bridgezoo.fem.staged import build_oneshot_model, build_staged_cantilever
+
+# 单股钢绞线截面积 (m²)，与 build_staged_cantilever 的默认一致，用于把目标初应力换算为预张力。
+STRAND_AREA = 1.4e-4
 
 
 def _max_abs_diff(a: dict, b: dict):
@@ -46,10 +51,15 @@ def _max_abs_diff(a: dict, b: dict):
 
 
 def run(n: int, sigma: float, strands: int, tol_rel: float) -> bool:
-    geom = BridgeGeometry(num_cables_per_side=n)
-    cable_sigma = [float(sigma)] * n
-    cable_sizes = [int(strands)] * n
-    model = build_cable_bridge(geom, cable_sigma, cable_sizes)
+    # 由施工计划派生成桥状态：各索目标初应力 sigma(MPa) → 预张力 T = sigma·A。
+    pretension = sigma * 1e6 * STRAND_AREA * strands
+    plan = build_staged_cantilever(
+        n_seg=n,
+        strand_area=STRAND_AREA,
+        strands=[int(strands)] * n,
+        pretension=[pretension] * n,
+    )
+    model, _ = build_oneshot_model(plan)
     print("结构定义：", model.summary())
 
     r_direct = DirectStiffnessSolver().solve(model)
@@ -72,10 +82,10 @@ def run(n: int, sigma: float, strands: int, tol_rel: float) -> bool:
     print(f"  梁端力          : max|Δ|={fa:.3e} N·(m) max rel={fr:.3e}")
     print(f"  索力 N          : max|Δ|={ca:.3e} N    max rel={cr:.3e}")
 
-    # 抽样展示
-    print("\n  抽样（跨中节点竖向位移, mm）：")
-    mid = n + 3
-    print(f"    direct  ={r_direct.uy(mid) * 1000:10.4f}  opensees={r_ops.uy(mid) * 1000:10.4f}")
+    # 抽样展示（右悬臂端节点 200 竖向位移；右塔根索 1001 轴力）
+    tip = 200
+    print("\n  抽样（右悬臂端节点竖向位移, mm）：")
+    print(f"    direct  ={r_direct.uy(tip) * 1000:10.4f}  opensees={r_ops.uy(tip) * 1000:10.4f}")
     print("  抽样（索 1001 轴力, kN）：")
     print(f"    direct  ={r_direct.cable_force[1001] / 1e3:10.3f}  opensees={r_ops.cable_force[1001] / 1e3:10.3f}")
 
@@ -86,7 +96,7 @@ def run(n: int, sigma: float, strands: int, tol_rel: float) -> bool:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="自研直接刚度法 vs OpenSees 交叉校核")
-    parser.add_argument("--n", type=int, default=6, help="单侧索对数（偶数）")
+    parser.add_argument("--n", type=int, default=6, help="每侧索数（节段数）")
     parser.add_argument("--sigma", type=float, default=600.0, help="各索初应力 (MPa)")
     parser.add_argument("--strands", type=int, default=20, help="各索股数")
     parser.add_argument("--tol", type=float, default=1e-4, help="相对误差阈值")

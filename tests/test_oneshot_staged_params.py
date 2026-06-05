@@ -1,6 +1,7 @@
 from argparse import Namespace
 
 from bridgezoo.fem.linear_frame import DirectStiffnessSolver
+from bridgezoo.fem.staged import build_staged_cantilever
 from scripts.plot_oneshot_balance import (
     MIDSPAN_NODE,
     TOWER_DECK_NODE,
@@ -47,6 +48,18 @@ def test_oneshot_uses_staged_model_geometry_defaults():
     xs = [meta["coords"][nid][0] for nid in meta["deck_ids"]]
     assert min(xs) == -(args.left_start + (n - 1) * args.left_spacing + args.left_end)
     assert max(xs) == args.right_start + (n - 1) * args.right_spacing + args.right_end
+
+
+def test_staged_builder_creates_oneshot_state():
+    n = 4
+    plan = build_staged_cantilever(n_seg=n, strands=[20] * n, pretension=[1.0e6] * n)
+
+    assert plan.oneshot is not None
+    assert len(plan.oneshot.nodes) == 2 * n + 3 + n
+    assert len(plan.oneshot.frames) == 2 * n + 2
+    assert len(plan.oneshot.cables) == 2 * n
+    assert len(plan.oneshot.supports) == n + 3
+    assert not plan.oneshot.nodal_loads
 
 
 def test_oneshot_projects_gravity_for_left_and_right_member_directions():

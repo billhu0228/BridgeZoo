@@ -6,7 +6,7 @@
 约定：对称双塔三跨，二维，单侧 ``num_cables_per_side``（须为偶数）对索，左右对称、
 以"索对"为单位。坐标系原点在跨中、x 向右、y 向上。
 
-节点/单元编号约定（与 :mod:`bridgezoo.fem.oneshot.opensees_ref` 保持一致）：
+节点/单元编号约定（沿用历史双塔成桥模型，参考 ``archive/fem_legacy/oneshot_opensees_ref.py``）：
 
 - 梁节点：``1 .. 2*N+5``，按 x 升序。
 - 索塔节点：左塔 ``1001+i``，右塔 ``3001+i`` （``i = 0 .. N/2-1``，自塔顶向下）。

@@ -4,7 +4,7 @@
 
 - 本模块只描述"结构是什么"（节点、梁单元、索单元、约束、荷载），不含任何求解器细节。
 - :mod:`bridgezoo.fem.linear_frame`（自研直接刚度法）与
-  :mod:`bridgezoo.fem.oneshot.opensees_backend`（OpenSees）都消费同一个 :class:`StructuralModel`，
+  :mod:`bridgezoo.fem.opensees_backend`（OpenSees）都消费同一个 :class:`StructuralModel`，
   返回同一种 :class:`SolveResult`，从而可交叉校核自研求解器的正确性。
 
 约定

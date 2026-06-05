@@ -15,7 +15,6 @@ uses the same node ids, and cable forces/stresses use the same cable ids.
 from __future__ import annotations
 
 import argparse
-import math
 import os
 import sys
 from pathlib import Path
@@ -27,8 +26,12 @@ PROJECT_ROOT = Path(ROOT)
 
 from bridgezoo.fem.linear_frame import DirectStiffnessSolver
 from bridgezoo.fem.model import SolveResult, StructuralModel
-from bridgezoo.fem.oneshot.opensees_backend import OpenSeesSolver
-from bridgezoo.fem.staged import StagedDirectSolver, build_staged_cantilever
+from bridgezoo.fem.opensees_backend import OpenSeesSolver
+from bridgezoo.fem.staged import (
+    StagedDirectSolver,
+    build_oneshot_model,
+    build_staged_cantilever,
+)
 from scripts.plot_staged_deck_growth import MODEL_DEFAULTS, default_pretension
 
 TOWER_DECK_NODE = 0
@@ -65,66 +68,10 @@ def build_oneshot_from_staged_params(args) -> tuple[StructuralModel, dict]:
         pretension=pretension,
     )
 
-    model = StructuralModel(name=f"oneshot_from_staged_N{n}")
-    coords: dict[int, tuple[float, float]] = {}
-    deck_ids: list[int] = []
-    anchor_ids: list[int] = []
-    cable_nodes: dict[int, tuple[int, int]] = {}
-
-    for nd in plan.init_nodes:
-        model.add_node(nd.id, nd.x, nd.y)
-        coords[nd.id] = (nd.x, nd.y)
-    for step in plan.steps:
-        for nd in step.new_nodes:
-            model.add_node(nd.id, nd.x, nd.y)
-            coords[nd.id] = (nd.x, nd.y)
-
-    for nid, (_, y) in coords.items():
-        if y > 1e-9:
-            anchor_ids.append(nid)
-        else:
-            deck_ids.append(nid)
-    deck_ids.sort(key=lambda nid: coords[nid][0])
-    anchor_ids.sort(key=lambda nid: coords[nid][1])
-
-    _apply_completed_bridge_supports(model, plan, anchor_ids)
-
-    for step in plan.steps:
-        for fr in step.new_frames:
-            model.add_frame(fr.id, fr.i, fr.j, fr.E, fr.A, fr.I)
-            xi, yi = coords[fr.i]
-            xj, yj = coords[fr.j]
-            length = math.hypot(xj - xi, yj - yi)
-            c = (xj - xi) / length
-            # StructuralModel stores OpenSees local transverse load Wy.  The
-            # staged plan defines global gravity, so project it for each beam
-            # direction.  This matters for left-side beams with reversed x.
-            model.add_member_udl(fr.id, args.wg * -c)
-        for cb in step.new_cables:
-            model.add_cable(cb.id, cb.i, cb.j, cb.E, cb.A, cb.tension)
-            cable_nodes[cb.id] = (cb.i, cb.j)
-
-    meta = {
-        "coords": coords,
-        "deck_ids": deck_ids,
-        "anchor_ids": anchor_ids,
-        "cable_nodes": cable_nodes,
-        "pretension": pretension,
-        "plan": plan,
-    }
+    model, meta = build_oneshot_model(plan, name=f"oneshot_from_staged_N{n}")
+    meta["pretension"] = pretension
+    meta["plan"] = plan
     return model, meta
-
-
-def _apply_completed_bridge_supports(model: StructuralModel, plan, anchor_ids: list[int]) -> None:
-    """Apply final one-shot supports, not staged closure-equivalent loads."""
-
-    plan_supports = {node: (ux, uy, rz) for node, ux, uy, rz in plan.supports}
-    for node in anchor_ids:
-        ux, uy, rz = plan_supports[node]
-        model.add_support(node, ux=ux, uy=uy, rz=rz)
-    model.add_support(TOWER_DECK_NODE, ux=True, uy=True, rz=False)
-    model.add_support(VERTICAL_SUPPORT_NODE, ux=False, uy=True, rz=False)
-    model.add_support(MIDSPAN_NODE, ux=True, uy=False, rz=True)
 
 
 def run(args) -> dict:

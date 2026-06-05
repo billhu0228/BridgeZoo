@@ -28,6 +28,7 @@ from bridgezoo.fem.staged.plan import (
     NewCable,
     NewFrame,
     NewNode,
+    OneShotState,
     StagedPlan,
 )
 
@@ -136,5 +137,33 @@ def build_staged_cantilever(
         BalanceDof(sides[0]["tip"], 0, 0.0),
         BalanceDof(sides[0]["tip"], 2, 0.0),
     ], record=True))
+    plan.oneshot = _build_oneshot_state(plan, left_tip=sides[1]["tip"], right_tip=sides[0]["tip"])
 
     return plan
+
+
+def _build_oneshot_state(plan: StagedPlan, left_tip: int, right_tip: int) -> OneShotState:
+    nodes = list(plan.init_nodes)
+    frames = []
+    cables = []
+    nodal_loads = []
+    for step in plan.steps:
+        nodes.extend(step.new_nodes)
+        frames.extend(step.new_frames)
+        cables.extend(step.new_cables)
+        nodal_loads.extend(step.nodal_loads)
+
+    anchor_supports = [sp for sp in plan.supports if sp[0] != _ROOT]
+    supports = [
+        *anchor_supports,
+        (_ROOT, True, True, False),
+        (left_tip, False, True, False),
+        (right_tip, True, False, True),
+    ]
+    return OneShotState(
+        nodes=nodes,
+        frames=frames,
+        cables=cables,
+        supports=supports,
+        nodal_loads=nodal_loads,
+    )

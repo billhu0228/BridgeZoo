@@ -89,11 +89,24 @@ class BuildStep:
 
 
 @dataclass
+class OneShotState:
+    """Completed-bridge state derived from the staged construction plan."""
+
+    label: str = "oneshot"
+    nodes: list[NewNode] = field(default_factory=list)
+    frames: list[NewFrame] = field(default_factory=list)
+    cables: list[NewCable] = field(default_factory=list)
+    supports: list[tuple[int, bool, bool, bool]] = field(default_factory=list)
+    nodal_loads: list[NodalLoad] = field(default_factory=list)
+
+
+@dataclass
 class StagedPlan:
     name: str
     init_nodes: list[NewNode] = field(default_factory=list)        # 阶段0已存在的节点
     supports: list[tuple[int, bool, bool, bool]] = field(default_factory=list)
     steps: list[BuildStep] = field(default_factory=list)
+    oneshot: OneShotState | None = None
 
 
 # ============================================================ 结果

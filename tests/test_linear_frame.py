@@ -82,14 +82,23 @@ def test_cable_pretension_between_fixed_nodes():
 
 # ----------------------------------------------------------- OpenSees 交叉校核
 def test_cable_bridge_matches_opensees():
-    """同一斜拉桥 StructuralModel：直接刚度法 vs OpenSees，逐项一致。"""
-    pytest.importorskip("openseespy", reason="需要 openseespy")
-    from bridgezoo.envs.geometry import BridgeGeometry
-    from bridgezoo.fem.oneshot.builder import build_cable_bridge
-    from bridgezoo.fem.oneshot.opensees_backend import OpenSeesSolver
+    """同一斜拉桥 StructuralModel：直接刚度法 vs OpenSees，逐项一致。
 
-    geom = BridgeGeometry(num_cables_per_side=6)
-    model = build_cable_bridge(geom, [600.0] * 6, [20] * 6)
+    成桥模型由施工计划派生（单塔双悬臂半桥），与施工阶段模型同源。
+    """
+    pytest.importorskip("openseespy", reason="需要 openseespy")
+    from bridgezoo.fem.opensees_backend import OpenSeesSolver
+    from bridgezoo.fem.staged import build_oneshot_model, build_staged_cantilever
+
+    n, strand_area, strands = 6, 1.4e-4, 20
+    pretension = 600.0 * 1e6 * strand_area * strands  # 初应力 600 MPa → 预张力
+    plan = build_staged_cantilever(
+        n_seg=n,
+        strand_area=strand_area,
+        strands=[strands] * n,
+        pretension=[pretension] * n,
+    )
+    model, _ = build_oneshot_model(plan)
 
     rd = DirectStiffnessSolver().solve(model)
     ro = OpenSeesSolver().solve(model)
