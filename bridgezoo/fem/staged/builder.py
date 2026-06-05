@@ -22,6 +22,7 @@ each side:
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping, Sequence
 
 from bridgezoo.fem.staged.plan import (
@@ -51,6 +52,65 @@ def _left_cable_id(i: int) -> int:
 
 def _is_sequence_value(value) -> bool:
     return isinstance(value, Sequence) and not isinstance(value, (str, bytes))
+
+
+def _as_strand_count(value) -> int:
+    if isinstance(value, bool) or isinstance(value, complex):
+        raise ValueError("strands must be positive integer real values")
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("strands must be positive integer real values") from exc
+    if not math.isfinite(number) or not number.is_integer():
+        raise ValueError("strands must be positive integer real values")
+    count = int(number)
+    if count <= 0:
+        raise ValueError("strands must be positive")
+    return count
+
+
+def _normalize_strands(strands, n_seg: int) -> list[tuple[int, int]]:
+    """Return stage-major ``(right, left)`` strand counts."""
+
+    if strands is None:
+        return [(20, 20)] * n_seg
+
+    if isinstance(strands, Mapping):
+        pairs = []
+        missing = []
+        for i in range(1, n_seg + 1):
+            right_id = _right_cable_id(i)
+            left_id = _left_cable_id(i)
+            if right_id not in strands:
+                missing.append(right_id)
+            if left_id not in strands:
+                missing.append(left_id)
+            if right_id in strands and left_id in strands:
+                pairs.append((_as_strand_count(strands[right_id]), _as_strand_count(strands[left_id])))
+        if missing:
+            raise ValueError(f"strands mapping is missing cable ids: {missing}")
+        return pairs
+
+    values = list(strands)
+    if len(values) == n_seg:
+        pairs = []
+        for value in values:
+            if _is_sequence_value(value):
+                if len(value) != 2:
+                    raise ValueError("each paired strands value must contain exactly 2 entries: (right, left)")
+                pairs.append((_as_strand_count(value[0]), _as_strand_count(value[1])))
+            else:
+                count = _as_strand_count(value)
+                pairs.append((count, count))
+        return pairs
+
+    if len(values) == 2 * n_seg:
+        return [(_as_strand_count(values[2 * k]), _as_strand_count(values[2 * k + 1])) for k in range(n_seg)]
+
+    raise ValueError(
+        "strands length must be n_seg for paired input, 2*n_seg for independent "
+        "stage-major input, or a mapping keyed by cable id"
+    )
 
 
 def _normalize_pretension(pretension, n_seg: int) -> list[tuple[float, float]]:
@@ -123,7 +183,7 @@ def build_staged_cantilever(
     wg: float = 1.0e5,
     cable_Es: float = 1.95e11,
     strand_area: float = 1.4e-4,
-    strands: list[int] | None = None,
+    strands: Sequence[int | Sequence[int]] | Mapping[int, int] | None = None,
     pretension: Sequence[float | Sequence[float]] | Mapping[int, float] | None = None,
 ) -> StagedPlan:
     """Build a symmetric staged double-cantilever cable-stayed bridge plan.
@@ -135,10 +195,8 @@ def build_staged_cantilever(
     """
 
     _ = anchor_top_free  # Geometry metadata for plotting callers; no plan DOF uses it.
-    strands = strands or [20] * n_seg
+    strand_pairs = _normalize_strands(strands, n_seg)
     pretension_pairs = _normalize_pretension(pretension, n_seg)
-    if len(strands) != n_seg:
-        raise ValueError("strands length must equal n_seg")
     assert n_seg < 90, "current numbering convention requires n_seg < 90"
 
     plan = StagedPlan(name=f"staged_half_bridge_N{n_seg}")
@@ -171,11 +229,25 @@ def build_staged_cantilever(
             seg_frames.append(NewFrame(sd["frame"](i), prev[sd["sign"]], nid,
                                        beam_E, beam_A, beam_Iz, udl_wy=-wg))
 
-        area = strand_area * strands[i - 1]
+        right_strands, left_strands = strand_pairs[i - 1]
         right_tension, left_tension = pretension_pairs[i - 1]
         seg_cables = [
-            NewCable(sides[0]["cable"](i), _anchor_id(i), sides[0]["node"](i), cable_Es, area, tension=right_tension),
-            NewCable(sides[1]["cable"](i), _anchor_id(i), sides[1]["node"](i), cable_Es, area, tension=left_tension),
+            NewCable(
+                sides[0]["cable"](i),
+                _anchor_id(i),
+                sides[0]["node"](i),
+                cable_Es,
+                strand_area * right_strands,
+                tension=right_tension,
+            ),
+            NewCable(
+                sides[1]["cable"](i),
+                _anchor_id(i),
+                sides[1]["node"](i),
+                cable_Es,
+                strand_area * left_strands,
+                tension=left_tension,
+            ),
         ]
 
         if i == 1:

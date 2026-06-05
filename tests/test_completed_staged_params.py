@@ -96,6 +96,31 @@ def test_staged_builder_accepts_flat_independent_pretension():
     assert cables[2002] == 2.5e6
 
 
+def test_staged_builder_accepts_independent_left_right_strands():
+    strand_area = 1.4e-4
+    plan = build_staged_cantilever(
+        n_seg=2,
+        strand_area=strand_area,
+        strands=[(20, 18), (22, 16)],
+        pretension=[1.0e6, 1.5e6],
+    )
+    areas = {cb.id: cb.A for cb in plan.completed.cables}
+
+    assert areas[1001] == strand_area * 20
+    assert areas[2001] == strand_area * 18
+    assert areas[1002] == strand_area * 22
+    assert areas[2002] == strand_area * 16
+
+
+def test_staged_builder_rejects_non_integer_strands():
+    import pytest
+
+    with pytest.raises(ValueError, match="strands"):
+        build_staged_cantilever(n_seg=2, strands=[20.5, 20])
+    with pytest.raises(ValueError, match="strands"):
+        build_staged_cantilever(n_seg=2, strands=[20 + 1j, 20])
+
+
 def test_default_pretension_uses_left_and_right_geometry():
     pretension = default_pretension(
         2,
