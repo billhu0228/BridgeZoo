@@ -480,85 +480,54 @@ class StagedOpenSeesSolver:
         if not step.balance_dofs:
             return {}
 
-        active = list(self.coords.keys())
-        idx = {nid: k for k, nid in enumerate(active)}
-        ndof = 3 * len(active)
-        K = np.zeros((ndof, ndof))
-        F = np.zeros(ndof)
-        current = np.zeros(ndof)
+        ops = self.ops
+        ops.wipeAnalysis()
+        ops.system("FullGeneral")
+        ops.numberer("Plain")
+        ops.constraints("Transformation")
+        ops.integrator("LoadControl", 0.0)
+        ops.algorithm("Linear")
+        ops.analysis("Static")
+        ok = ops.analyze(1)
+        if ok != 0:
+            raise RuntimeError(f"failed to form OpenSees tangent for balance step: {step.label}")
 
-        def dofs(nid):
-            b = 3 * idx[nid]
-            return [b, b + 1, b + 2]
+        neq = int(ops.systemSize())
+        raw = ops.printA("-ret")
+        Kff = np.asarray(raw, dtype=float)
+        if Kff.size != neq * neq:
+            raise RuntimeError(f"OpenSees printA returned {Kff.size} entries for system size {neq}")
+        Kff = Kff.reshape((neq, neq))
+        Ff = np.zeros(neq)
 
-        for fr in self.frames:
-            xi, yi = self.coords[fr.i]
-            xj, yj = self.coords[fr.j]
-            L = math.hypot(xj - xi, yj - yi)
-            c, s = (xj - xi) / L, (yj - yi) / L
-            kl = _frame_local_stiffness(fr.E, fr.A, fr.I, L)
-            T = _frame_transform(c, s)
-            kg = T.T @ kl @ T
-            ed = dofs(fr.i) + dofs(fr.j)
-            for a in range(6):
-                for b in range(6):
-                    K[ed[a], ed[b]] += kg[a, b]
-
-        for cb in self.cables:
-            xi, yi = self.coords[cb.i]
-            xj, yj = self.coords[cb.j]
-            L = math.hypot(xj - xi, yj - yi)
-            c, s = (xj - xi) / L, (yj - yi) / L
-            ka = cb.E * cb.A / L
-            bvec = np.array([-c, -s, c, s])
-            kg4 = ka * np.outer(bvec, bvec)
-            td = [dofs(cb.i)[0], dofs(cb.i)[1], dofs(cb.j)[0], dofs(cb.j)[1]]
-            for a in range(4):
-                for d in range(4):
-                    K[td[a], td[d]] += kg4[a, d]
+        def eq_dof(nid: int, dof: int) -> int:
+            eqs = ops.nodeDOFs(nid)
+            eq = int(eqs[dof])
+            if eq < 0:
+                raise ValueError(f"balance dof is constrained or inactive: node={nid}, dof={dof}")
+            return eq
 
         for nid, vec in dF.items():
-            d = dofs(nid)
-            F[d[0]] += vec[0]
-            F[d[1]] += vec[1]
-            F[d[2]] += vec[2]
+            eqs = ops.nodeDOFs(nid)
+            for dof, value in enumerate(vec):
+                eq = int(eqs[dof])
+                if eq >= 0:
+                    Ff[eq] += float(value)
 
-        for nid in active:
-            d = dofs(nid)
-            current[d[0]] = self.ops.nodeDisp(nid, 1)
-            current[d[1]] = self.ops.nodeDisp(nid, 2)
-            current[d[2]] = self.ops.nodeDisp(nid, 3)
-
-        fixed = np.zeros(ndof, dtype=bool)
-        for nid, fx in self.fixed.items():
-            if nid in idx:
-                d = dofs(nid)
-                for k in range(3):
-                    if fx[k]:
-                        fixed[d[k]] = True
-        for p in range(ndof):
-            if not fixed[p] and abs(K[p, p]) < 1e-30 and np.allclose(K[p, :], 0.0):
-                fixed[p] = True
-
-        free = np.where(~fixed)[0]
-        Kff = K[np.ix_(free, free)]
-        Ff = F[free]
         control = []
         target = []
         for bd in step.balance_dofs:
-            gdof = dofs(bd.node)[bd.dof]
-            if fixed[gdof]:
-                raise ValueError(f"balance dof is already fixed: node={bd.node}, dof={bd.dof}")
-            control.append(int(np.where(free == gdof)[0][0]))
+            control.append(eq_dof(bd.node, bd.dof))
             target.append(float(bd.target))
 
         base_du = np.linalg.solve(Kff, Ff)
-        unit = np.zeros((free.size, len(control)))
+        unit = np.zeros((neq, len(control)))
         for j, pos in enumerate(control):
             unit[pos, j] = 1.0
         flex_cols = np.linalg.solve(Kff, unit)
         flex = flex_cols[control, :]
-        rhs = np.array(target) - current[free[control]] - base_du[control]
+        current = np.array([ops.nodeDisp(bd.node, bd.dof + 1) for bd in step.balance_dofs], dtype=float)
+        rhs = np.array(target) - current - base_du[control]
         loads = np.linalg.solve(flex, rhs)
 
         out: dict[int, np.ndarray] = {}
@@ -578,6 +547,7 @@ class StagedOpenSeesSolver:
         ts = pat = 10000 + self._pat
         dF = self._step_loads(step)
         balance_loads = self._balance_loads(step, dF)
+        ops.wipeAnalysis()
         has_load = any(fr.udl_wy != 0.0 for fr in step.new_frames) or bool(step.nodal_loads) or bool(balance_loads)
         if has_load:
             ops.timeSeries("Linear", ts)
