@@ -39,7 +39,7 @@ from bridgezoo.fem.staged import (
 )
 
 MODEL_DEFAULTS = {
-    "n": 8,
+    "n": 6,
     "anchor_base": 32.0,
     "anchor_spacing": 2.0,
     "anchor_free": 10.0,
@@ -104,8 +104,22 @@ def run(args) -> None:
     if not result.records:
         raise RuntimeError("No staged records were produced.")
 
-    _plot_animation(result, n=n, scale=args.scale, out=args.out,
-                    frames_dir=args.frames_dir, fps=args.fps)
+    # 把 (right, left) 输入展开为 {cable_id: 值}，供 text 模式按索报告。
+    strand_input: dict[int, int] = {}
+    force_input: dict[int, float] = {}
+    for i in range(1, n + 1):
+        right_force, left_force = pretension[i - 1]
+        strand_input[1000 + i] = int(strands[i - 1])
+        strand_input[2000 + i] = int(strands[i - 1])
+        force_input[1000 + i] = float(right_force)
+        force_input[2000 + i] = float(left_force)
+
+    if args.render in ("text", "both"):
+        _render_text(result, strand_input=strand_input, force_input=force_input,
+                     out=args.text_out)
+    if args.render in ("plot", "both"):
+        _plot_animation(result, n=n, scale=args.scale, out=args.out,
+                        frames_dir=args.frames_dir, fps=args.fps)
 
 
 def _resolve_project_path(path: str | None) -> Path | None:
@@ -172,6 +186,85 @@ def _draw_applied_loads(ax, result, rec, scale: float, span: float) -> None:
             ax.text(x + 0.015 * span, y + 0.025 * span, label,
                     color="#4a1486", fontsize=8,
                     bbox=dict(boxstyle="round,pad=0.25", fc="white", ec="#7b3294", alpha=0.88))
+
+
+def _cable_table_lines(result, record, strand_input, force_input) -> list[str]:
+    """某一荷载步已激活拉索的：索股/索力输入 + 该步索力/应力（受压加 ⚠）。"""
+    lines = ["【拉索】索股输入 / 索力输入 / 该步索力 / 该步应力（N<0 受压标 <<受压）"]
+    lines.append(
+        f"{'cable_id':>8} {'阶段':>4} {'侧':>3} {'索股':>5} "
+        f"{'索力输入[kN]':>13} {'索力[kN]':>12} {'应力[MPa]':>12}  标记"
+    )
+    for cid in sorted(record.cable_force):
+        stage = cid % 1000
+        side = "右" if cid < 2000 else "左"
+        n_strand = strand_input.get(cid, 0)
+        f_in = force_input.get(cid, 0.0) / 1e3
+        f_now = record.cable_force.get(cid, float("nan")) / 1e3
+        sigma = record.cable_stress.get(cid, float("nan")) / 1e6
+        flag = "<<受压" if f_now < 0.0 else ""
+        lines.append(
+            f"{cid:>8} {stage:>4} {side:>3} {n_strand:>5} "
+            f"{f_in:>13.2f} {f_now:>12.2f} {sigma:>12.2f}  {flag}"
+        )
+    return lines
+
+
+def _coord_table_lines(result, record) -> list[str]:
+    """某一荷载步已安装主梁节点坐标（按 x 升序；y_def = y0 + uy）。"""
+    lines = ["【坐标】已安装主梁节点（按 x 升序；y_def = y0 + uy）"]
+    lines.append(f"{'node_id':>8} {'x[m]':>10} {'y0[m]':>8} {'uy[mm]':>10} {'y_def[m]':>12}")
+    deck = sorted(result.deck_ids, key=lambda nid: result.coords[nid][0])
+    for nid in deck:
+        if nid not in record.disp:
+            continue
+        x, y0 = result.coords[nid]
+        uy = record.disp[nid][1]
+        lines.append(f"{nid:>8} {x:>10.3f} {y0:>8.3f} {uy * 1e3:>10.2f} {y0 + uy:>12.4f}")
+    return lines
+
+
+def _render_text(
+    result,
+    *,
+    strand_input: dict[int, int],
+    force_input: dict[int, float],
+    out: str | None = None,
+) -> str:
+    """逐荷载步汇总：索股/索力输入、各步索力与应力、各步主梁坐标。
+
+    输出**全部荷载步**（非仅成桥末步），每步只列当时已激活的拉索与已安装节点。
+    单位：索力 [kN]（内部 N / 1e3），应力 [MPa]（内部 Pa / 1e6），坐标 x/y [m]，
+    竖向位移 uy [mm]。索力 N<0 表示该步出现压力（违反只受拉），标 <<受压。
+    """
+    n_rec = len(result.records)
+    lines: list[str] = []
+    lines.append("=" * 72)
+    lines.append(
+        f"分阶段施工逐步结果（text）  后端={result.backend}  "
+        f"荷载步数={n_rec}  拉索总数={len(result.cable_nodes)}"
+    )
+    lines.append("=" * 72)
+
+    for k, record in enumerate(result.records, start=1):
+        n_comp = sum(1 for f in record.cable_force.values() if f < 0.0)
+        comp_note = f"  <<受压索 {n_comp} 根" if n_comp else ""
+        lines.append("")
+        lines.append("-" * 72)
+        lines.append(f"[ 荷载步 {k}/{n_rec} ]  {record.label}{comp_note}")
+        lines.append("-" * 72)
+        lines.extend(_cable_table_lines(result, record, strand_input, force_input))
+        lines.append("")
+        lines.extend(_coord_table_lines(result, record))
+
+    text = "\n".join(lines) + "\n"
+    print(text, end="")
+    out_path = _resolve_project_path(out)
+    if out_path is not None:
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(text, encoding="utf-8")
+        print(f"已保存文本结果：{out_path}")
+    return text
 
 
 def _plot_animation(result, n, scale, out, frames_dir, fps) -> None:
@@ -296,6 +389,10 @@ def main() -> None:
     p.add_argument("--fps", type=int, default=1)
     p.add_argument("--out", type=str, default="results/staged_deck_growth_ops.gif")
     p.add_argument("--frames-dir", type=str, default="results/frames")
+    p.add_argument("--render", choices=["plot", "text", "both"], default="plot",
+                   help="结果渲染模式：plot=动画(默认)，text=文本汇总，both=两者")
+    p.add_argument("--text-out", type=str, default=None,
+                   help="text 模式下额外落盘的文本文件路径（默认仅打印到 stdout）")
     args = p.parse_args()
     run(args)
 

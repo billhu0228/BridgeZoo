@@ -242,7 +242,7 @@ def run(args):
     return result
 
 
-def main() -> None:
+def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Optimize staged cable strands and pretensions.")
     p.add_argument("--n", type=int, default=MODEL_DEFAULTS["n"])
     p.add_argument("--out", default="results/cable_opt")
@@ -287,7 +287,11 @@ def main() -> None:
     )
     p.add_argument("--quiet", action="store_true", help="Disable optimization progress output.")
     p.add_argument("--verify-opensees", action="store_true")
-    args = p.parse_args()
+    return p
+
+
+def main() -> None:
+    args = build_parser().parse_args()
     run(args)
 
 
