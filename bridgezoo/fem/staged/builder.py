@@ -26,7 +26,6 @@ import math
 from collections.abc import Mapping, Sequence
 
 from bridgezoo.fem.staged.plan import (
-    BalanceDof,
     BuildStep,
     CompletedState,
     NewCable,
@@ -192,6 +191,11 @@ def build_staged_cantilever(
     because the bare first girder increment is under-constrained while the
     tower-deck rotation is released.  Later increments keep the original
     two-step rhythm: install segment, then tension cable.
+
+    The final ``tip_free`` step tangent-activates the closing tip segments
+    stress-free and immediately adds closure supports (left tip uy, right tip
+    ux+rz).  The constrained DOFs are locked at their tangent-birth values; no
+    balancing reaction step drives them back to zero.
     """
 
     _ = anchor_top_free  # Geometry metadata for plotting callers; no plan DOF uses it.
@@ -269,12 +273,16 @@ def build_staged_cantilever(
         tip_nodes.append(NewNode(sd["tip"], tip_x, 0.0, attach=last_node))
         tip_frames.append(NewFrame(sd["tip_frame"], last_node, sd["tip"],
                                    beam_E, beam_A, beam_Iz, udl_wy=-wg))
-    plan.steps.append(BuildStep(label="tip_free", new_nodes=tip_nodes, new_frames=tip_frames, record=True))
-    plan.steps.append(BuildStep(label="closure_balance", balance_dofs=[
-        BalanceDof(sides[1]["tip"], 1, 0.0),
-        BalanceDof(sides[0]["tip"], 0, 0.0),
-        BalanceDof(sides[0]["tip"], 2, 0.0),
-    ], record=True))
+    # 合龙:端段切线激活后就地添加支座(左端 uy / 右端 ux+rz),被锁自由度保持
+    # 切线诞生位移——不再用 closure_balance 反力步把位移压回 0。
+    plan.steps.append(BuildStep(
+        label="tip_free", new_nodes=tip_nodes, new_frames=tip_frames,
+        new_supports=[
+            (sides[1]["tip"], False, True, False),
+            (sides[0]["tip"], True, False, True),
+        ],
+        record=True,
+    ))
     plan.completed = _build_completed_state(plan, left_tip=sides[1]["tip"], right_tip=sides[0]["tip"])
 
     return plan

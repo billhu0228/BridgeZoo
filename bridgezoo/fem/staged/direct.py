@@ -87,6 +87,10 @@ class StagedDirectSolver:
             birth_j = self.u[cb.j].copy()
             self.cables.append(dict(o=cb, birth_i=birth_i, birth_j=birth_j, N0=cb.tension))
             self._areas[cb.id] = cb.A
+        for nid, ux, uy, rz in step.new_supports:
+            # 切线激活后"就地固结":锁定当前位移(后续增量为 0),不清零。
+            old = self.fixed.get(nid, (False, False, False))
+            self.fixed[nid] = (old[0] or ux, old[1] or uy, old[2] or rz)
 
     def _orig_geom(self, i: int, j: int) -> tuple[float, float, float]:
         """单元原始坐标下的长度与方向余弦(线性小位移参考)。"""

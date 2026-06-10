@@ -93,8 +93,10 @@ def test_hybrid_strand_moves_follow_stress_direction():
     problem = _problem()
     optimizer = CableHybridOptimizer(problem)
     evaluator = CableDesignEvaluator(problem)
+    # 高侧取 7e6 N:合龙改为"切线锁定支座"后终态应力重分布,5e6 N 已不再越上限
+    # (1200 MPa);7e6 N 时 1 号索终态约 1400 MPa,稳定触发"应力过高"分支。
     low = evaluator.evaluate([20, 20, 20, 20], [1.0e5, 2.0e6, 2.0e6, 2.0e6])
-    high = evaluator.evaluate([20, 20, 20, 20], [5.0e6, 2.0e6, 2.0e6, 2.0e6])
+    high = evaluator.evaluate([20, 20, 20, 20], [7.0e6, 2.0e6, 2.0e6, 2.0e6])
 
     assert optimizer._strand_moves_for(low, 0)[0][0] < 0
     assert optimizer._strand_moves_for(high, 0)[0][0] > 0

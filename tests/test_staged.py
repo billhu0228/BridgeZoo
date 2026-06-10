@@ -31,12 +31,11 @@ def test_first_increment_combines_segment_and_cable_only():
 def test_direct_runs_and_records():
     n = 3
     r = StagedDirectSolver().run(_plan(n))
-    assert len(r.records) == n + 2
-    assert r.records[-2].label == "tip_free"
-    assert r.records[-1].label == "closure_balance"
+    assert len(r.records) == n + 1
+    assert r.records[-1].label == "tip_free"
     hist = r.cable_stress_history()
-    assert len(hist[1001]) == n + 2
-    assert len(hist[1000 + n]) == 3
+    assert len(hist[1001]) == n + 1
+    assert len(hist[1000 + n]) == 2
     assert set(r.anchor_ids) == {301, 302, 303}
     assert RIGHT_TIP in r.deck_ids and LEFT_TIP in r.deck_ids
     assert r.cable_nodes[1001] == (301, 1)
@@ -46,31 +45,60 @@ def test_direct_runs_and_records():
 def test_direct_stress_history_evolves():
     r = StagedDirectSolver().run(_plan(4))
     series = [s for _, s in r.cable_stress_history()[1001]]
-    assert len(series) == 6
+    assert len(series) == 5
     assert max(series) - min(series) > 1e6
     assert all(s > 0 for s in series)
 
 
+def _assert_tip_lock_in(result, n, left_end=4.0, right_end=4.0, tol=1e-10):
+    """被锁自由度 = 切线诞生值(由附着节点位移外推,甲板 dy=0)。
+
+    tol 取 1e-10:锁定是纯运动学复制,两后端都应在机器精度内保持诞生值,
+    1e-10 m / rad 远小于任何物理位移量级,同时为浮点往返留余量。
+    """
+    prev, last = result.records[-2], result.records[-1]
+    assert last.label == "tip_free"
+    uyL, rzL = prev.disp[100 + n][1], prev.disp[100 + n][2]
+    uxR, rzR = prev.disp[n][0], prev.disp[n][2]
+    assert abs(last.disp[LEFT_TIP][1] - (uyL - left_end * rzL)) < tol
+    assert abs(last.disp[RIGHT_TIP][0] - uxR) < tol
+    assert abs(last.disp[RIGHT_TIP][2] - rzR) < tol
+
+
+def test_plan_ends_with_tip_closure_supports():
+    plan = _plan(3)
+    last = plan.steps[-1]
+    assert last.label == "tip_free"
+    assert last.new_supports == [
+        (LEFT_TIP, False, True, False),
+        (RIGHT_TIP, True, False, True),
+    ]
+    assert all(not step.balance_dofs for step in plan.steps)
+
+
 def test_half_bridge_boundary_conditions_are_applied():
-    plan = _plan(4)
+    n = 4
+    plan = _plan(n)
     supports = {nid: (ux, uy, rz) for nid, ux, uy, rz in plan.supports}
     assert supports[0] == (True, True, False)
     assert RIGHT_TIP not in supports
     assert LEFT_TIP not in supports
 
     r = StagedDirectSolver().run(plan)
-    tip_free = r.records[-2]
-    assert tip_free.label == "tip_free"
-    assert abs(tip_free.disp[LEFT_TIP][1]) > 1e-12
+    # 合龙支座把被锁自由度保持在切线诞生值(直接法为精确运动学,取 1e-12)
+    _assert_tip_lock_in(r, n, tol=1e-12)
 
+    # 锁定值本身非零(悬臂端诞生在变形切线上)
     last = r.records[-1]
-    assert last.label == "closure_balance"
-    assert abs(last.disp[RIGHT_TIP][0]) < 1e-12
-    assert abs(last.disp[RIGHT_TIP][2]) < 1e-12
-    assert abs(last.disp[LEFT_TIP][1]) < 1e-12
+    assert abs(last.disp[LEFT_TIP][1]) > 1e-12
+
+    # 未锁自由度在端段自重下确实变化(右端 uy 偏离其切线诞生值)
+    prev = r.records[-2]
+    uy_birth_right = prev.disp[n][1] + 4.0 * prev.disp[n][2]
+    assert abs(last.disp[RIGHT_TIP][1] - uy_birth_right) > 1e-9
 
 
-def _assert_match(rd, ro, rtol, history_index=-2, record_index=-2):
+def _assert_match(rd, ro, rtol, history_index=-1, record_index=-1):
     hd = {c: v[history_index][1] for c, v in rd.cable_stress_history().items()}
     ho = {c: v[history_index][1] for c, v in ro.cable_stress_history().items()}
     scale = max(abs(v) for v in hd.values())
@@ -83,14 +111,6 @@ def _assert_match(rd, ro, rtol, history_index=-2, record_index=-2):
         assert abs(da_rec.disp[nid][1] - db_rec.disp[nid][1]) <= rtol * y_scale
 
 
-def _assert_opensees_closure_residual(ro):
-    last = ro.records[-1]
-    assert last.label == "closure_balance"
-    assert abs(last.disp[LEFT_TIP][1]) < 1e-10
-    assert abs(last.disp[RIGHT_TIP][0]) < 1e-10
-    assert abs(last.disp[RIGHT_TIP][2]) < 1e-10
-
-
 def test_staged_matches_opensees_linear():
     pytest.importorskip("openseespy", reason="requires openseespy")
     from bridgezoo.fem.staged import StagedOpenSeesSolver
@@ -99,7 +119,7 @@ def test_staged_matches_opensees_linear():
     rd = StagedDirectSolver().run(plan)
     ro = StagedOpenSeesSolver(cable_element="linear").run(plan)
     _assert_match(rd, ro, rtol=5e-3)
-    _assert_opensees_closure_residual(ro)
+    _assert_tip_lock_in(ro, 4)
 
 
 def test_staged_matches_opensees_corot():
@@ -110,4 +130,4 @@ def test_staged_matches_opensees_corot():
     rd = StagedDirectSolver().run(plan)
     ro = StagedOpenSeesSolver(cable_element="corot").run(plan)
     _assert_match(rd, ro, rtol=1e-2)
-    _assert_opensees_closure_residual(ro)
+    _assert_tip_lock_in(ro, 4)

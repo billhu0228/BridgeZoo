@@ -56,11 +56,23 @@ def _stage_tip_y_errors(rd, ro) -> list[dict[str, float | int | str]]:
     return rows
 
 
-def _closure_residual(ro) -> float:
-    last = ro.records[-1]
-    if last.label != "closure_balance":
-        raise ValueError(f"last record is {last.label!r}, expected closure_balance")
-    return max(abs(last.disp[LEFT_TIP][1]), abs(last.disp[RIGHT_TIP][0]), abs(last.disp[RIGHT_TIP][2]))
+def _lock_in_residuals(result, n: int, left_end: float) -> dict[str, float]:
+    """合龙锁定残差:被锁自由度终值与其切线诞生值之差(应为机器精度级)。
+
+    诞生值由前一条记录(最后一次张拉)的附着节点位移外推:左端 201 锁 uy
+    (= uy_I − left_end·rz_I,I = 100+n),右端 200 锁 ux/rz(= ux_I / rz_I,I = n,
+    甲板 dy=0 故 ux 不含转角项)。
+    """
+    prev, last = result.records[-2], result.records[-1]
+    if last.label != "tip_free":
+        raise ValueError(f"last record is {last.label!r}, expected tip_free")
+    uyL, rzL = prev.disp[100 + n][1], prev.disp[100 + n][2]
+    uxR, rzR = prev.disp[n][0], prev.disp[n][2]
+    return {
+        "left  uy": abs(last.disp[LEFT_TIP][1] - (uyL - left_end * rzL)),
+        "right ux": abs(last.disp[RIGHT_TIP][0] - uxR),
+        "right rz": abs(last.disp[RIGHT_TIP][2] - rzR),
+    }
 
 
 def run(args, tol_rel: float) -> bool:
@@ -113,7 +125,9 @@ def run(args, tol_rel: float) -> bool:
 
     rows = _stage_tip_y_errors(rd, ro)
     max_row = max(rows, key=lambda row: row["rel"])
-    residual = _closure_residual(ro)
+    res_direct = _lock_in_residuals(rd, n, args.left_end)
+    res_ops = _lock_in_residuals(ro, n, args.left_end)
+    residual = max(*res_direct.values(), *res_ops.values())
 
     print("\n=== Stage farthest-end uy comparison: direct vs OpenSees ===")
     header = (
@@ -133,12 +147,11 @@ def run(args, tol_rel: float) -> bool:
         f"abs diff={abs(max_row['diff']):.6e} m, percent={max_row['rel'] * 100:.6f}%"
     )
 
-    last = ro.records[-1]
-    print("\n=== closure_balance OpenSees residual ===")
-    print(f"  left  uy target residual : {last.disp[LEFT_TIP][1]: .6e} m")
-    print(f"  right ux target residual : {last.disp[RIGHT_TIP][0]: .6e} m")
-    print(f"  right rz target residual : {last.disp[RIGHT_TIP][2]: .6e} rad")
-    print(f"  max residual             : {residual:.6e}")
+    print("\n=== tip closure lock-in residual (final vs tangent-birth value) ===")
+    print("  dof              direct        opensees")
+    for key in res_direct:
+        print(f"  {key:<8} : {res_direct[key]:.6e}  {res_ops[key]:.6e}")
+    print(f"  max residual : {residual:.6e}")
 
     ok = max_row["rel"] < tol_rel and residual < args.closure_tol
     print(f"\nResult: {'PASS' if ok else 'FAIL'}")

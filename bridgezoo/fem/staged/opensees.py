@@ -121,6 +121,19 @@ class StagedOpenSeesSolver:
             self._areas[cb.id] = cb.A
             self._cable_ids.append(cb.id)
             self.cables.append(cb)
+        for nid, ux, uy, rz in step.new_supports:
+            # 切线激活后"就地固结":锁定在已提交(诞生)位移。不能用 ops.fix——
+            # 齐次 SP 约束会在下一次 analyze 时把该自由度压回 0;改用 Constant
+            # 时程 pattern 中的非齐次 ops.sp(值=当前已提交位移),后续各步恒成立。
+            old = fixed.get(nid, (False, False, False))
+            fixed[nid] = (old[0] or ux, old[1] or uy, old[2] or rz)
+            self._pat += 1
+            tag = 10000 + self._pat
+            ops.timeSeries("Constant", tag)
+            ops.pattern("Plain", tag, tag)
+            for dof, flag in enumerate((ux, uy, rz), start=1):
+                if flag:
+                    ops.sp(nid, dof, ops.nodeDisp(nid, dof))
 
     @staticmethod
     def _explicit_nodal_loads(step) -> dict[int, np.ndarray]:

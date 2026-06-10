@@ -73,7 +73,12 @@ class BalanceDof:
 
 @dataclass
 class BuildStep:
-    """一次施工动作(= 一次增量求解)。"""
+    """一次施工动作(= 一次增量求解)。
+
+    ``new_supports`` 为本步**新增**的支座(格式同 :attr:`StagedPlan.supports`),
+    在本步切线激活**之后**、增量求解之前生效:被约束自由度**锁定在当前(诞生)位移**,
+    此后所有增量为 0;**不**把位移清零(区别于初始支座)。用于合龙等"就地固结"工况。
+    """
 
     label: str
     new_nodes: list[NewNode] = field(default_factory=list)
@@ -81,6 +86,7 @@ class BuildStep:
     new_cables: list[NewCable] = field(default_factory=list)
     nodal_loads: list[NodalLoad] = field(default_factory=list)
     balance_dofs: list[BalanceDof] = field(default_factory=list)
+    new_supports: list[tuple[int, bool, bool, bool]] = field(default_factory=list)
     record: bool = True
 
 
