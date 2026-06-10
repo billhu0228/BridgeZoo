@@ -139,7 +139,8 @@ def run(args) -> None:
                      out=args.text_out)
     if args.render in ("plot", "both"):
         _plot_animation(result, n=n, scale=args.scale, out=args.out,
-                        frames_dir=args.frames_dir, fps=args.fps)
+                        frames_dir=args.frames_dir, fps=args.fps,
+                        beam_depth=args.beam_depth)
 
 
 def _resolve_project_path(path: str | None) -> Path | None:
@@ -179,7 +180,7 @@ def _draw_applied_loads(ax, result, rec, scale: float, span: float) -> None:
     for nid, (fx, fy, mz) in loads.items():
         if nid not in rec.disp or nid not in result.coords:
             continue
-        x = result.coords[nid][0]
+        x = result.coords[nid][0] + rec.disp[nid][0] * scale
         y = result.coords[nid][1] + rec.disp[nid][1] * scale
         fmag = math.hypot(fx, fy)
 
@@ -287,13 +288,14 @@ def _render_text(
     return text
 
 
-def _plot_animation(result, n, scale, out, frames_dir, fps) -> None:
+def _plot_animation(result, n, scale, out, frames_dir, fps, beam_depth: float = 1.0) -> None:
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     from matplotlib.animation import FuncAnimation, PillowWriter
 
+    from bridgezoo.render.deformed_shape import deformed_chain_shape, hermite_frame_shape
     from bridgezoo.render.mpl_cjk import use_cjk_font
 
     use_cjk_font()
@@ -316,8 +318,8 @@ def _plot_animation(result, n, scale, out, frames_dir, fps) -> None:
              for rec in records for nid in result.deck_ids if nid in rec.disp]
     span = (max(xs_all) - min(xs_all)) or 1.0
     xmin, xmax = min(xs_all) - 0.12 * span, max(xs_all) + 0.12 * span
-    ymin = min(all_y + [0.0]) - 0.10 * tower_top
-    ymax = max(all_y + [tower_top]) + 0.10 * tower_top
+    ymin = min(all_y + [0.0]) - 0.10 * tower_top - 0.5 * beam_depth
+    ymax = max(all_y + [tower_top]) + 0.10 * tower_top + 0.5 * beam_depth
 
     fig, ax = plt.subplots(figsize=(11, 5.6))
 
@@ -327,6 +329,9 @@ def _plot_animation(result, n, scale, out, frames_dir, fps) -> None:
         deck = _present_deck(result, rec)
         xs = [coords[nid][0] for nid in deck]
         ys = [rec.disp[nid][1] * scale for nid in deck]
+        # 变形轴线：逐单元 Hermite 插值（端部转角参与成形），位移放大 scale 倍。
+        xc, yc = deformed_chain_shape(coords, rec.disp, deck, scale=scale)
+        xn = [coords[nid][0] + rec.disp[nid][0] * scale for nid in deck]
 
         # 设计轴线 + 塔 + 锚点
         ax.plot([min(xs_all), max(xs_all)], [0, 0], color="0.82", lw=1.0, ls="--", label="设计主梁轴线")
@@ -340,15 +345,20 @@ def _plot_animation(result, n, scale, out, frames_dir, fps) -> None:
         for cid, force in rec.cable_force.items():
             i, j = result.cable_nodes[cid]
             anc, deckn = (i, j) if i in result.anchor_ids else (j, i)
-            ax.plot([coords[anc][0], coords[deckn][0]],
+            ax.plot([coords[anc][0], coords[deckn][0] + rec.disp[deckn][0] * scale],
                     [coords[anc][1], rec.disp[deckn][1] * scale],
                     color="#4f8fba", lw=1.1, alpha=0.75,
                     label="拉索" if first_cable else None)
             first_cable = False
 
-        # 已安装主梁（未变形 / 变形）
+        # 已安装主梁（未变形 / 变形）。变形梁画成带厚度的板带：厚度取真实
+        # 梁高（不随位移放大）；坐标轴纵横比例悬殊，按竖向偏置而非截面法向。
         ax.plot(xs, [0] * len(xs), color="0.6", lw=1.6, marker="o", ms=3, label="已安装主梁(未变形)")
-        ax.plot(xs, ys, color="#d55e00", lw=2.6, marker="o", ms=5, label=f"变形主梁 x{scale:g}")
+        if beam_depth > 0.0:
+            ax.fill_between(xc, yc - 0.5 * beam_depth, yc + 0.5 * beam_depth,
+                            color="#d55e00", alpha=0.35, lw=0)
+        ax.plot(xc, yc, color="#d55e00", lw=1.6, label=f"变形主梁 x{scale:g}")
+        ax.plot(xn, ys, ls="none", marker="o", ms=5, color="#d55e00")
 
         # 高亮本阶段新增节段（相对上一记录新增的梁节点所在段）
         if k > 0:
@@ -358,8 +368,10 @@ def _plot_animation(result, n, scale, out, frames_dir, fps) -> None:
                 pos = deck.index(nid)
                 for nb in (pos - 1, pos + 1):
                     if 0 <= nb < len(deck):
-                        ax.plot([xs[pos], xs[nb]], [ys[pos], ys[nb]],
-                                color="#b2182b", lw=4.0, alpha=0.9)
+                        hx, hy = hermite_frame_shape(
+                            coords[deck[nb]], coords[nid],
+                            rec.disp[deck[nb]], rec.disp[nid], scale=scale)
+                        ax.plot(hx, hy, color="#b2182b", lw=4.0, alpha=0.9)
 
         tips = [nid for nid in (200, 201) if nid in rec.disp]
         tiptxt = "  ".join(f"{'右' if t == 200 else '左'}端 dy={rec.disp[t][1] * 1000:.1f}mm" for t in tips)
@@ -410,6 +422,9 @@ def main() -> None:
     p.add_argument("--right-end", type=float, default=MODEL_DEFAULTS["right_end"])
     p.add_argument("--wg", type=float, default=MODEL_DEFAULTS["wg"], help="主梁自重线荷载 [N/m]")
     p.add_argument("--scale", type=float, default=10.0, help="竖向位移绘图放大倍数")
+    p.add_argument("--beam-depth", type=float, default=1.0,
+                   help="主梁绘制梁高 [m]（真实尺度，不随位移放大；0=仅画中轴线；"
+                        "缺省 1.0 对应 builder 缺省截面 A=10/Iz=10/12 的矩形梁高）")
     p.add_argument("--fps", type=int, default=1)
     p.add_argument("--out", type=str, default="results/staged_deck_growth_ops.gif")
     p.add_argument("--frames-dir", type=str, default="results/frames")

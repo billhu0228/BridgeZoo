@@ -94,7 +94,7 @@ def run(args) -> dict:
     _print_cable_result(result)
 
     if args.plot:
-        _plot_balance_state(model, result, meta, args.plot, args.scale)
+        _plot_balance_state(model, result, meta, args.plot, args.scale, args.beam_depth)
     if args.compare_staged:
         _compare_with_staged_final(result, meta)
 
@@ -130,12 +130,14 @@ def _resolve_project_path(path: str | None) -> Path | None:
     return p if p.is_absolute() else PROJECT_ROOT / p
 
 
-def _plot_balance_state(model: StructuralModel, result: SolveResult, meta: dict, out: str, scale: float) -> None:
+def _plot_balance_state(model: StructuralModel, result: SolveResult, meta: dict, out: str,
+                        scale: float, beam_depth: float = 1.0) -> None:
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
+    from bridgezoo.render.deformed_shape import deformed_chain_shape
     from bridgezoo.render.mpl_cjk import use_cjk_font
 
     use_cjk_font()
@@ -150,6 +152,9 @@ def _plot_balance_state(model: StructuralModel, result: SolveResult, meta: dict,
     xs = [coords[nid][0] for nid in deck]
     ys0 = [coords[nid][1] for nid in deck]
     ys = [coords[nid][1] + result.disp[nid][1] * scale for nid in deck]
+    # Hermite-interpolated deformed axis (nodal rotations shape the curve).
+    xc, yc = deformed_chain_shape(coords, result.disp, deck, scale=scale)
+    xn = [coords[nid][0] + result.disp[nid][0] * scale for nid in deck]
 
     tower_top = max(coords[nid][1] for nid in meta["anchor_ids"])
     span = (max(xs) - min(xs)) or 1.0
@@ -157,7 +162,13 @@ def _plot_balance_state(model: StructuralModel, result: SolveResult, meta: dict,
 
     fig, ax = plt.subplots(figsize=(12, 5.8))
     ax.plot(xs, ys0, color="0.65", lw=1.8, marker="o", ms=3, label="design deck")
-    ax.plot(xs, ys, color="#d55e00", lw=2.6, marker="o", ms=4, label=f"completed deck x{scale:g}")
+    # Girder band at true depth (not displacement-scaled); vertical offset is
+    # used instead of the section normal because the axes aspect is far from 1.
+    if beam_depth > 0.0:
+        ax.fill_between(xc, yc - 0.5 * beam_depth, yc + 0.5 * beam_depth,
+                        color="#d55e00", alpha=0.35, lw=0)
+    ax.plot(xc, yc, color="#d55e00", lw=1.6, label=f"completed deck x{scale:g}")
+    ax.plot(xn, ys, ls="none", marker="o", ms=4, color="#d55e00")
     ax.plot([0.0, 0.0], [0.0, tower_top], color="0.35", lw=3.0, label="tower")
     ax.plot(
         [coords[nid][0] for nid in meta["anchor_ids"]],
@@ -175,7 +186,7 @@ def _plot_balance_state(model: StructuralModel, result: SolveResult, meta: dict,
         anc, deckn = (i, j) if i in meta["anchor_ids"] else (j, i)
         stress_ratio = abs(result.cable_stress[cid]) / max_stress
         ax.plot(
-            [coords[anc][0], coords[deckn][0]],
+            [coords[anc][0], coords[deckn][0] + result.disp[deckn][0] * scale],
             [coords[anc][1], coords[deckn][1] + result.disp[deckn][1] * scale],
             color=plt.cm.viridis(0.2 + 0.75 * stress_ratio),
             lw=0.8 + 1.8 * stress_ratio,
@@ -188,7 +199,8 @@ def _plot_balance_state(model: StructuralModel, result: SolveResult, meta: dict,
     ax.set_xlabel("x [m]")
     ax.set_ylabel(f"y [m], vertical displacement x{scale:g}")
     ax.set_xlim(min(xs) - 0.08 * span, max(xs) + 0.08 * span)
-    ax.set_ylim(min(all_y) - 0.12 * tower_top, max(all_y) + 0.12 * tower_top)
+    ax.set_ylim(min(all_y) - 0.12 * tower_top - 0.5 * beam_depth,
+                max(all_y) + 0.12 * tower_top + 0.5 * beam_depth)
     ax.grid(True, alpha=0.25)
     ax.legend(loc="upper right", fontsize=8)
     fig.tight_layout()
@@ -246,6 +258,9 @@ def main() -> None:
     parser.add_argument("--wg", type=float, default=MODEL_DEFAULTS["wg"], help="Girder self-weight line load [N/m].")
     parser.add_argument("--plot", type=str, default="results/completed_balance.png")
     parser.add_argument("--scale", type=float, default=15.0, help="Vertical displacement plot scale.")
+    parser.add_argument("--beam-depth", type=float, default=1.0,
+                        help="Drawn girder depth [m] (true scale, not displacement-scaled; "
+                             "0 = centerline only; default matches the builder section A=10/Iz=10/12).")
     parser.add_argument("--compare-staged", action=argparse.BooleanOptionalAction, default=True)
     args = parser.parse_args()
     run(args)
