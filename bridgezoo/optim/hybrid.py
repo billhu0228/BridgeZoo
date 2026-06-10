@@ -7,8 +7,13 @@ from typing import Callable
 
 import numpy as np
 
-from bridgezoo.optim.continuous import ContinuousOptions, FixedStrandTensionOptimizer
+from bridgezoo.optim.continuous import (
+    ContinuousOptimizationResult,
+    ContinuousOptions,
+    FixedStrandTensionOptimizer,
+)
 from bridgezoo.optim.evaluator import CableDesignEvaluator, EvaluationResult
+from bridgezoo.optim.linear import LinearTensionOptimizer
 from bridgezoo.optim.problem import CableOptimizationProblem
 from bridgezoo.optim.variables import validate_strand_vector
 
@@ -21,6 +26,9 @@ class IntegerSearchOptions:
     seed: int = 0
     improvement_tol: float = 1.0e-8
     stress_guided: bool = True
+    # 每轮外层迭代先尝试按 σ/σ_target 比例整体改股(大步跳跃),再做 ±step 精修。
+    resize: bool = True
+    resize_target_stress_mpa: float | None = None  # None → 应力带中值
 
 
 @dataclass(frozen=True)
@@ -33,6 +41,8 @@ class HybridOptions:
 class HybridOptimizationResult:
     best: EvaluationResult
     history: list[EvaluationResult]
+    # best 索股配置下 LP 最小可达最大违反量 s* [MPa](linear 连续层时填写)。
+    feasibility_violation_mpa: float | None = None
 
 
 class CableHybridOptimizer:
@@ -49,7 +59,13 @@ class CableHybridOptimizer:
         self.evaluator = CableDesignEvaluator(problem)
         self.layout = self.evaluator.layout
         self.progress = progress
-        self.continuous = FixedStrandTensionOptimizer(self.evaluator, self.options.continuous, progress=progress)
+        method = self.options.continuous.method
+        if method == "linear":
+            self.continuous = LinearTensionOptimizer(self.evaluator, self.options.continuous, progress=progress)
+        elif method == "slsqp":
+            self.continuous = FixedStrandTensionOptimizer(self.evaluator, self.options.continuous, progress=progress)
+        else:
+            raise ValueError(f"unknown continuous method: {method!r} (expected 'linear' or 'slsqp')")
 
     def _emit(self, message: str) -> None:
         if self.progress is not None:
@@ -66,13 +82,35 @@ class CableHybridOptimizer:
         tension = np.asarray(old_pretension, dtype=float)
         return tension * np.divide(new, old, out=np.ones_like(new), where=old > 0)
 
-    def _continuous_for(self, strands, initial_pretension=None) -> EvaluationResult:
+    def _continuous_for(self, strands, initial_pretension=None) -> ContinuousOptimizationResult:
         self._emit(
             f"  optimize tensions: total_strands={int(np.sum(strands))} "
             f"min={int(np.min(strands))} max={int(np.max(strands))}"
         )
-        result = self.continuous.optimize(strands, initial_pretension=initial_pretension)
-        return result.evaluation
+        return self.continuous.optimize(strands, initial_pretension=initial_pretension)
+
+    def _resize_candidate(self, best: EvaluationResult) -> np.ndarray | None:
+        """按 σ_i/σ_target 比例缩放索股(应力恒定近似:σ ∝ N/A,N 近似不变)。
+
+        返回与当前不同的候选股数向量;无变化时返回 None。σ_i ≤ 0(受压/松弛)
+        的索直接取 strand_min。
+        """
+        target = self.options.integer.resize_target_stress_mpa
+        if target is None:
+            target = 0.5 * (self.problem.bounds.stress_lower_mpa + self.problem.bounds.stress_upper_mpa)
+        if target <= 0.0:
+            raise ValueError(f"resize target stress must be positive, got {target!r}")
+        current = np.asarray(best.design.strands, dtype=int)
+        sigma = np.asarray([best.cable_stress_mpa[cid] for cid in self.layout.cable_ids], dtype=float)
+        scaled = np.where(
+            sigma > 0.0,
+            np.rint(current * sigma / target),
+            float(self.problem.bounds.strand_min),
+        )
+        candidate = np.clip(
+            scaled.astype(int), self.problem.bounds.strand_min, self.problem.bounds.strand_max
+        )
+        return None if np.array_equal(candidate, current) else candidate
 
     def _strand_moves_for(self, best: EvaluationResult, idx: int) -> list[tuple[int, str]]:
         step = self.options.integer.coordinate_step
@@ -104,7 +142,9 @@ class CableHybridOptimizer:
             f"outer_iterations={self.options.integer.outer_iterations}, "
             f"random_trials={self.options.integer.random_trials}"
         )
-        best = self._continuous_for(strands, initial_pretension)
+        initial = self._continuous_for(strands, initial_pretension)
+        best = initial.evaluation
+        best_feasibility = initial.feasibility_violation_mpa
         history = [best]
         self._emit(f"initial best: objective={best.objective:.6g} total_strands={best.metrics.total_strands}")
         rng = np.random.default_rng(self.options.integer.seed)
@@ -117,17 +157,37 @@ class CableHybridOptimizer:
                 dtype=int,
             )
             self._emit(f"random trial {trial_index + 1}/{self.options.integer.random_trials}")
-            ev = self._continuous_for(trial)
+            res = self._continuous_for(trial)
+            ev = res.evaluation
             history.append(ev)
             if ev.objective + self.options.integer.improvement_tol < best.objective:
                 self._emit(f"  accepted random trial: {best.objective:.6g} -> {ev.objective:.6g}")
                 best = ev
+                best_feasibility = res.feasibility_violation_mpa
             else:
                 self._emit(f"  rejected random trial: objective={ev.objective:.6g}, best={best.objective:.6g}")
 
         for outer in range(self.options.integer.outer_iterations):
             self._emit(f"outer iteration {outer + 1}/{self.options.integer.outer_iterations}")
             improved = False
+            if self.options.integer.resize:
+                candidate = self._resize_candidate(best)
+                if candidate is not None:
+                    self._emit(
+                        f"resize candidate: total_strands {int(np.sum(best.design.strands))} -> "
+                        f"{int(np.sum(candidate))} (stress-ratio jump)"
+                    )
+                    warm = self._scaled_pretension(best.design.pretension, best.design.strands, candidate)
+                    res = self._continuous_for(candidate, warm)
+                    ev = res.evaluation
+                    history.append(ev)
+                    if ev.objective + self.options.integer.improvement_tol < best.objective:
+                        self._emit(f"  accepted resize: {best.objective:.6g} -> {ev.objective:.6g}")
+                        best = ev
+                        best_feasibility = res.feasibility_violation_mpa
+                        improved = True
+                    else:
+                        self._emit(f"  rejected resize: objective={ev.objective:.6g}, best={best.objective:.6g}")
             for idx in range(self.layout.size):
                 current = best.design.strands
                 for delta, reason in self._strand_moves_for(best, idx):
@@ -150,12 +210,14 @@ class CableHybridOptimizer:
                         f"candidate cable={cid} strand_delta={delta:+d} "
                         f"{int(current[idx])}->{int(candidate[idx])} ({reason})"
                     )
-                    initial = self._scaled_pretension(best.design.pretension, current, candidate)
-                    ev = self._continuous_for(candidate, initial)
+                    warm = self._scaled_pretension(best.design.pretension, current, candidate)
+                    res = self._continuous_for(candidate, warm)
+                    ev = res.evaluation
                     history.append(ev)
                     if ev.objective + self.options.integer.improvement_tol < best.objective:
                         self._emit(f"  accepted: {best.objective:.6g} -> {ev.objective:.6g}")
                         best = ev
+                        best_feasibility = res.feasibility_violation_mpa
                         improved = True
                         break
                     self._emit(f"  rejected: objective={ev.objective:.6g}, best={best.objective:.6g}")
@@ -164,9 +226,22 @@ class CableHybridOptimizer:
                 break
 
         final = self.evaluator.evaluate(best.design.strands, best.design.pretension, keep_result=True)
+        band_violation = max(
+            0.0,
+            self.problem.bounds.stress_lower_mpa - final.metrics.stress_min_mpa,
+            final.metrics.stress_max_mpa - self.problem.bounds.stress_upper_mpa,
+        )
+        verdict = "SATISFIED" if band_violation <= 1e-6 else f"VIOLATED by {band_violation:.3f} MPa"
+        feasibility_note = (
+            f", LP bound s*={best_feasibility:.3f} MPa" if best_feasibility is not None else ""
+        )
         self._emit(
             f"finished: objective={final.objective:.6g} total_strands={final.metrics.total_strands} "
             f"shape_rmse={final.metrics.shape_rmse_m * 1000.0:.3f} mm "
-            f"stress=[{final.metrics.stress_min_mpa:.1f}, {final.metrics.stress_max_mpa:.1f}] MPa"
+            f"stress=[{final.metrics.stress_min_mpa:.1f}, {final.metrics.stress_max_mpa:.1f}] MPa "
+            f"band [{self.problem.bounds.stress_lower_mpa:g}, {self.problem.bounds.stress_upper_mpa:g}] MPa "
+            f"{verdict}{feasibility_note}"
         )
-        return HybridOptimizationResult(best=final, history=history)
+        return HybridOptimizationResult(
+            best=final, history=history, feasibility_violation_mpa=best_feasibility
+        )

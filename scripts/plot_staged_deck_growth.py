@@ -15,6 +15,7 @@ Usage::
     py -3.12 -m scripts.plot_staged_deck_growth --n 6
     py -3.12 -m scripts.plot_staged_deck_growth --n 8 --scale 20 --backend opensees
     py -3.12 -m scripts.plot_staged_deck_growth --frames-dir results/staged_frames
+    py -3.12 -m scripts.plot_staged_deck_growth --design results/cable_opt/best_design.json
 
 Default output: ``results/staged_deck_growth.gif`` under the project root.
 """
@@ -75,19 +76,48 @@ def default_pretension(
     return out
 
 
+def _load_design(path: Path) -> tuple[dict[int, int], dict[int, float]]:
+    """读优化器输出的 ``best_design.json``,返回 {cable_id: 股数} / {cable_id: 张力 N}。"""
+    import json
+
+    data = json.loads(path.read_text(encoding="utf-8"))
+    cables = data.get("cables")
+    if not cables:
+        raise ValueError(f"design file has no 'cables' entries: {path}")
+    strand_input = {int(c["cable_id"]): int(c["strands"]) for c in cables}
+    force_input = {int(c["cable_id"]): float(c["pretension_N"]) for c in cables}
+    return strand_input, force_input
+
+
 def run(args) -> None:
-    n = args.n
-    strands = [20] * n
-    pretension = default_pretension(
-        n,
-        args.anchor_base,
-        args.anchor_spacing,
-        args.left_start,
-        args.left_spacing,
-        args.right_start,
-        args.right_spacing,
-        args.wg,
-    )
+    if args.design:
+        design_path = _resolve_project_path(args.design)
+        strand_input, force_input = _load_design(design_path)
+        # 设计文件按 1000+i/2000+i 各 n 根索;--n 缺省时由文件推断。
+        n = args.n if args.n is not None else len(strand_input) // 2
+        print(f"使用优化设计:{design_path}（n={n}，总索股 {sum(strand_input.values())}）")
+    else:
+        n = args.n if args.n is not None else MODEL_DEFAULTS["n"]
+        pretension = default_pretension(
+            n,
+            args.anchor_base,
+            args.anchor_spacing,
+            args.left_start,
+            args.left_spacing,
+            args.right_start,
+            args.right_spacing,
+            args.wg,
+        )
+        # 展开为 {cable_id: 值}:builder 与 text 模式共用同一映射。
+        strand_input = {}
+        force_input = {}
+        for i in range(1, n + 1):
+            right_force, left_force = pretension[i - 1]
+            strand_input[1000 + i] = 20
+            strand_input[2000 + i] = 20
+            force_input[1000 + i] = float(right_force)
+            force_input[2000 + i] = float(left_force)
+
     plan = build_staged_cantilever(
         n_seg=n,
         anchor_base_height=args.anchor_base,
@@ -96,23 +126,13 @@ def run(args) -> None:
         left_start=args.left_start, left_spacing=args.left_spacing, left_end=args.left_end,
         right_start=args.right_start, right_spacing=args.right_spacing, right_end=args.right_end,
         wg=args.wg,
-        strands=strands,
-        pretension=pretension,
+        strands=strand_input,
+        pretension=force_input,
     )
     solver = StagedOpenSeesSolver() if args.backend == "opensees" else StagedDirectSolver()
     result = solver.run(plan)
     if not result.records:
         raise RuntimeError("No staged records were produced.")
-
-    # 把 (right, left) 输入展开为 {cable_id: 值}，供 text 模式按索报告。
-    strand_input: dict[int, int] = {}
-    force_input: dict[int, float] = {}
-    for i in range(1, n + 1):
-        right_force, left_force = pretension[i - 1]
-        strand_input[1000 + i] = int(strands[i - 1])
-        strand_input[2000 + i] = int(strands[i - 1])
-        force_input[1000 + i] = float(right_force)
-        force_input[2000 + i] = float(left_force)
 
     if args.render in ("text", "both"):
         _render_text(result, strand_input=strand_input, force_input=force_input,
@@ -371,7 +391,11 @@ def _plot_animation(result, n, scale, out, frames_dir, fps) -> None:
 
 def main() -> None:
     p = argparse.ArgumentParser(description="绘制逐阶段双悬臂主梁增长与变形过程（扇面索）")
-    p.add_argument("--n", type=int, default=MODEL_DEFAULTS["n"], help="每侧索数")
+    p.add_argument("--n", type=int, default=None,
+                   help=f"每侧索数（缺省 {MODEL_DEFAULTS['n']}；给 --design 时由设计文件推断）")
+    p.add_argument("--design", type=str, default=None,
+                   help="优化器输出的 best_design.json 路径（scripts.optimize_cables 生成），"
+                        "用其索股与张力替代内置缺省；几何参数仍来自命令行，须与优化时一致")
     p.add_argument("--backend", choices=["direct", "opensees"], default="opensees")
     # 扇面锚点
     p.add_argument("--anchor-base", type=float, default=MODEL_DEFAULTS["anchor_base"], help="参数a：最低锚点高度")
@@ -389,9 +413,9 @@ def main() -> None:
     p.add_argument("--fps", type=int, default=1)
     p.add_argument("--out", type=str, default="results/staged_deck_growth_ops.gif")
     p.add_argument("--frames-dir", type=str, default="results/frames")
-    p.add_argument("--render", choices=["plot", "text", "both"], default="plot",
+    p.add_argument("--render", choices=["plot", "text", "both"], default="both",
                    help="结果渲染模式：plot=动画(默认)，text=文本汇总，both=两者")
-    p.add_argument("--text-out", type=str, default=None,
+    p.add_argument("--text-out", type=str, default="results/text_results.txt",
                    help="text 模式下额外落盘的文本文件路径（默认仅打印到 stdout）")
     args = p.parse_args()
     run(args)

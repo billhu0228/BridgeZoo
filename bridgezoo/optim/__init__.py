@@ -3,10 +3,12 @@
 from bridgezoo.optim.continuous import ContinuousOptimizationResult, ContinuousOptions, FixedStrandTensionOptimizer
 from bridgezoo.optim.evaluator import CableDesign, CableDesignEvaluator, DesignMetrics, EvaluationResult
 from bridgezoo.optim.hybrid import CableHybridOptimizer, HybridOptimizationResult, HybridOptions, IntegerSearchOptions
+from bridgezoo.optim.linear import AffineCableModel, LinearTensionOptimizer, build_affine_model
 from bridgezoo.optim.problem import CableBounds, CableOptimizationProblem, ObjectiveWeights, TargetLine
 from bridgezoo.optim.variables import CableLayout
 
 __all__ = [
+    "AffineCableModel",
     "CableBounds",
     "CableDesign",
     "CableDesignEvaluator",
@@ -21,6 +23,8 @@ __all__ = [
     "HybridOptimizationResult",
     "HybridOptions",
     "IntegerSearchOptions",
+    "LinearTensionOptimizer",
     "ObjectiveWeights",
     "TargetLine",
+    "build_affine_model",
 ]

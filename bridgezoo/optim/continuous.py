@@ -17,6 +17,9 @@ class ContinuousOptions:
     ftol: float = 1.0e-7
     finite_diff_rel_step: float | None = None
     progress_every: int = 0
+    # "linear": 仿射模型 LP+SLSQP(线性后端精确、无 FEM 内层,默认);
+    # "slsqp": 直接在 FEM 上跑 SLSQP(保留给将来非线性后端)。
+    method: str = "linear"
 
 
 @dataclass(frozen=True)
@@ -25,6 +28,8 @@ class ContinuousOptimizationResult:
     success: bool
     message: str
     nfev: int | None = None
+    # LP 可行性相得到的最小可达最大违反量 s* [MPa](仅 linear 方法填写)。
+    feasibility_violation_mpa: float | None = None
 
 
 class FixedStrandTensionOptimizer:
@@ -55,10 +60,32 @@ class FixedStrandTensionOptimizer:
         mid_stress = 0.5 * (self.problem.bounds.stress_lower_mpa + self.problem.bounds.stress_upper_mpa)
         return mid_stress * 1e6 * self.problem.strand_area * strands.astype(float)
 
-    def _progress_metrics(self, strands: np.ndarray, tension: np.ndarray) -> str:
+    def _evaluate_cached(self, strands: np.ndarray, x, cache: dict) -> EvaluationResult:
+        """同一 x 处 objective/约束/progress 共享一次 FEM(cache 生命周期 = 一次 optimize)。"""
+        arr = np.asarray(x, dtype=float)
+        key = arr.tobytes()
+        if key not in cache:
+            cache[key] = self.evaluator.evaluate(strands, arr)
+        return cache[key]
+
+    def _stress_margins(self, strands: np.ndarray, x, cache: dict, *, upper: bool) -> np.ndarray:
+        """应力带 ineq 约束值(>=0 为满足)。
+
+        评估失败(如优化器探测到无效张力)时返回有限的"严重违反"值,而不是让异常
+        炸掉整个优化过程。
+        """
         try:
-            ev = self.evaluator.evaluate(strands, tension)
+            ev = self._evaluate_cached(strands, x, cache)
         except (ValueError, RuntimeError, FloatingPointError):
+            return np.full(self.layout.size, -1.0e6)
+        values = np.asarray([ev.cable_stress_mpa[cid] for cid in self.layout.cable_ids], dtype=float)
+        if upper:
+            return self.problem.bounds.stress_upper_mpa - values
+        return values - self.problem.bounds.stress_lower_mpa
+
+    @staticmethod
+    def _progress_metrics(ev: EvaluationResult | None) -> str:
+        if ev is None:
             return "metrics=unavailable"
         return (
             f"shape_rmse={ev.metrics.shape_rmse_m * 1000.0:.3f} mm "
@@ -87,27 +114,28 @@ class FixedStrandTensionOptimizer:
         hi = np.asarray([b[1] for b in bounds], dtype=float)
         x0 = np.clip(x0, lo, hi)
         eval_count = 0
+        cache: dict[bytes, EvaluationResult] = {}
 
         def objective(x):
             nonlocal eval_count
             eval_count += 1
-            value = self.evaluator.safe_objective(strands, x)
+            try:
+                ev = self._evaluate_cached(strands, x, cache)
+                value = ev.objective
+            except (ValueError, RuntimeError, FloatingPointError):
+                ev, value = None, 1.0e30
             if self.options.progress_every > 0 and eval_count % self.options.progress_every == 0:
                 self._emit(
                     f"    SLSQP eval {eval_count}: objective={value:.6g} "
-                    f"{self._progress_metrics(strands, x)}"
+                    f"{self._progress_metrics(ev)}"
                 )
             return value
 
         def stress_lower_constraint(x):
-            ev = self.evaluator.evaluate(strands, x)
-            values = np.asarray([ev.cable_stress_mpa[cid] for cid in self.layout.cable_ids], dtype=float)
-            return values - self.problem.bounds.stress_lower_mpa
+            return self._stress_margins(strands, x, cache, upper=False)
 
         def stress_upper_constraint(x):
-            ev = self.evaluator.evaluate(strands, x)
-            values = np.asarray([ev.cable_stress_mpa[cid] for cid in self.layout.cable_ids], dtype=float)
-            return self.problem.bounds.stress_upper_mpa - values
+            return self._stress_margins(strands, x, cache, upper=True)
 
         options = {"maxiter": self.options.maxiter, "ftol": self.options.ftol, "disp": False}
         if self.options.finite_diff_rel_step is not None:

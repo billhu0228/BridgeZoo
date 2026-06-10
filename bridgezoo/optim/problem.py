@@ -8,7 +8,7 @@ from typing import Callable, Mapping
 
 @dataclass(frozen=True)
 class CableBounds:
-    strand_min: int = 8
+    strand_min: int = 1
     strand_max: int = 60
     stress_lower_mpa: float = 800.0
     stress_upper_mpa: float = 1200.0

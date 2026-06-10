@@ -108,7 +108,22 @@ def _evaluation_payload(ev) -> dict:
     }
 
 
-def _write_outputs(out_dir: Path, best, history) -> None:
+def _band_verdict_line(best, result, stress_lower: float, stress_upper: float) -> str:
+    violation = max(
+        0.0,
+        stress_lower - best.metrics.stress_min_mpa,
+        best.metrics.stress_max_mpa - stress_upper,
+    )
+    verdict = "SATISFIED" if violation <= 1e-6 else "VIOLATED"
+    s_star = result.feasibility_violation_mpa
+    lp_note = f", LP bound s*={s_star:.3f} MPa" if s_star is not None else ""
+    return (
+        f"stress band [{stress_lower:g}, {stress_upper:g}] MPa: {verdict} "
+        f"(max violation {violation:.3f} MPa{lp_note})"
+    )
+
+
+def _write_outputs(out_dir: Path, best, history, band_line: str | None = None) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "best_design.json").write_text(
         json.dumps(_evaluation_payload(best), indent=2, ensure_ascii=False),
@@ -157,6 +172,8 @@ def _write_outputs(out_dir: Path, best, history) -> None:
         ),
         f"stress violation rms: {best.metrics.stress_violation_rms_mpa:.6f} MPa",
     ]
+    if band_line is not None:
+        summary.append(band_line)
     (out_dir / "summary.txt").write_text("\n".join(summary) + "\n", encoding="utf-8")
 
 
@@ -187,6 +204,7 @@ def run(args):
             maxiter=args.continuous_maxiter,
             ftol=args.continuous_ftol,
             progress_every=0 if args.quiet else args.progress_every,
+            method=args.continuous_method,
         ),
         integer=IntegerSearchOptions(
             outer_iterations=args.outer_iterations,
@@ -194,6 +212,7 @@ def run(args):
             random_trials=args.random_trials,
             seed=args.seed,
             stress_guided=not args.no_stress_guided_strands,
+            resize=not args.no_strand_resize,
         ),
     )
     start_time = time.perf_counter()
@@ -208,7 +227,8 @@ def run(args):
     result = optimizer.optimize(initial_strands=initial_strands, initial_pretension=initial_pretension)
 
     out_dir = PROJECT_ROOT / args.out if not Path(args.out).is_absolute() else Path(args.out)
-    _write_outputs(out_dir, result.best, result.history)
+    band_line = _band_verdict_line(result.best, result, args.stress_lower, args.stress_upper)
+    _write_outputs(out_dir, result.best, result.history, band_line=band_line)
 
     print("Cable optimization complete")
     print(f"  objective: {result.best.objective:.6g}")
@@ -221,6 +241,7 @@ def run(args):
         f"min={result.best.metrics.stress_min_mpa:.3f}, "
         f"max={result.best.metrics.stress_max_mpa:.3f}"
     )
+    print(f"  {band_line}")
     print(f"  outputs: {out_dir}")
 
     if args.verify_opensees:
@@ -259,7 +280,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--right-end", type=float, default=MODEL_DEFAULTS["right_end"])
     p.add_argument("--wg", type=float, default=MODEL_DEFAULTS["wg"])
 
-    p.add_argument("--strand-min", type=int, default=8)
+    p.add_argument("--strand-min", type=int, default=1)
     p.add_argument("--strand-max", type=int, default=60)
     p.add_argument("--initial-strands", type=int, default=20)
     p.add_argument("--stress-lower", type=float, default=800.0)
@@ -274,6 +295,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--stress-scale", type=float, default=100.0)
     p.add_argument("--strand-scale", type=float, default=20.0)
 
+    p.add_argument(
+        "--continuous-method",
+        choices=["linear", "slsqp"],
+        default="linear",
+        help="Continuous tension solver: 'linear' = exact affine-model LP+SLSQP "
+        "(linear backends), 'slsqp' = legacy SLSQP on the FEM.",
+    )
     p.add_argument("--continuous-maxiter", type=int, default=80)
     p.add_argument("--continuous-ftol", type=float, default=1.0e-7)
     p.add_argument("--progress-every", type=int, default=10, help="Print every N SLSQP objective evaluations.")
@@ -284,6 +312,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-stress-guided-strands",
         action="store_true",
         help="Disable stress-guided strand add/remove ordering.",
+    )
+    p.add_argument(
+        "--no-strand-resize",
+        action="store_true",
+        help="Disable the stress-ratio strand resize jump at the start of each outer iteration.",
     )
     p.add_argument("--quiet", action="store_true", help="Disable optimization progress output.")
     p.add_argument("--verify-opensees", action="store_true")
