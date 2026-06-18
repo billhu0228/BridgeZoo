@@ -51,7 +51,28 @@ MODEL_DEFAULTS = {
     "right_spacing": 12.0,
     "right_end": 4.0,
     "wg": 1.0e5,
+    "beam_E": 20e9,        # 主梁弹性模量 [Pa]
+    "beam_A": 10.0,        # 主梁截面积 [m^2]
+    "beam_Iz": 10.0 / 12.0,  # 主梁截面惯性矩 [m^4]
 }
+
+P4B_DEFAULTS = {
+    "n": 19,
+    "anchor_base": 60.0,
+    "anchor_spacing": 2.5,
+    "anchor_free": 5.0,
+    "left_start": 18.5,
+    "left_spacing": 12.0,
+    "left_end": 5.0,
+    "right_start": 18.5,
+    "right_spacing": 12.0,
+    "right_end": 8.0,
+    "wg": 1.0e5,
+    "beam_E": 200e9,        # 主梁弹性模量 [Pa]
+    "beam_A": 2.2832,        # 主梁截面积 [m^2]
+    "beam_Iz": 1.7162,  # 主梁截面惯性矩 [m^4]
+}
+
 
 
 def default_pretension(
@@ -97,7 +118,7 @@ def run(args) -> None:
         n = args.n if args.n is not None else len(strand_input) // 2
         print(f"使用优化设计:{design_path}（n={n}，总索股 {sum(strand_input.values())}）")
     else:
-        n = args.n if args.n is not None else MODEL_DEFAULTS["n"]
+        n = args.n if args.n is not None else P4B_DEFAULTS["n"]
         pretension = default_pretension(
             n,
             args.anchor_base,
@@ -126,6 +147,9 @@ def run(args) -> None:
         left_start=args.left_start, left_spacing=args.left_spacing, left_end=args.left_end,
         right_start=args.right_start, right_spacing=args.right_spacing, right_end=args.right_end,
         wg=args.wg,
+        beam_E=args.beam_E,
+        beam_A=args.beam_A,
+        beam_Iz=args.beam_Iz,
         strands=strand_input,
         pretension=force_input,
     )
@@ -321,7 +345,13 @@ def _plot_animation(result, n, scale, out, frames_dir, fps, beam_depth: float = 
     ymin = min(all_y + [0.0]) - 0.10 * tower_top - 0.5 * beam_depth
     ymax = max(all_y + [tower_top]) + 0.10 * tower_top + 0.5 * beam_depth
 
-    fig, ax = plt.subplots(figsize=(11, 5.6))
+    # 等比坐标轴(1:1)下，figsize 须贴合数据长宽比，否则画框两侧/上下留大量空白。
+    # 高度按真实数据比例推导，并夹在 [3.5, 12] 英寸内以兼顾图例/标题可读性。
+    data_w = xmax - xmin
+    data_h = max(ymax - ymin, 1e-9)
+    fig_w = 14.0
+    fig_h = max(3.5, min(12.0, fig_w * data_h / data_w))
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h))
 
     def draw(k: int):
         rec = records[k]
@@ -382,6 +412,9 @@ def _plot_animation(result, n, scale, out, frames_dir, fps, beam_depth: float = 
         ax.set_ylabel(f"y [m]  (位移放大 {scale:g} 倍)")
         ax.set_xlim(xmin, xmax)
         ax.set_ylim(ymin, ymax)
+        # 等比坐标轴：x、y 每米对应相同像素（ax.clear() 每帧会重置 aspect，故在此重设）。
+        # 注意：竖向位移仍按 scale 放大后再等比绘制，几何整体不再被画框拉伸。
+        ax.set_aspect("equal")
         ax.grid(True, alpha=0.25)
         ax.legend(loc="upper right", fontsize=8, ncol=2)
         fig.tight_layout()
@@ -402,25 +435,29 @@ def _plot_animation(result, n, scale, out, frames_dir, fps, beam_depth: float = 
 
 
 def main() -> None:
+    USE_MODEL=P4B_DEFAULTS
     p = argparse.ArgumentParser(description="绘制逐阶段双悬臂主梁增长与变形过程（扇面索）")
     p.add_argument("--n", type=int, default=None,
-                   help=f"每侧索数（缺省 {MODEL_DEFAULTS['n']}；给 --design 时由设计文件推断）")
+                   help=f"每侧索数（缺省 {USE_MODEL['n']}；给 --design 时由设计文件推断）")
     p.add_argument("--design", type=str, default=None,
                    help="优化器输出的 best_design.json 路径（scripts.optimize_cables 生成），"
                         "用其索股与张力替代内置缺省；几何参数仍来自命令行，须与优化时一致")
     p.add_argument("--backend", choices=["direct", "opensees"], default="opensees")
     # 扇面锚点
-    p.add_argument("--anchor-base", type=float, default=MODEL_DEFAULTS["anchor_base"], help="参数a：最低锚点高度")
-    p.add_argument("--anchor-spacing", type=float, default=MODEL_DEFAULTS["anchor_spacing"], help="参数b：锚点间距")
-    p.add_argument("--anchor-free", type=float, default=MODEL_DEFAULTS["anchor_free"], help="参数c：顶部自由高度")
+    p.add_argument("--anchor-base", type=float, default=USE_MODEL["anchor_base"], help="参数a：最低锚点高度")
+    p.add_argument("--anchor-spacing", type=float, default=USE_MODEL["anchor_spacing"], help="参数b：锚点间距")
+    p.add_argument("--anchor-free", type=float, default=USE_MODEL["anchor_free"], help="参数c：顶部自由高度")
     # 双悬臂（左右）
-    p.add_argument("--left-start", type=float, default=MODEL_DEFAULTS["left_start"])
-    p.add_argument("--left-spacing", type=float, default=MODEL_DEFAULTS["left_spacing"])
-    p.add_argument("--left-end", type=float, default=MODEL_DEFAULTS["left_end"])
-    p.add_argument("--right-start", type=float, default=MODEL_DEFAULTS["right_start"])
-    p.add_argument("--right-spacing", type=float, default=MODEL_DEFAULTS["right_spacing"])
-    p.add_argument("--right-end", type=float, default=MODEL_DEFAULTS["right_end"])
-    p.add_argument("--wg", type=float, default=MODEL_DEFAULTS["wg"], help="主梁自重线荷载 [N/m]")
+    p.add_argument("--left-start", type=float, default=USE_MODEL["left_start"])
+    p.add_argument("--left-spacing", type=float, default=USE_MODEL["left_spacing"])
+    p.add_argument("--left-end", type=float, default=USE_MODEL["left_end"])
+    p.add_argument("--right-start", type=float, default=USE_MODEL["right_start"])
+    p.add_argument("--right-spacing", type=float, default=USE_MODEL["right_spacing"])
+    p.add_argument("--right-end", type=float, default=USE_MODEL["right_end"])
+    p.add_argument("--wg", type=float, default=USE_MODEL["wg"], help="主梁自重线荷载 [N/m]")
+    p.add_argument("--beam-E", type=float, default=USE_MODEL["beam_E"], help="主梁弹性模量 E [Pa]")
+    p.add_argument("--beam-A", type=float, default=USE_MODEL["beam_A"], help="主梁截面积 A [m^2]")
+    p.add_argument("--beam-Iz", type=float, default=USE_MODEL["beam_Iz"], help="主梁截面惯性矩 I [m^4]")
     p.add_argument("--scale", type=float, default=10.0, help="竖向位移绘图放大倍数")
     p.add_argument("--beam-depth", type=float, default=1.0,
                    help="主梁绘制梁高 [m]（真实尺度，不随位移放大；0=仅画中轴线；"

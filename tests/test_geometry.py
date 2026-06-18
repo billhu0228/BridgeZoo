@@ -54,6 +54,16 @@ def test_section_properties():
     assert g.wg > 0
 
 
+def test_section_properties_direct_override():
+    """beam_A / beam_I 直接指定时覆盖由 beam_w/beam_h 推导的值。"""
+    g = BridgeGeometry(num_cables_per_side=6, beam_w=10.0, beam_h=1.0, beam_A=5.0, beam_I=2.0)
+    assert np.isclose(g.beam_area, 5.0)
+    assert np.isclose(g.beam_Iz, 2.0)
+    # wg 仍由 beam_area（已 override）× density × gravity × load_factor 计算
+    expected_wg = 5.0 * g.density * g.gravity * g.load_factor
+    assert np.isclose(g.wg, expected_wg)
+
+
 def test_invalid_cable_count():
     """非偶数 / 过小应报错。"""
     with pytest.raises(ValueError):

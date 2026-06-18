@@ -2,7 +2,7 @@ from argparse import Namespace
 
 from bridgezoo.fem.completed import CompletedDirectSolver
 from bridgezoo.fem.staged import build_staged_cantilever
-from scripts.plot_completed_balance import (
+from archive.plot_completed_balance import (
     MIDSPAN_NODE,
     TOWER_DECK_NODE,
     VERTICAL_SUPPORT_NODE,

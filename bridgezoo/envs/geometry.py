@@ -32,15 +32,20 @@ class BridgeGeometry:
     anchor_height : float
         上塔柱高度（塔顶相对梁面，m）。
     beam_w, beam_h : float
-        主梁矩形截面宽、高 (m)。
+        主梁矩形截面宽、高 (m)，用于自动推导 A、I（当 beam_A/beam_I 未指定时）。
     beam_E : float
         主梁弹性模量 (Pa)。
+    beam_A : float or None
+        主梁截面积 (m²)。给定时直接使用，忽略 beam_w/beam_h 的推导值。
+    beam_I : float or None
+        主梁截面惯性矩 (m⁴)。给定时直接使用，忽略 beam_w/beam_h 的推导值。
     cable_Es : float
         拉索弹性模量 (Pa)。
     strand_area : float
         单股钢绞线截面积 (m²)。
     density, gravity : float
         主梁材料密度 (kg/m³) 与重力加速度 (m/s²)，用于自重线荷载。
+        当 beam_A 被直接指定时，自重仍由 density/gravity/load_factor 与 beam_area 计算。
     load_factor : float
         线荷载附加系数（历史模型按双幅取 2.0）。
 
@@ -55,6 +60,8 @@ class BridgeGeometry:
     beam_w: float = 10.0
     beam_h: float = 1.0
     beam_E: float = 20e9
+    beam_A: float | None = None
+    beam_I: float | None = None
     cable_Es: float = 1.95e11
     strand_area: float = 1.4e-4
     density: float = 2400.0
@@ -89,8 +96,8 @@ class BridgeGeometry:
             raise ValueError("num_cables_per_side 必须为偶数且 > 1")
 
         # 截面 / 自重
-        self.beam_area = self.beam_h * self.beam_w
-        self.beam_Iz = self.beam_w * self.beam_h ** 3 / 12.0
+        self.beam_area = self.beam_A if self.beam_A is not None else self.beam_h * self.beam_w
+        self.beam_Iz = self.beam_I if self.beam_I is not None else self.beam_w * self.beam_h ** 3 / 12.0
         self.wg = self.beam_area * self.density * self.gravity * self.load_factor
 
         # 跨径

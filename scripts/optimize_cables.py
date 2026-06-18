@@ -48,6 +48,9 @@ def _model_kwargs(args) -> dict:
         "right_spacing": args.right_spacing,
         "right_end": args.right_end,
         "wg": args.wg,
+        "beam_E": args.beam_E,
+        "beam_A": args.beam_A,
+        "beam_Iz": args.beam_Iz,
     }
 
 
@@ -279,6 +282,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--right-spacing", type=float, default=MODEL_DEFAULTS["right_spacing"])
     p.add_argument("--right-end", type=float, default=MODEL_DEFAULTS["right_end"])
     p.add_argument("--wg", type=float, default=MODEL_DEFAULTS["wg"])
+    p.add_argument("--beam-E", type=float, default=MODEL_DEFAULTS["beam_E"], help="主梁弹性模量 E [Pa]")
+    p.add_argument("--beam-A", type=float, default=MODEL_DEFAULTS["beam_A"], help="主梁截面积 A [m^2]")
+    p.add_argument("--beam-Iz", type=float, default=MODEL_DEFAULTS["beam_Iz"], help="主梁截面惯性矩 I [m^4]")
 
     p.add_argument("--strand-min", type=int, default=1)
     p.add_argument("--strand-max", type=int, default=60)
