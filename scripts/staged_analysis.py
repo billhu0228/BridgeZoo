@@ -12,10 +12,10 @@ no assumption that ``x = node_id * seg_len``.
 
 Usage::
 
-    py -3.12 -m scripts.plot_staged_deck_growth --n 6
-    py -3.12 -m scripts.plot_staged_deck_growth --n 8 --scale 20 --backend opensees
-    py -3.12 -m scripts.plot_staged_deck_growth --frames-dir results/staged_frames
-    py -3.12 -m scripts.plot_staged_deck_growth --design results/cable_opt/best_design.json
+    py -3.12 -m scripts.staged_analysis --n 6
+    py -3.12 -m scripts.staged_analysis --n 8 --scale 20 --backend opensees
+    py -3.12 -m scripts.staged_analysis --frames-dir results/staged_frames
+    py -3.12 -m scripts.staged_analysis --design results/cable_opt/best_design.json
 
 Default output: ``results/staged_deck_growth.gif`` under the project root.
 """

@@ -1,7 +1,7 @@
 """Cross-check staged construction tip displacements with the OpenSees backend.
 
 The validation case uses the same structural parameters as
-``plot_staged_deck_growth.py``.  For every recorded construction stage, the
+``staged_analysis.py``.  For every recorded construction stage, the
 script compares the current farthest deck node displacement from the direct
 solver and the OpenSees backend, reporting both absolute and percentage
 differences.
@@ -18,7 +18,7 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from bridgezoo.fem.staged import StagedDirectSolver, StagedOpenSeesSolver, build_staged_cantilever
-from scripts.plot_staged_deck_growth import MODEL_DEFAULTS, default_pretension
+from scripts.staged_analysis import MODEL_DEFAULTS, default_pretension
 
 RIGHT_TIP, LEFT_TIP = 200, 201
 

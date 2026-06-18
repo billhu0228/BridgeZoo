@@ -33,7 +33,7 @@ from bridgezoo.optim import (  # noqa: E402
     IntegerSearchOptions,
     ObjectiveWeights,
 )
-from scripts.plot_staged_deck_growth import MODEL_DEFAULTS, default_pretension  # noqa: E402
+from scripts.staged_analysis import MODEL_DEFAULTS, default_pretension, P4B_DEFAULTS  # noqa: E402
 
 
 def _model_kwargs(args) -> dict:
@@ -267,24 +267,25 @@ def run(args):
 
 
 def build_parser() -> argparse.ArgumentParser:
+    model_p = P4B_DEFAULTS
     p = argparse.ArgumentParser(description="Optimize staged cable strands and pretensions.")
-    p.add_argument("--n", type=int, default=MODEL_DEFAULTS["n"])
+    p.add_argument("--n", type=int, default=model_p["n"])
     p.add_argument("--out", default="results/cable_opt")
     p.add_argument("--seed", type=int, default=0)
 
-    p.add_argument("--anchor-base", type=float, default=MODEL_DEFAULTS["anchor_base"])
-    p.add_argument("--anchor-spacing", type=float, default=MODEL_DEFAULTS["anchor_spacing"])
-    p.add_argument("--anchor-free", type=float, default=MODEL_DEFAULTS["anchor_free"])
-    p.add_argument("--left-start", type=float, default=MODEL_DEFAULTS["left_start"])
-    p.add_argument("--left-spacing", type=float, default=MODEL_DEFAULTS["left_spacing"])
-    p.add_argument("--left-end", type=float, default=MODEL_DEFAULTS["left_end"])
-    p.add_argument("--right-start", type=float, default=MODEL_DEFAULTS["right_start"])
-    p.add_argument("--right-spacing", type=float, default=MODEL_DEFAULTS["right_spacing"])
-    p.add_argument("--right-end", type=float, default=MODEL_DEFAULTS["right_end"])
-    p.add_argument("--wg", type=float, default=MODEL_DEFAULTS["wg"])
-    p.add_argument("--beam-E", type=float, default=MODEL_DEFAULTS["beam_E"], help="主梁弹性模量 E [Pa]")
-    p.add_argument("--beam-A", type=float, default=MODEL_DEFAULTS["beam_A"], help="主梁截面积 A [m^2]")
-    p.add_argument("--beam-Iz", type=float, default=MODEL_DEFAULTS["beam_Iz"], help="主梁截面惯性矩 I [m^4]")
+    p.add_argument("--anchor-base", type=float, default=model_p["anchor_base"])
+    p.add_argument("--anchor-spacing", type=float, default=model_p["anchor_spacing"])
+    p.add_argument("--anchor-free", type=float, default=model_p["anchor_free"])
+    p.add_argument("--left-start", type=float, default=model_p["left_start"])
+    p.add_argument("--left-spacing", type=float, default=model_p["left_spacing"])
+    p.add_argument("--left-end", type=float, default=model_p["left_end"])
+    p.add_argument("--right-start", type=float, default=model_p["right_start"])
+    p.add_argument("--right-spacing", type=float, default=model_p["right_spacing"])
+    p.add_argument("--right-end", type=float, default=model_p["right_end"])
+    p.add_argument("--wg", type=float, default=model_p["wg"])
+    p.add_argument("--beam-E", type=float, default=model_p["beam_E"], help="主梁弹性模量 E [Pa]")
+    p.add_argument("--beam-A", type=float, default=model_p["beam_A"], help="主梁截面积 A [m^2]")
+    p.add_argument("--beam-Iz", type=float, default=model_p["beam_Iz"], help="主梁截面惯性矩 I [m^4]")
 
     p.add_argument("--strand-min", type=int, default=1)
     p.add_argument("--strand-max", type=int, default=60)
