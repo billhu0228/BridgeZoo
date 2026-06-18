@@ -13,7 +13,7 @@
 
 from bridgezoo.fem.staged.builder import build_staged_cantilever
 from bridgezoo.fem.staged.completed import build_completed_model
-from bridgezoo.fem.staged.direct import StagedDirectSolver
+from bridgezoo.fem.staged.direct import StagedDirectBatchSolver, StagedDirectSolver
 from bridgezoo.fem.staged.opensees import StagedOpenSeesSolver
 from bridgezoo.fem.staged.plan import (
     BalanceDof,
@@ -32,6 +32,7 @@ __all__ = [
     "build_staged_cantilever",
     "build_completed_model",
     "StagedDirectSolver",
+    "StagedDirectBatchSolver",
     "StagedOpenSeesSolver",
     "StagedPlan",
     "StagedResult",

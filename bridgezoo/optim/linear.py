@@ -58,10 +58,12 @@ def build_affine_model(
     strands: np.ndarray,
     tension_step_n: float = 1.0e6,
 ) -> AffineCableModel:
-    """用 m+1 次真实 FEM(T=0 + 逐索单位扰动)构造仿射模型。
+    """用 m+1 个真实 FEM 工况(T=0 + 逐索单位扰动)构造仿射模型。
 
     对线性后端逐项精确(扰动差商即真实斜率);``tension_step_n`` 只影响数值
-    条件,不影响线性模型的精确性。
+    条件,不影响线性模型的精确性。这 m+1 个工况索股相同(结构刚度不变),经
+    :meth:`CableDesignEvaluator.evaluate_batch` 一次批量求解(direct 后端每施工阶段
+    刚度只分解一次),与逐个 FEM 机器精度一致。
     """
     strands = validate_strand_vector(
         strands, evaluator.layout, evaluator.problem.bounds.strand_min, evaluator.problem.bounds.strand_max
@@ -69,21 +71,24 @@ def build_affine_model(
     ids = evaluator.layout.cable_ids
     m = evaluator.layout.size
 
-    base = evaluator.evaluate(strands, np.zeros(m))
-    deck_nodes = tuple(base.deck_errors_m.keys())
-    sigma0 = np.asarray([base.cable_stress_mpa[cid] for cid in ids], dtype=float)
-    err0 = np.asarray([base.deck_errors_m[nid] for nid in deck_nodes], dtype=float)
+    # 多右端:第 0 列 T=0,其余各列为单索单位扰动。
+    tension_matrix = np.zeros((m, m + 1))
+    tension_matrix[:, 1:] = np.eye(m) * tension_step_n
+    cases = evaluator.evaluate_batch(strands, tension_matrix)
+
+    base_err, base_sigma = cases[0]
+    deck_nodes = tuple(base_err.keys())
+    sigma0 = np.asarray([base_sigma[cid] for cid in ids], dtype=float)
+    err0 = np.asarray([base_err[nid] for nid in deck_nodes], dtype=float)
 
     M = np.zeros((m, m))
     D = np.zeros((len(deck_nodes), m))
     for j in range(m):
-        tension = np.zeros(m)
-        tension[j] = tension_step_n
-        ev = evaluator.evaluate(strands, tension)
-        sigma_j = np.asarray([ev.cable_stress_mpa[cid] for cid in ids], dtype=float)
-        err_j = np.asarray([ev.deck_errors_m[nid] for nid in deck_nodes], dtype=float)
-        M[:, j] = (sigma_j - sigma0) / tension_step_n
-        D[:, j] = (err_j - err0) / tension_step_n
+        err_j, sigma_j = cases[j + 1]
+        sigma = np.asarray([sigma_j[cid] for cid in ids], dtype=float)
+        err = np.asarray([err_j[nid] for nid in deck_nodes], dtype=float)
+        M[:, j] = (sigma - sigma0) / tension_step_n
+        D[:, j] = (err - err0) / tension_step_n
 
     return AffineCableModel(
         cable_ids=ids,
