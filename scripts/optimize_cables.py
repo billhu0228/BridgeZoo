@@ -48,6 +48,7 @@ def _model_kwargs(args) -> dict:
         "right_spacing": args.right_spacing,
         "right_end": args.right_end,
         "wg": args.wg,
+        "dw": args.dw,
         "beam_E": args.beam_E,
         "beam_A": args.beam_A,
         "beam_Iz": args.beam_Iz,
@@ -283,13 +284,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--right-spacing", type=float, default=model_p["right_spacing"])
     p.add_argument("--right-end", type=float, default=model_p["right_end"])
     p.add_argument("--wg", type=float, default=model_p["wg"])
+    p.add_argument("--dw", type=float, default=model_p["dw"])
     p.add_argument("--beam-E", type=float, default=model_p["beam_E"], help="主梁弹性模量 E [Pa]")
     p.add_argument("--beam-A", type=float, default=model_p["beam_A"], help="主梁截面积 A [m^2]")
     p.add_argument("--beam-Iz", type=float, default=model_p["beam_Iz"], help="主梁截面惯性矩 I [m^4]")
 
-    p.add_argument("--strand-min", type=int, default=40)
-    p.add_argument("--strand-max", type=int, default=150)
-    p.add_argument("--initial-strands", type=int, default=50)
+    p.add_argument("--strand-min", type=int, default=100)
+    p.add_argument("--strand-max", type=int, default=300)
+    p.add_argument("--initial-strands", type=int, default=200)
     p.add_argument("--stress-lower", type=float, default=400.0)
     p.add_argument("--stress-upper", type=float, default=600.0)
     p.add_argument("--tension-bound-stress", type=float, default=1600.0)
