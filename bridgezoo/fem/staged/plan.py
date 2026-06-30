@@ -57,6 +57,22 @@ class NewCable:
 
 
 @dataclass
+class MemberLoad:
+    """对**已激活**梁单元施加的**全局竖向**均布荷载增量(per length, 向下为负)。
+
+    与 :attr:`NewFrame.udl_wy` 同约定:全局竖向线荷载,按单元方向投影到局部后等效成
+    节点力(见 :func:`bridgezoo.fem.kernels._gravity_feq_global`)。区别于 ``NewFrame.udl_wy``
+    只在单元**诞生步**施加,本原语对**已存在**的单元施加分布荷载增量,用于成桥合龙后的
+    二期恒载(铺装/护栏等)。自带 ``i``/``j`` 使其自描述,无需在求解器中反查活动单元表。
+    """
+
+    member: int
+    i: int
+    j: int
+    wy: float
+
+
+@dataclass
 class NodalLoad:
     node: int
     fx: float = 0.0
@@ -85,6 +101,7 @@ class BuildStep:
     new_frames: list[NewFrame] = field(default_factory=list)
     new_cables: list[NewCable] = field(default_factory=list)
     nodal_loads: list[NodalLoad] = field(default_factory=list)
+    member_loads: list[MemberLoad] = field(default_factory=list)  # 对既有梁单元的分布荷载增量(如二期恒载)
     balance_dofs: list[BalanceDof] = field(default_factory=list)
     new_supports: list[tuple[int, bool, bool, bool]] = field(default_factory=list)
     record: bool = True

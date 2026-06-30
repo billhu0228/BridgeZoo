@@ -159,6 +159,16 @@ class StagedOpenSeesSolver:
                 feq_global = _gravity_feq_global(fr.udl_wy, c, s, L)
                 add(fr.i, feq_global[0:3])
                 add(fr.j, feq_global[3:6])
+        for ml in step.member_loads:
+            # 既有梁单元的分布荷载增量(二期恒载)等效节点力,供平衡步切线 RHS。
+            if ml.wy != 0.0:
+                xi, yi = self.coords[ml.i]
+                xj, yj = self.coords[ml.j]
+                L = math.hypot(xj - xi, yj - yi)
+                c, s = (xj - xi) / L, (yj - yi) / L
+                feq_global = _gravity_feq_global(ml.wy, c, s, L)
+                add(ml.i, feq_global[0:3])
+                add(ml.j, feq_global[3:6])
         for nl in step.nodal_loads:
             add(nl.node, np.array([nl.fx, nl.fy, nl.mz], dtype=float))
         return dF
@@ -239,7 +249,12 @@ class StagedOpenSeesSolver:
             self._last_applied_loads.setdefault(nid, np.zeros(3))
             self._last_applied_loads[nid] += vec
         ops.wipeAnalysis()
-        has_load = any(fr.udl_wy != 0.0 for fr in step.new_frames) or bool(step.nodal_loads) or bool(balance_loads)
+        has_load = (
+            any(fr.udl_wy != 0.0 for fr in step.new_frames)
+            or any(ml.wy != 0.0 for ml in step.member_loads)
+            or bool(step.nodal_loads)
+            or bool(balance_loads)
+        )
         if has_load:
             ops.timeSeries("Linear", ts)
             ops.pattern("Plain", pat, ts)
@@ -251,6 +266,14 @@ class StagedOpenSeesSolver:
                     Lf = math.hypot(xj - xi, yj - yi)
                     c, s = (xj - xi) / Lf, (yj - yi) / Lf
                     ops.eleLoad("-ele", fr.id, "-type", "-beamUniform", fr.udl_wy * c, fr.udl_wy * s)
+            for ml in step.member_loads:
+                if ml.wy != 0.0:
+                    # 既有梁单元的真实分布荷载(二期恒载),同样按单元方向投影到局部。
+                    xi, yi = self.coords[ml.i]
+                    xj, yj = self.coords[ml.j]
+                    Lf = math.hypot(xj - xi, yj - yi)
+                    c, s = (xj - xi) / Lf, (yj - yi) / Lf
+                    ops.eleLoad("-ele", ml.member, "-type", "-beamUniform", ml.wy * c, ml.wy * s)
             for nl in step.nodal_loads:
                 ops.load(nl.node, nl.fx, nl.fy, nl.mz)
             for nid, vec in balance_loads.items():

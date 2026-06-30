@@ -51,6 +51,7 @@ MODEL_DEFAULTS = {
     "right_spacing": 12.0,
     "right_end": 4.0,
     "wg": 1.0e5,
+    "dw": 0.0,             # 二期均布荷载 [N/m]（向下）
     "beam_E": 20e9,        # 主梁弹性模量 [Pa]
     "beam_A": 10.0,        # 主梁截面积 [m^2]
     "beam_Iz": 10.0 / 12.0,  # 主梁截面惯性矩 [m^4]
@@ -67,10 +68,11 @@ P4B_DEFAULTS = {
     "right_start": 18.5,
     "right_spacing": 12.0,
     "right_end": 8.0,
-    "wg": 1.0e5,
+    "wg": 3.2e5,
+    "dw": 4.0e5,             # 二期均布荷载 [N/m]（向下）
     "beam_E": 200e9,        # 主梁弹性模量 [Pa]
-    "beam_A": 2.2832,        # 主梁截面积 [m^2]
-    "beam_Iz": 1.7162,  # 主梁截面惯性矩 [m^4]
+    "beam_A": 2.3,        # 主梁截面积 [m^2]
+    "beam_Iz": 2.0,  # 主梁截面惯性矩 [m^4]
 }
 
 
@@ -147,6 +149,7 @@ def run(args) -> None:
         left_start=args.left_start, left_spacing=args.left_spacing, left_end=args.left_end,
         right_start=args.right_start, right_spacing=args.right_spacing, right_end=args.right_end,
         wg=args.wg,
+        dw=args.dw,
         beam_E=args.beam_E,
         beam_A=args.beam_A,
         beam_Iz=args.beam_Iz,
@@ -455,6 +458,8 @@ def main() -> None:
     p.add_argument("--right-spacing", type=float, default=USE_MODEL["right_spacing"])
     p.add_argument("--right-end", type=float, default=USE_MODEL["right_end"])
     p.add_argument("--wg", type=float, default=USE_MODEL["wg"], help="主梁自重线荷载 [N/m]")
+    p.add_argument("--dw", type=float, default=USE_MODEL["dw"],
+                   help="二期均布荷载 [N/m]（向下；>0 时成桥后追加一个 phase2 阶段施加于全主梁）")
     p.add_argument("--beam-E", type=float, default=USE_MODEL["beam_E"], help="主梁弹性模量 E [Pa]")
     p.add_argument("--beam-A", type=float, default=USE_MODEL["beam_A"], help="主梁截面积 A [m^2]")
     p.add_argument("--beam-Iz", type=float, default=USE_MODEL["beam_Iz"], help="主梁截面惯性矩 I [m^4]")

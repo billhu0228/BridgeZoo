@@ -66,7 +66,7 @@ class BridgeGeometry:
     strand_area: float = 1.4e-4
     density: float = 2400.0
     gravity: float = 9.806
-    load_factor: float = 2.0
+    load_factor: float = 1.0
 
     middle_spacing: float = 10.0
     outside_spacing: float = 8.0
@@ -80,7 +80,7 @@ class BridgeGeometry:
     beam_length: float = field(init=False)
     beam_area: float = field(init=False)
     beam_Iz: float = field(init=False)
-    wg: float = field(init=False)
+    wg: float = field(init=False)  # 主梁单位长度自重线荷载 [N/m] = beam_area·density·gravity·load_factor
     num_beam_points: int = field(init=False)
     x_positions: np.ndarray = field(init=False)
     left_tower_top: np.ndarray = field(init=False)
@@ -98,6 +98,7 @@ class BridgeGeometry:
         # 截面 / 自重
         self.beam_area = self.beam_A if self.beam_A is not None else self.beam_h * self.beam_w
         self.beam_Iz = self.beam_I if self.beam_I is not None else self.beam_w * self.beam_h ** 3 / 12.0
+        # 自重线荷载 [N/m]：[m²]·[kg/m³]·[m/s²]·[-] = [N/m]
         self.wg = self.beam_area * self.density * self.gravity * self.load_factor
 
         # 跨径

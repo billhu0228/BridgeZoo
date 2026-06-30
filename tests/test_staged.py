@@ -131,3 +131,96 @@ def test_staged_matches_opensees_corot():
     ro = StagedOpenSeesSolver(cable_element="corot").run(plan)
     _assert_match(rd, ro, rtol=1e-2)
     _assert_tip_lock_in(ro, 4)
+
+
+# ===================================================== 二期恒载（dw / phase2）
+
+def test_phase2_step_only_when_dw_nonzero():
+    """dw=0(默认)不追加阶段——既有行为逐字节不变;dw>0 末步为 phase2,施加于全主梁。"""
+    plan0 = _plan(3)
+    assert all(step.label != "phase2" for step in plan0.steps)
+    assert all(not step.member_loads for step in plan0.steps)
+
+    dw = 2.0e4
+    plan = _plan(3, dw=dw)
+    last = plan.steps[-1]
+    assert last.label == "phase2"
+    assert last.record
+    # 二期荷载覆盖全部主梁单元(各节段 + 合龙端段),且 wy=-dw(向下,与自重同约定)
+    girder_ids = {fr.id for step in plan.steps for fr in step.new_frames}
+    assert {ml.member for ml in last.member_loads} == girder_ids
+    assert all(ml.wy == -dw for ml in last.member_loads)
+    # phase2 不引入新构件(纯加载步)
+    assert not last.new_frames and not last.new_cables and not last.new_nodes
+
+
+def test_phase2_adds_record_and_deflects_deck_down():
+    n, dw = 4, 3.0e4
+    r0 = StagedDirectSolver().run(_plan(n))
+    rdw = StagedDirectSolver().run(_plan(n, dw=dw))
+    # 多出一条 phase2 记录;dw=0 时记录数与既有断言一致
+    assert r0.records[-1].label == "tip_free"
+    assert rdw.records[-1].label == "phase2"
+    assert len(rdw.records) == len(r0.records) + 1
+
+    # phase2 相对其前一步(tip_free)的增量纯为二期荷载效应:主梁整体下挠。
+    tip_free, phase2 = rdw.records[-2], rdw.records[-1]
+    assert tip_free.label == "tip_free"
+    assert phase2.disp[RIGHT_TIP][1] < tip_free.disp[RIGHT_TIP][1] - 1e-6
+
+
+def test_phase2_delta_matches_completed_one_shot():
+    """dw 进入「分阶段」与「成桥一次成型」两条路径的增量应逐位一致(机器精度)。
+
+    分阶段的 phase2 增量 = 在已建成结构上施加 dw 的 K^-1·F_dw;成桥模型 dw>0 与 dw=0
+    之差亦为同一 K^-1·F_dw(最终结构刚度与等效荷载完全相同)。比较「增量差」可绕开
+    分阶段 vs 成桥本身固有的施工历史差异,得到机器精度等价的护栏。容差 1e-8(相对最大
+    增量)远紧于物理量级,仅为两套求解器装配次序的浮点舍入留余量。
+    """
+    from bridgezoo.fem.staged import build_completed_model
+
+    n, dw = 4, 3.0e4
+    rdw = StagedDirectSolver().run(_plan(n, dw=dw))
+    tip_free, phase2 = rdw.records[-2], rdw.records[-1]
+    assert tip_free.label == "tip_free" and phase2.label == "phase2"
+    staged_delta = {nid: phase2.disp[nid][1] - tip_free.disp[nid][1] for nid in phase2.disp}
+
+    from bridgezoo.fem.completed import CompletedDirectSolver
+
+    d0 = CompletedDirectSolver().solve(build_completed_model(_plan(n, dw=0.0))[0]).disp
+    ddw = CompletedDirectSolver().solve(build_completed_model(_plan(n, dw=dw))[0]).disp
+    completed_delta = {nid: ddw[nid][1] - d0[nid][1] for nid in ddw}
+
+    common = set(staged_delta) & set(completed_delta)
+    assert common
+    scale = max(max(abs(staged_delta[nid]), 1e-9) for nid in common)
+    for nid in common:
+        assert abs(staged_delta[nid] - completed_delta[nid]) < 1e-8 * scale
+
+
+def test_phase2_batch_matches_scalar():
+    """含二期荷载的计划在批量多右端路径与逐个标量求解逐位一致(member_loads 恒定→结构级)。"""
+    from bridgezoo.fem.staged import StagedDirectBatchSolver
+
+    def mk(pre):
+        return build_staged_cantilever(n_seg=3, wg=5.0e4, dw=2.0e4,
+                                       strands=[20] * 3, pretension=[pre] * 3)
+
+    plans = [mk(1.0e6), mk(2.5e6)]
+    batch = StagedDirectBatchSolver().run_batch(plans)
+    scalar = [StagedDirectSolver().run(p) for p in plans]
+    for rs, rb in zip(scalar, batch):
+        assert rs.records[-1].label == "phase2"
+        for nid in rs.records[-1].disp:
+            assert rb.records[-1].disp[nid] == pytest.approx(rs.records[-1].disp[nid], rel=1e-9, abs=1e-11)
+
+
+def test_phase2_matches_opensees_linear():
+    pytest.importorskip("openseespy", reason="requires openseespy")
+    from bridgezoo.fem.staged import StagedOpenSeesSolver
+
+    plan = _plan(4, wg=3.0e4, dw=2.0e4)
+    rd = StagedDirectSolver().run(plan)
+    ro = StagedOpenSeesSolver(cable_element="linear").run(plan)
+    assert rd.records[-1].label == "phase2"
+    _assert_match(rd, ro, rtol=5e-3)

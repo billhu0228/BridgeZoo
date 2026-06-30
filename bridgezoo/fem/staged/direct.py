@@ -94,6 +94,13 @@ def _step_incremental_loads(step: BuildStep, coords) -> dict[int, np.ndarray]:
             feq_global = _gravity_feq_global(fr.udl_wy, c, s, L)
             add(fr.i, feq_global[0:3])
             add(fr.j, feq_global[3:6])
+    for ml in step.member_loads:
+        # 对**已激活**梁单元施加全局竖向均布荷载增量(如二期恒载),与自重同投影。
+        if ml.wy != 0.0:
+            L, c, s = _orig_geom(coords, ml.i, ml.j)
+            feq_global = _gravity_feq_global(ml.wy, c, s, L)
+            add(ml.i, feq_global[0:3])
+            add(ml.j, feq_global[3:6])
     for cb in step.new_cables:
         if cb.tension != 0.0:
             _, c, s = _orig_geom(coords, cb.i, cb.j)
@@ -132,6 +139,11 @@ def _assert_same_structure(p0: StagedPlan, pk: StagedPlan) -> None:
             (c.id, c.i, c.j, c.E, c.A) for c in sk.new_cables
         ]:
             raise ValueError(f"batched plans differ in new_cables structure at step {s0.label!r}")
+        if [(m.member, m.i, m.j, m.wy) for m in s0.member_loads] != [
+            (m.member, m.i, m.j, m.wy) for m in sk.member_loads
+        ]:
+            # 二期恒载等既有单元分布荷载在多右端工况中恒定,属"结构级"差异。
+            raise ValueError(f"batched plans differ in member_loads at step {s0.label!r}")
         if [(b.node, b.dof, b.target) for b in s0.balance_dofs] != [
             (b.node, b.dof, b.target) for b in sk.balance_dofs
         ]:

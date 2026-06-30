@@ -28,6 +28,7 @@ from collections.abc import Mapping, Sequence
 from bridgezoo.fem.staged.plan import (
     BuildStep,
     CompletedState,
+    MemberLoad,
     NewCable,
     NewFrame,
     NewNode,
@@ -179,7 +180,8 @@ def build_staged_cantilever(
     beam_E: float = 20e9,
     beam_A: float = 10.0,
     beam_Iz: float = 10.0 / 12.0,
-    wg: float = 1.0e5,
+    wg: float = 1.0e5,        # 主梁自重线荷载 [N/m]（向下，施加为 udl_wy=-wg）
+    dw: float = 0.0,          # 二期均布荷载 [N/m]（向下，成桥后对全主梁施加为 wy=-dw）
     cable_Es: float = 1.95e11,
     strand_area: float = 1.4e-4,
     strands: Sequence[int | Sequence[int]] | Mapping[int, int] | None = None,
@@ -196,6 +198,12 @@ def build_staged_cantilever(
     stress-free and immediately adds closure supports (left tip uy, right tip
     ux+rz).  The constrained DOFs are locked at their tangent-birth values; no
     balancing reaction step drives them back to zero.
+
+    When ``dw != 0`` a trailing ``phase2`` step applies the second-phase dead
+    load (二期恒载, ``N/m`` downward) uniformly to **every** girder element of the
+    completed deck and solves one more equilibrium increment.  The same load is
+    folded into ``plan.completed`` so the staged-final state and the one-shot
+    completed model stay consistent.  ``dw == 0`` (default) adds no extra step.
     """
 
     _ = anchor_top_free  # Geometry metadata for plotting callers; no plan DOF uses it.
@@ -283,19 +291,43 @@ def build_staged_cantilever(
         ],
         record=True,
     ))
-    plan.completed = _build_completed_state(plan, left_tip=sides[1]["tip"], right_tip=sides[0]["tip"])
+
+    # 二期恒载:成桥合龙后,对**全部已激活主梁单元**(各节段 + 合龙端段)一次性施加
+    # 向下均布荷载 dw,再求解一次增量平衡。dw=0 时不追加该阶段(行为与既有完全一致)。
+    if dw != 0.0:
+        girder_members = [(fr.id, fr.i, fr.j) for step in plan.steps for fr in step.new_frames]
+        plan.steps.append(BuildStep(
+            label="phase2",
+            member_loads=[MemberLoad(mid, i, j, -dw) for (mid, i, j) in girder_members],
+            record=True,
+        ))
+
+    plan.completed = _build_completed_state(
+        plan, left_tip=sides[1]["tip"], right_tip=sides[0]["tip"], dw=dw
+    )
 
     return plan
 
 
-def _build_completed_state(plan: StagedPlan, left_tip: int, right_tip: int) -> CompletedState:
+def _build_completed_state(
+    plan: StagedPlan, left_tip: int, right_tip: int, dw: float = 0.0
+) -> CompletedState:
     nodes = list(plan.init_nodes)
     frames = []
     cables = []
     nodal_loads = []
     for step in plan.steps:
         nodes.extend(step.new_nodes)
-        frames.extend(step.new_frames)
+        if dw != 0.0:
+            # 成桥模型中,二期恒载与自重合并为单一分布荷载 udl_wy=-(wg+dw)。
+            # 复制 NewFrame(不改 steps 共享的原对象),build_completed_model 会自动
+            # 把 udl_wy*c 投影成 StructuralModel 的 member_udl。
+            frames.extend(
+                NewFrame(fr.id, fr.i, fr.j, fr.E, fr.A, fr.I, udl_wy=fr.udl_wy - dw)
+                for fr in step.new_frames
+            )
+        else:
+            frames.extend(step.new_frames)
         cables.extend(step.new_cables)
         nodal_loads.extend(step.nodal_loads)
 
