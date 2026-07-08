@@ -217,6 +217,7 @@ def run(args):
             seed=args.seed,
             stress_guided=not args.no_stress_guided_strands,
             resize=not args.no_strand_resize,
+            band_priority=not args.no_band_priority,
         ),
     )
     start_time = time.perf_counter()
@@ -290,7 +291,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--beam-Iz", type=float, default=model_p["beam_Iz"], help="主梁截面惯性矩 I [m^4]")
 
     p.add_argument("--strand-min", type=int, default=100)
-    p.add_argument("--strand-max", type=int, default=300)
+    p.add_argument("--strand-max", type=int, default=500)
     p.add_argument("--initial-strands", type=int, default=200)
     p.add_argument("--stress-lower", type=float, default=400.0)
     p.add_argument("--stress-upper", type=float, default=600.0)
@@ -326,6 +327,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-strand-resize",
         action="store_true",
         help="Disable the stress-ratio strand resize jump at the start of each outer iteration.",
+    )
+    p.add_argument(
+        "--no-band-priority",
+        action="store_true",
+        help="Disable band-first (lexicographic LP s*) acceptance in the integer search; "
+        "compare candidates by weighted objective only.",
     )
     p.add_argument("--quiet", action="store_true", help="Disable optimization progress output.")
     p.add_argument("--verify-opensees", action="store_true")

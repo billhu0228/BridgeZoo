@@ -13,6 +13,9 @@ direct 后端(以及 OpenSees ``linear`` Truss 模式)是线性求解器,固定�
    [lower, upper] MPa 可达)与 warm-start 张力;
 2. **二次相**:SLSQP + 解析梯度最小化完整目标(线形 + 均匀度 + hinge² 违反惩罚;
    索股项为常数故略去),线性带宽约束按 s* 放宽,保证最大违反不劣于 LP 最优。
+   变量取缩放形式 x = T/hi ∈ [0,1](hi 为各索张拉上限):直接用牛顿量纲的
+   T(~1e7 N)会令 SLSQP 的步长/收敛判据失效,首步即误判收敛并停在离最优
+   数千倍处(回归见 tests/test_optim.py 缩放失速用例)。
 
 这修复了把 FEM 嵌进 SLSQP 时"硬约束不可行 → 原地不动"的失效模式。终点用真实
 求解器复评并与模型交叉校核;若后端非线性(如 corot),校核失败并提示改用
@@ -218,34 +221,39 @@ class LinearTensionOptimizer:
         band = s_star + 1.0e-9
         value_and_grad = self._model_objective_and_grad(model)
 
+        # 二次相在缩放变量 x = T/hi ∈ [0,1] 上求解(见模块 docstring)。
+        if np.any(hi <= 0.0):
+            raise ValueError("tension upper bounds must be positive for all cables")
+
         def objective(x):
-            return value_and_grad(x)[0]
+            return value_and_grad(x * hi)[0]
 
         def gradient(x):
-            return value_and_grad(x)[1]
+            return value_and_grad(x * hi)[1] * hi
 
+        jac_sigma_scaled = model.m_mpa_per_n * hi[None, :]
         constraints = [
             {
                 "type": "ineq",
-                "fun": lambda x: model.stress_mpa(x) - (lower - band),
-                "jac": lambda x: model.m_mpa_per_n,
+                "fun": lambda x: model.stress_mpa(x * hi) - (lower - band),
+                "jac": lambda x: jac_sigma_scaled,
             },
             {
                 "type": "ineq",
-                "fun": lambda x: (upper + band) - model.stress_mpa(x),
-                "jac": lambda x: -model.m_mpa_per_n,
+                "fun": lambda x: (upper + band) - model.stress_mpa(x * hi),
+                "jac": lambda x: -jac_sigma_scaled,
             },
         ]
         res = minimize(
             objective,
-            t_lp,
+            t_lp / hi,
             jac=gradient,
             method="SLSQP",
-            bounds=[(0.0, float(h)) for h in hi],
+            bounds=[(0.0, 1.0)] * self.layout.size,
             constraints=constraints,
-            options={"maxiter": max(200, self.options.maxiter), "ftol": min(self.options.ftol, 1.0e-9)},
+            options={"maxiter": max(200, self.options.maxiter), "ftol": min(self.options.ftol, 1.0e-12)},
         )
-        x = np.clip(np.asarray(res.x, dtype=float), 0.0, hi)
+        x = np.clip(np.asarray(res.x, dtype=float), 0.0, 1.0) * hi
 
         evaluation = self.evaluator.evaluate(strands, x)
         sigma_fem = np.asarray([evaluation.cable_stress_mpa[cid] for cid in self.layout.cable_ids], dtype=float)

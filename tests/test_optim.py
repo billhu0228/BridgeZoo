@@ -173,6 +173,81 @@ def test_linear_optimizer_attains_lp_violation_bound():
     assert result.evaluation.metrics.stress_violation_max_mpa <= s_star + 1e-3
 
 
+def test_linear_optimizer_matches_exact_lsq_on_shape_only():
+    """回归(缩放失速):P4B 量级荷载/刚度下(T~1e7 N),未缩放变量的 SLSQP 曾
+    停在离最优 >1e3 倍处。纯线形目标(带约束不活跃)时,优化器目标必须贴合
+    同一仿射模型上 lsq_linear 的精确有界最小二乘最优。"""
+    pytest.importorskip("scipy")
+    from scipy.optimize import lsq_linear
+
+    problem = CableOptimizationProblem(
+        n_seg=2,
+        model_kwargs={
+            "anchor_base_height": 60.0,
+            "anchor_spacing": 2.5,
+            "anchor_top_free": 5.0,
+            "left_start": 18.5,
+            "left_spacing": 12.0,
+            "left_end": 5.0,
+            "right_start": 18.5,
+            "right_spacing": 12.0,
+            "right_end": 8.0,
+            "wg": 3.2e5,
+            "dw": 4.0e5,
+            "beam_E": 200e9,
+            "beam_A": 2.3,
+            "beam_Iz": 2.0,
+        },
+        bounds=CableBounds(
+            strand_min=100,
+            strand_max=300,
+            stress_lower_mpa=0.0,
+            stress_upper_mpa=1.0e5,
+            tension_bound_stress_mpa=1600.0,
+        ),
+        weights=ObjectiveWeights(
+            shape=1.0, total_strands=0.0, stress_uniform=0.0, stress_violation=0.0,
+            shape_scale_m=0.1,
+        ),
+    )
+    evaluator = CableDesignEvaluator(problem)
+    strands = np.full(4, 200, dtype=int)
+    result = LinearTensionOptimizer(evaluator).optimize(strands)
+
+    model = build_affine_model(evaluator, strands)
+    hi = problem.bounds.tension_bound_stress_mpa * 1e6 * problem.strand_area * strands.astype(float)
+    ls = lsq_linear(model.d_m_per_n, -model.err0_m, bounds=(np.zeros(4), hi), tol=1e-14)
+    resid = model.err0_m + model.d_m_per_n @ ls.x
+    exact = float(np.mean(resid * resid)) / problem.weights.shape_scale_m**2
+
+    # lsq_linear 是同一凸模型上的精确下界:优化器不能更低(数值噪声内),也必须
+    # 贴近(1e-3 相对 + 1e-8 绝对覆盖 SLSQP 收敛容差;失速回归时差距 >1e3 倍)。
+    assert result.evaluation.objective >= exact - 1e-8
+    assert result.evaluation.objective <= exact * (1.0 + 1e-3) + 1e-8
+
+
+def test_hybrid_acceptance_prefers_band_feasibility():
+    # 字典序接受:s*(LP 最小可达带违反)显著降低即接受(即使目标变差);
+    # s* 持平(band_tol_mpa 内)时回退比较加权目标;s* 缺失(slsqp 路径)仅比目标。
+    optimizer = CableHybridOptimizer(_problem())
+
+    assert optimizer._accepts(0.0, 50.0, 5.0, 10.0)  # s* 5→0,目标变差 → 接受
+    assert not optimizer._accepts(5.0, 1.0, 0.0, 10.0)  # s* 0→5 → 拒绝(目标更好也不行)
+    assert optimizer._accepts(0.0, 9.0, 0.0, 10.0)  # s* 持平,目标改善 → 接受
+    assert not optimizer._accepts(0.0, 11.0, 0.0, 10.0)  # s* 持平,目标变差 → 拒绝
+    assert optimizer._accepts(None, 9.0, None, 10.0)  # s* 缺失 → 仅比目标
+
+
+def test_hybrid_acceptance_band_priority_can_be_disabled():
+    optimizer = CableHybridOptimizer(
+        _problem(),
+        HybridOptions(integer=IntegerSearchOptions(band_priority=False)),
+    )
+    # 关闭 band_priority 后退回旧行为:仅比较加权目标。
+    assert optimizer._accepts(5.0, 1.0, 0.0, 10.0)
+    assert not optimizer._accepts(0.0, 11.0, 0.0, 10.0)
+
+
 def test_hybrid_resize_candidate_jumps_by_stress_ratio():
     problem = _problem()  # band [800,1200] → σ_target=1000;股数界 [8,40]
     optimizer = CableHybridOptimizer(problem)

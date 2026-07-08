@@ -29,6 +29,10 @@ class IntegerSearchOptions:
     # 每轮外层迭代先尝试按 σ/σ_target 比例整体改股(大步跳跃),再做 ±step 精修。
     resize: bool = True
     resize_target_stress_mpa: float | None = None  # None → 应力带中值
+    # 字典序接受:先比 LP 可行性 s*(应力带最小可达违反,linear 连续层免费给出),
+    # s* 持平(band_tol_mpa 内)再比加权目标。False 或 s* 缺失时退回仅比目标。
+    band_priority: bool = True
+    band_tol_mpa: float = 1.0e-3
 
 
 @dataclass(frozen=True)
@@ -70,6 +74,30 @@ class CableHybridOptimizer:
     def _emit(self, message: str) -> None:
         if self.progress is not None:
             self.progress(message)
+
+    @staticmethod
+    def _s_star_note(s_star: float | None) -> str:
+        return "" if s_star is None else f" s*={s_star:.3f} MPa"
+
+    def _accepts(
+        self,
+        candidate_s_star: float | None,
+        candidate_objective: float,
+        best_s_star: float | None,
+        best_objective: float,
+    ) -> bool:
+        """字典序接受准则:s* 优先,持平(band_tol_mpa 内)再比加权目标。
+
+        动机:失速前的旧行为只比加权目标,曾把"应力带精确可达但线形项暂时
+        变差"的 resize 候选误杀;带可达性是要求而非偏好,故置于第一优先级。
+        """
+        opts = self.options.integer
+        if opts.band_priority and candidate_s_star is not None and best_s_star is not None:
+            if candidate_s_star < best_s_star - opts.band_tol_mpa:
+                return True
+            if candidate_s_star > best_s_star + opts.band_tol_mpa:
+                return False
+        return candidate_objective + opts.improvement_tol < best_objective
 
     def default_strands(self) -> np.ndarray:
         value = min(max(20, self.problem.bounds.strand_min), self.problem.bounds.strand_max)
@@ -160,12 +188,18 @@ class CableHybridOptimizer:
             res = self._continuous_for(trial)
             ev = res.evaluation
             history.append(ev)
-            if ev.objective + self.options.integer.improvement_tol < best.objective:
-                self._emit(f"  accepted random trial: {best.objective:.6g} -> {ev.objective:.6g}")
+            if self._accepts(res.feasibility_violation_mpa, ev.objective, best_feasibility, best.objective):
+                self._emit(
+                    f"  accepted random trial: {best.objective:.6g} -> {ev.objective:.6g}"
+                    f"{self._s_star_note(res.feasibility_violation_mpa)}"
+                )
                 best = ev
                 best_feasibility = res.feasibility_violation_mpa
             else:
-                self._emit(f"  rejected random trial: objective={ev.objective:.6g}, best={best.objective:.6g}")
+                self._emit(
+                    f"  rejected random trial: objective={ev.objective:.6g}, best={best.objective:.6g}"
+                    f"{self._s_star_note(res.feasibility_violation_mpa)}"
+                )
 
         for outer in range(self.options.integer.outer_iterations):
             self._emit(f"outer iteration {outer + 1}/{self.options.integer.outer_iterations}")
@@ -181,13 +215,19 @@ class CableHybridOptimizer:
                     res = self._continuous_for(candidate, warm)
                     ev = res.evaluation
                     history.append(ev)
-                    if ev.objective + self.options.integer.improvement_tol < best.objective:
-                        self._emit(f"  accepted resize: {best.objective:.6g} -> {ev.objective:.6g}")
+                    if self._accepts(res.feasibility_violation_mpa, ev.objective, best_feasibility, best.objective):
+                        self._emit(
+                            f"  accepted resize: {best.objective:.6g} -> {ev.objective:.6g}"
+                            f"{self._s_star_note(res.feasibility_violation_mpa)}"
+                        )
                         best = ev
                         best_feasibility = res.feasibility_violation_mpa
                         improved = True
                     else:
-                        self._emit(f"  rejected resize: objective={ev.objective:.6g}, best={best.objective:.6g}")
+                        self._emit(
+                            f"  rejected resize: objective={ev.objective:.6g}, best={best.objective:.6g}"
+                            f"{self._s_star_note(res.feasibility_violation_mpa)}"
+                        )
             for idx in range(self.layout.size):
                 current = best.design.strands
                 for delta, reason in self._strand_moves_for(best, idx):
@@ -214,13 +254,19 @@ class CableHybridOptimizer:
                     res = self._continuous_for(candidate, warm)
                     ev = res.evaluation
                     history.append(ev)
-                    if ev.objective + self.options.integer.improvement_tol < best.objective:
-                        self._emit(f"  accepted: {best.objective:.6g} -> {ev.objective:.6g}")
+                    if self._accepts(res.feasibility_violation_mpa, ev.objective, best_feasibility, best.objective):
+                        self._emit(
+                            f"  accepted: {best.objective:.6g} -> {ev.objective:.6g}"
+                            f"{self._s_star_note(res.feasibility_violation_mpa)}"
+                        )
                         best = ev
                         best_feasibility = res.feasibility_violation_mpa
                         improved = True
                         break
-                    self._emit(f"  rejected: objective={ev.objective:.6g}, best={best.objective:.6g}")
+                    self._emit(
+                        f"  rejected: objective={ev.objective:.6g}, best={best.objective:.6g}"
+                        f"{self._s_star_note(res.feasibility_violation_mpa)}"
+                    )
             if not improved:
                 self._emit("no integer improvement in this outer iteration; stopping")
                 break
