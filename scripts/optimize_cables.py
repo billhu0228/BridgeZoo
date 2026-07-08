@@ -300,9 +300,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--weight-strands", type=float, default=0.02)
     p.add_argument("--weight-stress-uniform", type=float, default=0.2)
     p.add_argument("--weight-stress-violation", type=float, default=100.0)
-    p.add_argument("--shape-scale-mm", type=float, default=1.0)
+    p.add_argument("--shape-scale-mm", type=float, default=100.0)
     p.add_argument("--stress-scale", type=float, default=100.0)
-    p.add_argument("--strand-scale", type=float, default=20.0)
+    p.add_argument("--strand-scale", type=float, default=8200.0)
 
     p.add_argument(
         "--continuous-method",
