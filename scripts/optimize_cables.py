@@ -290,7 +290,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--beam-A", type=float, default=model_p["beam_A"], help="主梁截面积 A [m^2]")
     p.add_argument("--beam-Iz", type=float, default=model_p["beam_Iz"], help="主梁截面惯性矩 I [m^4]")
 
-    p.add_argument("--strand-min", type=int, default=100)
+    p.add_argument("--strand-min", type=int, default=10)
     p.add_argument("--strand-max", type=int, default=500)
     p.add_argument("--initial-strands", type=int, default=200)
     p.add_argument("--stress-lower", type=float, default=400.0)
