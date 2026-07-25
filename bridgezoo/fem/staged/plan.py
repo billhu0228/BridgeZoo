@@ -33,6 +33,7 @@ class NewNode:
     x: float
     y: float
     attach: int | None = None  # 切线附着节点;None 表示按零位移就位(如根部/锚点)
+    role: str | None = None  # deck / anchor / tower / tower_base;None 时保留坐标分类兼容逻辑
 
 
 @dataclass
@@ -44,6 +45,7 @@ class NewFrame:
     A: float
     I: float
     udl_wy: float = 0.0  # 本步施加的**全局竖向**均布荷载(自重,向下为负;按单元方向投影到局部)
+    group: str = "frame"  # deck / tower / 其他构件组;用于选择性施加后续构件荷载
 
 
 @dataclass
@@ -147,6 +149,7 @@ class StagedResult:
     cable_nodes: dict[int, tuple[int, int]] = field(default_factory=dict)  # {cable_id: (i, j)}
     anchor_ids: list[int] = field(default_factory=list)                    # 塔上锚点 node id
     deck_ids: list[int] = field(default_factory=list)                      # 主梁 node id(含根部)
+    tower_ids: list[int] = field(default_factory=list)                     # 索塔节点 id(含锚点/塔底)
 
     def cable_stress_history(self) -> dict[int, list[tuple[str, float]]]:
         out: dict[int, list[tuple[str, float]]] = {}
@@ -167,8 +170,15 @@ def _attach_geometry(result: StagedResult, plan: StagedPlan) -> None:
         nodes.extend(step.new_nodes)
     for nd in nodes:
         result.coords[nd.id] = (nd.x, nd.y)
-        if nd.y > 1e-9:
+        if nd.role == "deck":
+            result.deck_ids.append(nd.id)
+        elif nd.role == "anchor":
             result.anchor_ids.append(nd.id)   # 塔上锚点(y>0)
+            result.tower_ids.append(nd.id)
+        elif nd.role in {"tower", "tower_base"}:
+            result.tower_ids.append(nd.id)
+        elif nd.y > 1e-9:
+            result.anchor_ids.append(nd.id)   # 旧计划无 role 时按坐标兼容分类
         else:
             result.deck_ids.append(nd.id)     # 主梁节点(y≈0,含根部)
     for step in plan.steps:

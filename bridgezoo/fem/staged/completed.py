@@ -32,7 +32,7 @@ def build_completed_model(plan: StagedPlan, name: str | None = None) -> tuple[St
     Returns
     -------
     (model, meta) : tuple[StructuralModel, dict]
-        ``meta`` 含 ``coords`` / ``deck_ids`` / ``anchor_ids`` / ``cable_nodes``,
+        ``meta`` 含 ``coords`` / ``deck_ids`` / ``anchor_ids`` / ``tower_ids`` / ``cable_nodes``,
         供绘图/后处理按 id 取几何,免去外部反推。
 
     Raises
@@ -48,19 +48,28 @@ def build_completed_model(plan: StagedPlan, name: str | None = None) -> tuple[St
     coords: dict[int, tuple[float, float]] = {}
     deck_ids: list[int] = []
     anchor_ids: list[int] = []
+    tower_ids: list[int] = []
     cable_nodes: dict[int, tuple[int, int]] = {}
 
     for nd in completed.nodes:
         model.add_node(nd.id, nd.x, nd.y)
         coords[nd.id] = (nd.x, nd.y)
 
-    for nid, (_, y) in coords.items():
-        if y > 1e-9:
-            anchor_ids.append(nid)
+    for nd in completed.nodes:
+        if nd.role == "deck":
+            deck_ids.append(nd.id)
+        elif nd.role == "anchor":
+            anchor_ids.append(nd.id)
+            tower_ids.append(nd.id)
+        elif nd.role in {"tower", "tower_base"}:
+            tower_ids.append(nd.id)
+        elif nd.y > 1e-9:
+            anchor_ids.append(nd.id)
         else:
-            deck_ids.append(nid)
+            deck_ids.append(nd.id)
     deck_ids.sort(key=lambda nid: coords[nid][0])
     anchor_ids.sort(key=lambda nid: coords[nid][1])
+    tower_ids.sort(key=lambda nid: coords[nid][1])
 
     for node, ux, uy, rz in completed.supports:
         model.add_support(node, ux=ux, uy=uy, rz=rz)
@@ -85,6 +94,7 @@ def build_completed_model(plan: StagedPlan, name: str | None = None) -> tuple[St
         "coords": coords,
         "deck_ids": deck_ids,
         "anchor_ids": anchor_ids,
+        "tower_ids": tower_ids,
         "cable_nodes": cable_nodes,
     }
     return model, meta

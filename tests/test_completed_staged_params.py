@@ -18,10 +18,16 @@ def test_staged_builder_creates_completed_state():
     plan = build_staged_cantilever(n_seg=n, strands=[20] * n, pretension=[1.0e6] * n)
 
     assert plan.completed is not None
-    assert len(plan.completed.nodes) == 2 * n + 3 + n
-    assert len(plan.completed.frames) == 2 * n + 2
+    deck_nodes = [node for node in plan.completed.nodes if node.role == "deck"]
+    tower_nodes = [node for node in plan.completed.nodes if node.role in {"tower_base", "tower", "anchor"}]
+    deck_frames = [frame for frame in plan.completed.frames if frame.group == "deck"]
+    tower_frames = [frame for frame in plan.completed.frames if frame.group == "tower"]
+    assert len(deck_nodes) == 2 * n + 3
+    assert len(tower_nodes) > n
+    assert len(deck_frames) == 2 * n + 2
+    assert len(tower_frames) == len(tower_nodes) - 1
     assert len(plan.completed.cables) == 2 * n
-    assert len(plan.completed.supports) == n + 3
+    assert len(plan.completed.supports) == 4
     assert not plan.completed.nodal_loads
 
 

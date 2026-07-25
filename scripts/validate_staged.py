@@ -18,7 +18,8 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from bridgezoo.fem.staged import StagedDirectSolver, StagedOpenSeesSolver, build_staged_cantilever
-from scripts.staged_analysis import MODEL_DEFAULTS, default_pretension
+from scripts.bridge_config import load_bridge_config
+from scripts.staged_analysis import default_pretension
 
 RIGHT_TIP, LEFT_TIP = 200, 201
 
@@ -100,6 +101,9 @@ def run(args, tol_rel: float) -> bool:
         right_spacing=args.right_spacing,
         right_end=args.right_end,
         wg=args.wg,
+        tower_stiffness=args.bridge_defaults["tower_stiffness"],
+        tower_element_size=args.bridge_defaults["tower_element_size"],
+        tower_axial_rigidity=args.bridge_defaults["tower_axial_rigidity"],
         strands=strands,
         pretension=pre,
     )
@@ -160,23 +164,40 @@ def run(args, tol_rel: float) -> bool:
     return ok
 
 
-def main() -> None:
+def build_parser(bridge_defaults: dict[str, object]) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Validate staged farthest-end displacement against OpenSees.")
-    parser.add_argument("--n", type=int, default=MODEL_DEFAULTS["n"], help="Number of cables on each side.")
+    parser.set_defaults(bridge_defaults=dict(bridge_defaults))
+    parser.add_argument(
+        "--bridge",
+        default="model",
+        help="Bridge YAML config: bundled name model/p4b, or a YAML file path (default: model).",
+    )
+    parser.add_argument("--n", type=int, default=bridge_defaults["n"], help="Number of cables on each side.")
     parser.add_argument("--cable-element", choices=["linear", "corot"], default="linear")
     parser.add_argument("--tol", type=float, default=None, help="Relative tolerance for staged farthest-end uy comparison.")
     parser.add_argument("--closure-tol", type=float, default=1e-9)
-    parser.add_argument("--anchor-base", type=float, default=MODEL_DEFAULTS["anchor_base"], help="Lowest cable anchor height.")
-    parser.add_argument("--anchor-spacing", type=float, default=MODEL_DEFAULTS["anchor_spacing"], help="Vertical spacing between cable anchors.")
-    parser.add_argument("--anchor-free", type=float, default=MODEL_DEFAULTS["anchor_free"], help="Tower free height above the highest anchor.")
-    parser.add_argument("--left-start", type=float, default=MODEL_DEFAULTS["left_start"])
-    parser.add_argument("--left-spacing", type=float, default=MODEL_DEFAULTS["left_spacing"])
-    parser.add_argument("--left-end", type=float, default=MODEL_DEFAULTS["left_end"])
-    parser.add_argument("--right-start", type=float, default=MODEL_DEFAULTS["right_start"])
-    parser.add_argument("--right-spacing", type=float, default=MODEL_DEFAULTS["right_spacing"])
-    parser.add_argument("--right-end", type=float, default=MODEL_DEFAULTS["right_end"])
-    parser.add_argument("--wg", type=float, default=MODEL_DEFAULTS["wg"], help="Girder self-weight line load (N/m).")
-    args = parser.parse_args()
+    parser.add_argument("--anchor-base", type=float, default=bridge_defaults["anchor_base"], help="Lowest cable anchor height.")
+    parser.add_argument("--anchor-spacing", type=float, default=bridge_defaults["anchor_spacing"], help="Vertical spacing between cable anchors.")
+    parser.add_argument("--anchor-free", type=float, default=bridge_defaults["anchor_free"], help="Tower free height above the highest anchor.")
+    parser.add_argument("--left-start", type=float, default=bridge_defaults["left_start"])
+    parser.add_argument("--left-spacing", type=float, default=bridge_defaults["left_spacing"])
+    parser.add_argument("--left-end", type=float, default=bridge_defaults["left_end"])
+    parser.add_argument("--right-start", type=float, default=bridge_defaults["right_start"])
+    parser.add_argument("--right-spacing", type=float, default=bridge_defaults["right_spacing"])
+    parser.add_argument("--right-end", type=float, default=bridge_defaults["right_end"])
+    parser.add_argument("--wg", type=float, default=bridge_defaults["wg"], help="Girder self-weight line load (N/m).")
+    return parser
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    bootstrap = argparse.ArgumentParser(add_help=False)
+    bootstrap.add_argument("--bridge", default="model")
+    known, _ = bootstrap.parse_known_args(argv)
+    return build_parser(load_bridge_config(known.bridge)).parse_args(argv)
+
+
+def main() -> None:
+    args = parse_args()
 
     tol = args.tol if args.tol is not None else (2.5e-2 if args.cable_element == "linear" else 5e-2)
     sys.exit(0 if run(args, tol) else 1)

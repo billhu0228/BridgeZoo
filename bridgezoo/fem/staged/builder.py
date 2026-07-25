@@ -18,6 +18,9 @@ each side:
     left free-tip element     : 190
     right cable i             : 1000 + i
     left cable i              : 2000 + i
+    tower base                : 300
+    tower mesh nodes          : 10000+
+    tower frame elements      : 20000+
 """
 
 from __future__ import annotations
@@ -36,6 +39,11 @@ from bridgezoo.fem.staged.plan import (
 )
 
 _ROOT = 0
+_TOWER_BASE = 300
+_TOWER_NODE_START = 10_000
+_TOWER_FRAME_START = 20_000
+_DEFAULT_TOWER_EI = 1.0e18
+_DEFAULT_TOWER_EA = 1.0e15
 
 
 def _anchor_id(i: int) -> int:
@@ -163,6 +171,103 @@ def _normalize_pretension(pretension, n_seg: int) -> list[tuple[float, float]]:
     )
 
 
+def _normalize_tower_stiffness(
+    stiffness: Sequence[Sequence[float]] | None,
+) -> list[tuple[float, float]]:
+    """Validate ``(z, EI)`` control points in metres and N·m²."""
+
+    raw = [(0.0, _DEFAULT_TOWER_EI)] if stiffness is None else list(stiffness)
+    if not raw:
+        raise ValueError("tower_stiffness requires at least one (z, EI) pair")
+    points: list[tuple[float, float]] = []
+    for value in raw:
+        if not _is_sequence_value(value) or len(value) != 2:
+            raise ValueError("each tower_stiffness value must be a (z, EI) pair")
+        z, ei = float(value[0]), float(value[1])
+        if not math.isfinite(z) or z < 0.0:
+            raise ValueError("tower stiffness elevations z must be finite and nonnegative")
+        if not math.isfinite(ei) or ei <= 0.0:
+            raise ValueError("tower flexural rigidity EI must be finite and positive")
+        if points and z <= points[-1][0]:
+            raise ValueError("tower stiffness elevations z must be strictly increasing")
+        points.append((z, ei))
+    return points
+
+
+def _tower_ei_at(z: float, points: Sequence[tuple[float, float]]) -> float:
+    """Piecewise-linear EI interpolation with constant endpoint extrapolation."""
+
+    if z <= points[0][0]:
+        return points[0][1]
+    for (z0, ei0), (z1, ei1) in zip(points, points[1:]):
+        if z <= z1:
+            ratio = (z - z0) / (z1 - z0)
+            return ei0 + ratio * (ei1 - ei0)
+    return points[-1][1]
+
+
+def _build_tower(
+    anchor_heights: Sequence[float],
+    tower_top: float,
+    stiffness: Sequence[tuple[float, float]],
+    max_element_length: float,
+    axial_rigidity: float,
+) -> tuple[list[NewNode], list[NewFrame]]:
+    """Discretise the fixed-base tower, retaining every cable anchor as a node."""
+
+    if not math.isfinite(max_element_length) or max_element_length <= 0.0:
+        raise ValueError("tower_element_size must be finite and positive")
+    if not math.isfinite(axial_rigidity) or axial_rigidity <= 0.0:
+        raise ValueError("tower_axial_rigidity must be finite and positive")
+    if tower_top <= 0.0:
+        raise ValueError("tower top elevation must be positive")
+
+    anchor_by_z = {float(z): _anchor_id(i) for i, z in enumerate(anchor_heights, start=1)}
+    mandatory = {0.0, float(tower_top), *anchor_by_z.keys()}
+    mandatory.update(z for z, _ in stiffness if 0.0 < z < tower_top)
+    mandatory_z = sorted(mandatory)
+
+    elevations = [mandatory_z[0]]
+    for z0, z1 in zip(mandatory_z, mandatory_z[1:]):
+        count = max(1, math.ceil((z1 - z0) / max_element_length))
+        elevations.extend(z0 + (z1 - z0) * j / count for j in range(1, count))
+        elevations.append(z1)
+
+    nodes: list[NewNode] = []
+    node_at_z: dict[float, int] = {}
+    next_node = _TOWER_NODE_START
+    previous: int | None = None
+    for z in elevations:
+        if math.isclose(z, 0.0, abs_tol=1e-12):
+            node_id, role = _TOWER_BASE, "tower_base"
+        elif z in anchor_by_z:
+            node_id, role = anchor_by_z[z], "anchor"
+        else:
+            node_id, role = next_node, "tower"
+            next_node += 1
+        node_at_z[z] = node_id
+        nodes.append(NewNode(node_id, 0.0, z, attach=previous, role=role))
+        previous = node_id
+
+    frames: list[NewFrame] = []
+    for index, (z0, z1) in enumerate(zip(elevations, elevations[1:])):
+        midpoint = 0.5 * (z0 + z1)
+        # E=1 is a neutral decomposition: A stores EA and I stores EI.  Both
+        # staged backends depend only on the products E*A and E*I.
+        frames.append(
+            NewFrame(
+                _TOWER_FRAME_START + index,
+                node_at_z[z0],
+                node_at_z[z1],
+                1.0,
+                axial_rigidity,
+                _tower_ei_at(midpoint, stiffness),
+                group="tower",
+            )
+        )
+    return nodes, frames
+
+
 def build_staged_cantilever(
     n_seg: int = 6,
     # Tower fan anchors.
@@ -186,6 +291,10 @@ def build_staged_cantilever(
     strand_area: float = 1.4e-4,
     strands: Sequence[int | Sequence[int]] | Mapping[int, int] | None = None,
     pretension: Sequence[float | Sequence[float]] | Mapping[int, float] | None = None,
+    # Tower stiffness: (elevation z [m], flexural rigidity EI [N*m^2]).
+    tower_stiffness: Sequence[Sequence[float]] | None = None,
+    tower_element_size: float = 2.0,
+    tower_axial_rigidity: float = _DEFAULT_TOWER_EA,
 ) -> StagedPlan:
     """Build a symmetric staged double-cantilever cable-stayed bridge plan.
 
@@ -204,22 +313,47 @@ def build_staged_cantilever(
     completed deck and solves one more equilibrium increment.  The same load is
     folded into ``plan.completed`` so the staged-final state and the one-shot
     completed model stay consistent.  ``dw == 0`` (default) adds no extra step.
+
+    The tower is a fixed-base Euler-Bernoulli frame. ``tower_stiffness`` gives
+    ``(z, EI)`` control points (m, N·m²); EI is linearly interpolated at element
+    midpoints and held constant outside the supplied z range.  Tower members
+    have no self-weight in this model.  Their axial rigidity is the independent
+    ``tower_axial_rigidity`` value (EA, N).
     """
 
-    _ = anchor_top_free  # Geometry metadata for plotting callers; no plan DOF uses it.
     strand_pairs = _normalize_strands(strands, n_seg)
     pretension_pairs = _normalize_pretension(pretension, n_seg)
+    tower_stiffness_points = _normalize_tower_stiffness(tower_stiffness)
     assert n_seg < 90, "current numbering convention requires n_seg < 90"
+    if not math.isfinite(anchor_top_free) or anchor_top_free < 0.0:
+        raise ValueError("anchor_top_free must be finite and nonnegative")
 
     plan = StagedPlan(name=f"staged_half_bridge_N{n_seg}")
 
-    plan.init_nodes = [NewNode(_ROOT, 0.0, 0.0)]
+    plan.init_nodes = [NewNode(_ROOT, 0.0, 0.0, role="deck")]
     # Tower-deck joint: keep translations coupled, release deck rotation.
-    plan.supports = [(_ROOT, True, True, False)]
+    # The deformable tower uses a separate coincident fixed-base node so the
+    # existing deck rotation release remains unchanged.
+    plan.supports = [
+        (_ROOT, True, True, False),
+        (_TOWER_BASE, True, True, True),
+    ]
+    anchor_heights = []
     for i in range(1, n_seg + 1):
         hy = anchor_base_height + (i - 1) * anchor_spacing
-        plan.init_nodes.append(NewNode(_anchor_id(i), 0.0, hy))
-        plan.supports.append((_anchor_id(i), True, True, True))
+        anchor_heights.append(hy)
+    if any(not math.isfinite(z) or z <= 0.0 for z in anchor_heights):
+        raise ValueError("tower anchor elevations must be finite and positive")
+    if any(b <= a for a, b in zip(anchor_heights, anchor_heights[1:])):
+        raise ValueError("tower anchor elevations must be strictly increasing")
+    tower_top = anchor_heights[-1] + anchor_top_free
+    tower_nodes, tower_frames = _build_tower(
+        anchor_heights,
+        tower_top,
+        tower_stiffness_points,
+        tower_element_size,
+        tower_axial_rigidity,
+    )
 
     def side_x(i: int, start: float, spacing: float, sign: int) -> float:
         return sign * (start + (i - 1) * spacing)
@@ -237,9 +371,9 @@ def build_staged_cantilever(
         for sd in sides:
             nid = sd["node"](i)
             x = side_x(i, sd["start"], sd["spacing"], sd["sign"])
-            seg_nodes.append(NewNode(nid, x, 0.0, attach=prev[sd["sign"]]))
+            seg_nodes.append(NewNode(nid, x, 0.0, attach=prev[sd["sign"]], role="deck"))
             seg_frames.append(NewFrame(sd["frame"](i), prev[sd["sign"]], nid,
-                                       beam_E, beam_A, beam_Iz, udl_wy=-wg))
+                                       beam_E, beam_A, beam_Iz, udl_wy=-wg, group="deck"))
 
         right_strands, left_strands = strand_pairs[i - 1]
         right_tension, left_tension = pretension_pairs[i - 1]
@@ -263,8 +397,13 @@ def build_staged_cantilever(
         ]
 
         if i == 1:
-            plan.steps.append(BuildStep(label="cable1", new_nodes=seg_nodes,
-                                        new_frames=seg_frames, new_cables=seg_cables, record=True))
+            plan.steps.append(BuildStep(
+                label="cable1",
+                new_nodes=[*tower_nodes, *seg_nodes],
+                new_frames=[*tower_frames, *seg_frames],
+                new_cables=seg_cables,
+                record=True,
+            ))
         else:
             plan.steps.append(BuildStep(label=f"seg{i}", new_nodes=seg_nodes,
                                         new_frames=seg_frames, record=False))
@@ -278,9 +417,9 @@ def build_staged_cantilever(
         last_node = sd["node"](n_seg)
         last_x = side_x(n_seg, sd["start"], sd["spacing"], sd["sign"])
         tip_x = last_x + sd["sign"] * sd["end"]
-        tip_nodes.append(NewNode(sd["tip"], tip_x, 0.0, attach=last_node))
+        tip_nodes.append(NewNode(sd["tip"], tip_x, 0.0, attach=last_node, role="deck"))
         tip_frames.append(NewFrame(sd["tip_frame"], last_node, sd["tip"],
-                                   beam_E, beam_A, beam_Iz, udl_wy=-wg))
+                                   beam_E, beam_A, beam_Iz, udl_wy=-wg, group="deck"))
     # 合龙:端段切线激活后就地添加支座(左端 uy / 右端 ux+rz),被锁自由度保持
     # 切线诞生位移——不再用 closure_balance 反力步把位移压回 0。
     plan.steps.append(BuildStep(
@@ -295,7 +434,12 @@ def build_staged_cantilever(
     # 二期恒载:成桥合龙后,对**全部已激活主梁单元**(各节段 + 合龙端段)一次性施加
     # 向下均布荷载 dw,再求解一次增量平衡。dw=0 时不追加该阶段(行为与既有完全一致)。
     if dw != 0.0:
-        girder_members = [(fr.id, fr.i, fr.j) for step in plan.steps for fr in step.new_frames]
+        girder_members = [
+            (fr.id, fr.i, fr.j)
+            for step in plan.steps
+            for fr in step.new_frames
+            if fr.group == "deck"
+        ]
         plan.steps.append(BuildStep(
             label="phase2",
             member_loads=[MemberLoad(mid, i, j, -dw) for (mid, i, j) in girder_members],
@@ -318,22 +462,31 @@ def _build_completed_state(
     nodal_loads = []
     for step in plan.steps:
         nodes.extend(step.new_nodes)
-        if dw != 0.0:
-            # 成桥模型中,二期恒载与自重合并为单一分布荷载 udl_wy=-(wg+dw)。
-            # 复制 NewFrame(不改 steps 共享的原对象),build_completed_model 会自动
-            # 把 udl_wy*c 投影成 StructuralModel 的 member_udl。
-            frames.extend(
-                NewFrame(fr.id, fr.i, fr.j, fr.E, fr.A, fr.I, udl_wy=fr.udl_wy - dw)
-                for fr in step.new_frames
-            )
-        else:
-            frames.extend(step.new_frames)
+        for fr in step.new_frames:
+            if dw != 0.0 and fr.group == "deck":
+                # 成桥模型中,二期恒载与自重合并为单一分布荷载 udl_wy=-(wg+dw)。
+                # 复制 NewFrame(不改 steps 共享的原对象),build_completed_model 会自动
+                # 把 udl_wy*c 投影成 StructuralModel 的 member_udl。
+                frames.append(
+                    NewFrame(
+                        fr.id,
+                        fr.i,
+                        fr.j,
+                        fr.E,
+                        fr.A,
+                        fr.I,
+                        udl_wy=fr.udl_wy - dw,
+                        group=fr.group,
+                    )
+                )
+            else:
+                frames.append(fr)
         cables.extend(step.new_cables)
         nodal_loads.extend(step.nodal_loads)
 
-    anchor_supports = [sp for sp in plan.supports if sp[0] != _ROOT]
+    tower_supports = [sp for sp in plan.supports if sp[0] != _ROOT]
     supports = [
-        *anchor_supports,
+        *tower_supports,
         (_ROOT, True, True, False),
         (left_tip, False, True, False),
         (right_tip, True, False, True),

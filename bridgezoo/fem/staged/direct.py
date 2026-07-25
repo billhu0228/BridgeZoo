@@ -118,8 +118,8 @@ def _assert_same_structure(p0: StagedPlan, pk: StagedPlan) -> None:
     """
     if p0.supports != pk.supports:
         raise ValueError("batched plans differ in supports")
-    nodes0 = [(n.id, n.x, n.y, n.attach) for n in p0.init_nodes]
-    nodesk = [(n.id, n.x, n.y, n.attach) for n in pk.init_nodes]
+    nodes0 = [(n.id, n.x, n.y, n.attach, n.role) for n in p0.init_nodes]
+    nodesk = [(n.id, n.x, n.y, n.attach, n.role) for n in pk.init_nodes]
     if nodes0 != nodesk:
         raise ValueError("batched plans differ in init_nodes")
     if len(p0.steps) != len(pk.steps):
@@ -127,12 +127,12 @@ def _assert_same_structure(p0: StagedPlan, pk: StagedPlan) -> None:
     for s0, sk in zip(p0.steps, pk.steps):
         if s0.label != sk.label or s0.record != sk.record:
             raise ValueError(f"batched plans differ in step meta near {s0.label!r}")
-        if [(n.id, n.x, n.y, n.attach) for n in s0.new_nodes] != [
-            (n.id, n.x, n.y, n.attach) for n in sk.new_nodes
+        if [(n.id, n.x, n.y, n.attach, n.role) for n in s0.new_nodes] != [
+            (n.id, n.x, n.y, n.attach, n.role) for n in sk.new_nodes
         ]:
             raise ValueError(f"batched plans differ in new_nodes at step {s0.label!r}")
-        if [(f.id, f.i, f.j, f.E, f.A, f.I, f.udl_wy) for f in s0.new_frames] != [
-            (f.id, f.i, f.j, f.E, f.A, f.I, f.udl_wy) for f in sk.new_frames
+        if [(f.id, f.i, f.j, f.E, f.A, f.I, f.udl_wy, f.group) for f in s0.new_frames] != [
+            (f.id, f.i, f.j, f.E, f.A, f.I, f.udl_wy, f.group) for f in sk.new_frames
         ]:
             raise ValueError(f"batched plans differ in new_frames at step {s0.label!r}")
         if [(c.id, c.i, c.j, c.E, c.A) for c in s0.new_cables] != [

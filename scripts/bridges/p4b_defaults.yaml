@@ -1,0 +1,23 @@
+# P4B staged bridge. Units: N, m, Pa.
+n: 19
+anchor_base: 60.0
+anchor_spacing: 2.5
+anchor_free: 5.0
+left_start: 18.5
+left_spacing: 12.0
+left_end: 5.0
+right_start: 18.5
+right_spacing: 12.0
+right_end: 8.0
+wg: 3.2e5
+dw: 4.0e5
+beam_E: 200.0e9
+beam_A: 2.3
+beam_Iz: 2.0
+
+# Tower z-EI curve: z [m], flexural rigidity EI [N*m^2].
+tower_stiffness:
+  - [0.0, 1.0e18]
+  - [110.0, 1.0e18]
+tower_element_size: 2.0
+tower_axial_rigidity: 1.0e15

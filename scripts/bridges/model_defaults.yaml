@@ -1,0 +1,23 @@
+# Baseline staged bridge. Units: N, m, Pa.
+n: 6
+anchor_base: 32.0
+anchor_spacing: 2.0
+anchor_free: 10.0
+left_start: 12.0
+left_spacing: 8.0
+left_end: 4.0
+right_start: 12.0
+right_spacing: 12.0
+right_end: 4.0
+wg: 1.0e5
+dw: 0.0
+beam_E: 20.0e9
+beam_A: 10.0
+beam_Iz: 0.8333333333333334
+
+# Tower z-EI curve: z [m], flexural rigidity EI [N*m^2].
+tower_stiffness:
+  - [0.0, 1.0e18]
+  - [52.0, 1.0e18]
+tower_element_size: 2.0
+tower_axial_rigidity: 1.0e15

@@ -33,7 +33,8 @@ from bridgezoo.optim import (  # noqa: E402
     IntegerSearchOptions,
     ObjectiveWeights,
 )
-from scripts.staged_analysis import MODEL_DEFAULTS, default_pretension, P4B_DEFAULTS  # noqa: E402
+from scripts.bridge_config import load_bridge_config  # noqa: E402
+from scripts.staged_analysis import default_pretension  # noqa: E402
 
 
 def _model_kwargs(args) -> dict:
@@ -52,6 +53,9 @@ def _model_kwargs(args) -> dict:
         "beam_E": args.beam_E,
         "beam_A": args.beam_A,
         "beam_Iz": args.beam_Iz,
+        "tower_stiffness": args.bridge_defaults["tower_stiffness"],
+        "tower_element_size": args.bridge_defaults["tower_element_size"],
+        "tower_axial_rigidity": args.bridge_defaults["tower_axial_rigidity"],
     }
 
 
@@ -268,9 +272,15 @@ def run(args):
     return result
 
 
-def build_parser() -> argparse.ArgumentParser:
-    model_p = P4B_DEFAULTS
+def build_parser(bridge_defaults: dict[str, object] | None = None) -> argparse.ArgumentParser:
+    model_p = load_bridge_config("p4b") if bridge_defaults is None else bridge_defaults
     p = argparse.ArgumentParser(description="Optimize staged cable strands and pretensions.")
+    p.set_defaults(bridge_defaults=dict(model_p))
+    p.add_argument(
+        "--bridge",
+        default="p4b",
+        help="桥梁 YAML 配置：内置名称 model/p4b，或 YAML 文件路径（默认 p4b）",
+    )
     p.add_argument("--n", type=int, default=model_p["n"])
     p.add_argument("--out", default="results/cable_opt")
     p.add_argument("--seed", type=int, default=0)
@@ -339,8 +349,15 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    bootstrap = argparse.ArgumentParser(add_help=False)
+    bootstrap.add_argument("--bridge", default="p4b")
+    known, _ = bootstrap.parse_known_args(argv)
+    return build_parser(load_bridge_config(known.bridge)).parse_args(argv)
+
+
 def main() -> None:
-    args = build_parser().parse_args()
+    args = parse_args()
     run(args)
 
 
