@@ -34,12 +34,7 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 PROJECT_ROOT = Path(ROOT)
 
-from bridgezoo.fem.staged import (
-    StagedDirectSolver,
-    StagedOpenSeesSolver,
-    build_staged_cantilever,
-)
-from scripts.bridge_config import load_bridge_config
+from scripts.bridge_config import load_bridge_config, staged_api_for_bridge_type
 
 
 
@@ -79,6 +74,9 @@ def _load_design(path: Path) -> tuple[dict[int, int], dict[int, float]]:
 
 
 def run(args) -> None:
+    build_staged_cantilever, StagedDirectSolver, StagedOpenSeesSolver = staged_api_for_bridge_type(
+        args.bridge_defaults["bridge_type"]
+    )
     if args.design:
         design_path = _resolve_project_path(args.design)
         strand_input, force_input = _load_design(design_path)
@@ -307,8 +305,13 @@ def _plot_animation(result, n, scale, out, frames_dir, fps, beam_depth: float = 
         for stale in frames_path.glob("stage_*.png"):
             stale.unlink()
 
-    # 画幅范围（含塔、所有梁节点、放大后的变形）
-    xs_all = [coords[nid][0] for nid in result.deck_ids]
+    # 画幅范围：single 模型的右索固定地锚不是主梁节点，也必须纳入横向范围。
+    cable_endpoint_ids = {
+        nid
+        for endpoints in result.cable_nodes.values()
+        for nid in endpoints
+    }
+    xs_all = [coords[nid][0] for nid in {*result.deck_ids, *cable_endpoint_ids}]
     tower_top = max((coords[a][1] for a in result.tower_ids), default=10.0)
     all_y = [coords[nid][1] + rec.disp[nid][1] * scale
              for rec in records for nid in result.deck_ids if nid in rec.disp]

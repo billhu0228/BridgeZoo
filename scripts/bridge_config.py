@@ -19,8 +19,11 @@ _ALIASES = {
     "model_defaults": "model_defaults.yaml",
     "p4b": "p4b_defaults.yaml",
     "p4b_defaults": "p4b_defaults.yaml",
+    "omo": "omo_bridge.yaml",
+    "omo_bridge": "omo_bridge.yaml",
 }
 _REQUIRED_KEYS = {
+    "bridge_type",
     "n",
     "anchor_base",
     "anchor_spacing",
@@ -63,6 +66,8 @@ def _parse_value(path: Path, line_number: int, key: str, raw_value: str):
     try:
         return ast.literal_eval(raw_value)
     except (SyntaxError, ValueError) as exc:
+        if _KEY_PATTERN.fullmatch(raw_value):
+            return raw_value
         raise ValueError(f"{path}:{line_number}: invalid value for {key!r}") from exc
 
 
@@ -109,7 +114,10 @@ def load_bridge_config(source: str | Path) -> dict[str, object]:
         raise ValueError(f"{path}: unknown bridge config keys: {unknown}")
     if isinstance(config["n"], bool) or not isinstance(config["n"], int) or config["n"] <= 0:
         raise ValueError(f"{path}: 'n' must be a positive integer")
-    numeric_keys = _REQUIRED_KEYS - {"n", "tower_stiffness"}
+    bridge_type = config["bridge_type"]
+    if bridge_type not in {"normal", "single"}:
+        raise ValueError(f"{path}: 'bridge_type' must be 'normal' or 'single'")
+    numeric_keys = _REQUIRED_KEYS - {"bridge_type", "n", "tower_stiffness"}
     for key in numeric_keys:
         value = config[key]
         if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -136,3 +144,35 @@ def load_bridge_config(source: str | Path) -> dict[str, object]:
     if config["tower_axial_rigidity"] <= 0.0:
         raise ValueError(f"{path}: 'tower_axial_rigidity' must be positive")
     return config
+
+
+def model_family_for_bridge_type(bridge_type: str) -> str:
+    """Map YAML bridge type to the optimization model-family identifier."""
+
+    if bridge_type == "normal":
+        return "staged"
+    if bridge_type == "single":
+        return "single_staged"
+    raise ValueError(f"unknown bridge_type: {bridge_type!r}")
+
+
+def staged_api_for_bridge_type(bridge_type: str):
+    """Return ``(builder, direct solver, OpenSees solver)`` for a bridge type."""
+
+    if bridge_type == "normal":
+        from bridgezoo.fem.staged import (
+            StagedDirectSolver,
+            StagedOpenSeesSolver,
+            build_staged_cantilever,
+        )
+
+        return build_staged_cantilever, StagedDirectSolver, StagedOpenSeesSolver
+    if bridge_type == "single":
+        from bridgezoo.fem.single_staged import (
+            StagedDirectSolver,
+            StagedOpenSeesSolver,
+            build_staged_cantilever,
+        )
+
+        return build_staged_cantilever, StagedDirectSolver, StagedOpenSeesSolver
+    raise ValueError(f"unknown bridge_type: {bridge_type!r}")

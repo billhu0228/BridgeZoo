@@ -24,7 +24,8 @@ BridgeZoo/
 │   │   ├── model.py           # 求解器无关 IR（StructuralModel/SolveResult）
 │   │   ├── kernels.py         # 共享单元数值核（刚度/变换/等效荷载）
 │   │   ├── completed/         # 一次成桥：direct.py（★自写）+ opensees.py
-│   │   └── staged/            # 分阶段施工：plan/builder/direct/opensees/completed/sequence（★RL 内核）
+│   │   ├── staged/            # 分阶段施工：plan/builder/direct/opensees/completed/sequence（★RL 内核）
+│   │   └── single_staged/     # staged 的独立复刻；预留单塔专属参数与施工过程
 │   ├── envs/                  # 多智能体环境
 │   │   ├── geometry.py        # ★桥梁几何/截面（已实现，唯一真源）
 │   │   ├── cable_agent.py     # 索智能体状态/动作/观测（M2）
@@ -90,3 +91,10 @@ step(actions)  // 每次推进一个施工阶段
 
 成桥/施工两套模型各自固定梁/塔节点与梁/索单元的 id 约定（`staged.builder` 为施工模型真源，
 `completed/` 经 `staged.completed` 由同一施工计划派生），同模式内两后端必须共用同一套编号，否则无法交叉校核。
+
+`single_staged/` 源码与内部导入完全独立，采用独塔左悬臂拓扑：右梁只有一个全固定端节点，
+每根右索连接独立的全固定地锚；当前施工序列止于左侧自由端 `tip_free`，尚不进入后续合龙或
+二期恒载过程。分析和优化统一使用 `scripts.staged_analysis` 与
+`scripts.optimize_cables` 入口。桥梁 YAML 的 `bridge_type` 负责模型分派：`normal` 使用
+`staged`，`single` 使用 `single_staged`；通用优化算法内部对应
+`CableOptimizationProblem.model_family`。

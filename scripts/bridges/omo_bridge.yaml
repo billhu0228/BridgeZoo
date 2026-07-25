@@ -1,5 +1,5 @@
-# P4B staged bridge. Units: N, m, Pa.
-bridge_type: normal
+# OMO single-staged bridge, initially copied from P4B. Units: N, m, Pa.
+bridge_type: single
 n: 19
 anchor_base: 60.0
 anchor_spacing: 2.5

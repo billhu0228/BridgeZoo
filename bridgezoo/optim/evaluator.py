@@ -6,12 +6,6 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from bridgezoo.fem.staged import (
-    StagedDirectBatchSolver,
-    StagedDirectSolver,
-    StagedOpenSeesSolver,
-    build_staged_cantilever,
-)
 from bridgezoo.fem.staged.plan import StagedResult
 from bridgezoo.optim.objectives import ObjectiveBreakdown, objective_breakdown, stress_violation_mpa
 from bridgezoo.optim.problem import CableOptimizationProblem
@@ -53,6 +47,9 @@ class CableDesignEvaluator:
     def __init__(self, problem: CableOptimizationProblem):
         self.problem = problem
         self.layout = CableLayout(problem.n_seg)
+        self._builder, self._direct_solver, self._batch_solver, self._opensees_solver = _model_api(
+            problem.model_family
+        )
 
     def build_plan(self, strands, pretension):
         strands = validate_strand_vector(
@@ -65,13 +62,13 @@ class CableDesignEvaluator:
         kwargs = self.problem.builder_kwargs()
         kwargs["strands"] = self.layout.as_int_mapping(strands)
         kwargs["pretension"] = self.layout.as_mapping(pretension)
-        return build_staged_cantilever(**kwargs)
+        return self._builder(**kwargs)
 
     def run_solver(self, plan) -> StagedResult:
         if self.problem.backend == "direct":
-            return StagedDirectSolver().run(plan)
+            return self._direct_solver().run(plan)
         if self.problem.backend == "opensees":
-            return StagedOpenSeesSolver().run(plan)
+            return self._opensees_solver().run(plan)
         raise ValueError(f"unknown optimization backend: {self.problem.backend!r}")
 
     def _extract_case(self, result: StagedResult) -> tuple[dict[int, float], dict[int, float]]:
@@ -119,7 +116,7 @@ class CableDesignEvaluator:
         ncase = tension_matrix.shape[1]
         plans = [self.build_plan(strands, tension_matrix[:, k]) for k in range(ncase)]
         if self.problem.backend == "direct":
-            results = StagedDirectBatchSolver().run_batch(plans)
+            results = self._batch_solver().run_batch(plans)
             return [self._extract_case(r) for r in results]
         return [self._extract_case(self.run_solver(plan)) for plan in plans]
 
@@ -176,3 +173,27 @@ class CableDesignEvaluator:
             return self.evaluate(strands, pretension).objective
         except (ValueError, RuntimeError, FloatingPointError):
             return 1.0e30
+
+
+def _model_api(model_family: str):
+    """Resolve the staged model family without coupling their implementations."""
+
+    if model_family == "staged":
+        from bridgezoo.fem.staged import (
+            StagedDirectBatchSolver,
+            StagedDirectSolver,
+            StagedOpenSeesSolver,
+            build_staged_cantilever,
+        )
+
+        return build_staged_cantilever, StagedDirectSolver, StagedDirectBatchSolver, StagedOpenSeesSolver
+    if model_family == "single_staged":
+        from bridgezoo.fem.single_staged import (
+            StagedDirectBatchSolver,
+            StagedDirectSolver,
+            StagedOpenSeesSolver,
+            build_staged_cantilever,
+        )
+
+        return build_staged_cantilever, StagedDirectSolver, StagedDirectBatchSolver, StagedOpenSeesSolver
+    raise ValueError(f"unknown optimization model family: {model_family!r}")

@@ -17,14 +17,13 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-from bridgezoo.fem.staged import StagedDirectSolver, StagedOpenSeesSolver, build_staged_cantilever
-from scripts.bridge_config import load_bridge_config
+from scripts.bridge_config import load_bridge_config, staged_api_for_bridge_type
 from scripts.staged_analysis import default_pretension
 
 RIGHT_TIP, LEFT_TIP = 200, 201
 
 
-def _stage_tip_y_errors(rd, ro) -> list[dict[str, float | int | str]]:
+def _stage_tip_y_errors(rd, ro, bridge_type: str = "normal") -> list[dict[str, float | int | str]]:
     if len(rd.records) != len(ro.records):
         raise ValueError(f"record count mismatch: direct={len(rd.records)}, opensees={len(ro.records)}")
 
@@ -38,7 +37,10 @@ def _stage_tip_y_errors(rd, ro) -> list[dict[str, float | int | str]]:
         deck = [nid for nid in rd.deck_ids if nid in direct_rec.disp and nid in ops_rec.disp]
         if not deck:
             raise ValueError(f"no shared deck nodes at stage {direct_rec.label!r}")
-        tip = max(deck, key=lambda nid: abs(rd.coords[nid][0]))
+        if bridge_type == "single":
+            tip = min(deck, key=lambda nid: rd.coords[nid][0])
+        else:
+            tip = max(deck, key=lambda nid: abs(rd.coords[nid][0]))
         direct_uy = direct_rec.disp[tip][1]
         ops_uy = ops_rec.disp[tip][1]
         diff = ops_uy - direct_uy
@@ -77,6 +79,10 @@ def _lock_in_residuals(result, n: int, left_end: float) -> dict[str, float]:
 
 
 def run(args, tol_rel: float) -> bool:
+    bridge_type = args.bridge_defaults["bridge_type"]
+    build_staged_cantilever, StagedDirectSolver, StagedOpenSeesSolver = staged_api_for_bridge_type(
+        bridge_type
+    )
     n = args.n
     strands = [20] * n
     pre = default_pretension(
@@ -88,6 +94,15 @@ def run(args, tol_rel: float) -> bool:
         args.right_start,
         args.right_spacing,
         args.wg,
+    )
+    single_section = (
+        {
+            "beam_E": args.bridge_defaults["beam_E"],
+            "beam_A": args.bridge_defaults["beam_A"],
+            "beam_Iz": args.bridge_defaults["beam_Iz"],
+        }
+        if bridge_type == "single"
+        else {}
     )
     plan = build_staged_cantilever(
         n_seg=n,
@@ -106,6 +121,7 @@ def run(args, tol_rel: float) -> bool:
         tower_axial_rigidity=args.bridge_defaults["tower_axial_rigidity"],
         strands=strands,
         pretension=pre,
+        **single_section,
     )
 
     rd = StagedDirectSolver().run(plan)
@@ -127,11 +143,16 @@ def run(args, tol_rel: float) -> bool:
     print("=== Recorded stages ===")
     print("  " + ", ".join(rec.label for rec in ro.records))
 
-    rows = _stage_tip_y_errors(rd, ro)
+    rows = _stage_tip_y_errors(rd, ro, bridge_type)
     max_row = max(rows, key=lambda row: row["rel"])
-    res_direct = _lock_in_residuals(rd, n, args.left_end)
-    res_ops = _lock_in_residuals(ro, n, args.left_end)
-    residual = max(*res_direct.values(), *res_ops.values())
+    if bridge_type == "normal":
+        res_direct = _lock_in_residuals(rd, n, args.left_end)
+        res_ops = _lock_in_residuals(ro, n, args.left_end)
+        residual = max(*res_direct.values(), *res_ops.values())
+    else:
+        res_direct = {}
+        res_ops = {}
+        residual = 0.0
 
     print("\n=== Stage farthest-end uy comparison: direct vs OpenSees ===")
     header = (
@@ -151,16 +172,22 @@ def run(args, tol_rel: float) -> bool:
         f"abs diff={abs(max_row['diff']):.6e} m, percent={max_row['rel'] * 100:.6f}%"
     )
 
-    print("\n=== tip closure lock-in residual (final vs tangent-birth value) ===")
-    print("  dof              direct        opensees")
-    for key in res_direct:
-        print(f"  {key:<8} : {res_direct[key]:.6e}  {res_ops[key]:.6e}")
-    print(f"  max residual : {residual:.6e}")
+    if bridge_type == "normal":
+        print("\n=== tip closure lock-in residual (final vs tangent-birth value) ===")
+        print("  dof              direct        opensees")
+        for key in res_direct:
+            print(f"  {key:<8} : {res_direct[key]:.6e}  {res_ops[key]:.6e}")
+        print(f"  max residual : {residual:.6e}")
+    else:
+        print("\n=== tip_free boundary ===")
+        print("  single bridge tip remains free; no closure lock-in residual is imposed.")
 
-    ok = max_row["rel"] < tol_rel and residual < args.closure_tol
+    closure_ok = bridge_type != "normal" or residual < args.closure_tol
+    ok = max_row["rel"] < tol_rel and closure_ok
     print(f"\nResult: {'PASS' if ok else 'FAIL'}")
     print(f"  relative tolerance: {tol_rel:.1e} ({tol_rel * 100:.3g}%)")
-    print(f"  closure tolerance : {args.closure_tol:.1e}")
+    if bridge_type == "normal":
+        print(f"  closure tolerance : {args.closure_tol:.1e}")
     return ok
 
 

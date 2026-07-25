@@ -5,10 +5,46 @@ configuration name or a YAML path:
 
 ```bash
 python -m scripts.staged_analysis --bridge p4b
+python -m scripts.staged_analysis --bridge omo
 python -m scripts.staged_analysis --bridge scripts/bridges/model_defaults.yaml
 ```
 
 Command-line scalar options still override the corresponding YAML values.
+
+## Bridge type
+
+Every bridge configuration must declare its model family:
+
+```yaml
+bridge_type: normal  # bridgezoo.fem.staged
+```
+
+The supported values are:
+
+- `normal`: use `bridgezoo.fem.staged`.
+- `single`: use `bridgezoo.fem.single_staged`.
+
+The bundled `model` and `p4b` configurations are `normal`; `omo` is `single`
+and uses the single-tower construction model. Analysis, validation, and
+optimization entry points all dispatch from this field.
+
+### Current `single` construction topology
+
+The current `single_staged` implementation models an asymmetric single-tower
+bridge:
+
+- the right girder has one segment ending at one fully fixed node;
+- each right stay terminates at an independent fully fixed ground anchor at
+  `right_start + (i - 1) * right_spacing`, rather than at a girder node;
+- construction starts by activating the first girder segment on both sides;
+- cable stage 1 activates the first left/right stays, and every later cable
+  stage activates one left girder segment plus its left/right stays;
+- the process currently ends with the free left tip segment at `tip_free`.
+
+No closure support or `phase2` step is added after `tip_free` yet. Accordingly,
+`dw` and `right_end` remain accepted shared configuration fields but are not
+applied by the current `single_staged` process. The `normal` model retains its
+existing symmetric double-cantilever sequence and `phase2` behavior.
 
 ## Tower stiffness
 

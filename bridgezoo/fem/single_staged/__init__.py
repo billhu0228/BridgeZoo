@@ -1,0 +1,56 @@
+"""逐阶段施工(变刚度 + 切线激活)子包 —— "一套计划,两种后端,结果一致"。
+
+- :mod:`bridgezoo.fem.single_staged.plan` —— 与求解器无关的施工计划 IR + 结果容器 + 共享辅助。
+- :mod:`bridgezoo.fem.single_staged.builder` —— 由参数构建 :class:`StagedPlan`
+  (独塔左悬臂 + 固定地锚右索)。
+- :mod:`bridgezoo.fem.single_staged.direct` —— 自研增量直接刚度法后端(RL 内核,线性小位移)。
+- :mod:`bridgezoo.fem.single_staged.opensees` —— OpenSees 后端(切线激活),用于交叉校核。
+- :mod:`bridgezoo.fem.single_staged.completed` —— 由施工计划派生的成桥(完成态)模型组装,
+  是成桥工况的唯一建模入口(:func:`build_completed_model`)。
+- :mod:`bridgezoo.fem.single_staged.sequence` —— RL 环境的施工阶段序列(骨架,M1/M2)。
+
+公共 API 在此重导出,故 ``from bridgezoo.fem.single_staged import StagedDirectSolver`` 等写法保持稳定。
+"""
+
+from bridgezoo.fem.single_staged.builder import build_staged_cantilever
+from bridgezoo.fem.single_staged.completed import build_completed_model
+from bridgezoo.fem.single_staged.direct import StagedDirectBatchSolver, StagedDirectSolver
+from bridgezoo.fem.single_staged.opensees import StagedOpenSeesSolver
+from bridgezoo.fem.single_staged.plan import (
+    BalanceDof,
+    BuildStep,
+    CompletedState,
+    MemberLoad,
+    NewCable,
+    NewFrame,
+    NewNode,
+    NodalLoad,
+    StagedPlan,
+    StagedResult,
+    StagedStepRecord,
+)
+
+__all__ = [
+    "build_staged_cantilever",
+    "build_completed_model",
+    "StagedDirectSolver",
+    "StagedDirectBatchSolver",
+    "StagedOpenSeesSolver",
+    "StagedPlan",
+    "StagedResult",
+    "StagedStepRecord",
+    "CompletedState",
+    "BuildStep",
+    "NewNode",
+    "NewFrame",
+    "NewCable",
+    "NodalLoad",
+    "MemberLoad",
+    "BalanceDof",
+    "plan",
+    "builder",
+    "direct",
+    "completed",
+    "opensees",
+    "sequence",
+]

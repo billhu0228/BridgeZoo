@@ -33,7 +33,7 @@ from bridgezoo.optim import (  # noqa: E402
     IntegerSearchOptions,
     ObjectiveWeights,
 )
-from scripts.bridge_config import load_bridge_config  # noqa: E402
+from scripts.bridge_config import load_bridge_config, model_family_for_bridge_type  # noqa: E402
 from scripts.staged_analysis import default_pretension  # noqa: E402
 
 
@@ -206,6 +206,7 @@ def run(args):
             strand_scale=args.strand_scale,
         ),
         backend="direct",
+        model_family=model_family_for_bridge_type(args.bridge_defaults["bridge_type"]),
     )
     options = HybridOptions(
         continuous=ContinuousOptions(

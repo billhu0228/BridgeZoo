@@ -1,4 +1,5 @@
 # Baseline staged bridge. Units: N, m, Pa.
+bridge_type: normal
 n: 6
 anchor_base: 32.0
 anchor_spacing: 2.0

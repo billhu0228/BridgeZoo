@@ -24,6 +24,11 @@
   成桥工况的唯一建模入口。
 - ``staged.sequence`` —— RL 环境施工阶段序列(骨架,M1/M2)。
 
+独立单塔施工分支 —— :mod:`bridgezoo.fem.single_staged`:
+
+- 当前完整复刻 ``staged`` 的 IR、builder、双后端、成桥派生与序列接口。
+- 内部引用独立，供后续增加单塔专属参数和施工语义，不影响原 ``staged``。
+
 参见 ``docs/DESIGN_MAPPO.md`` 第 3、4 节、``docs/ARCHITECTURE.md``。
 """
 
@@ -39,4 +44,5 @@ __all__ = [
     "kernels",
     "completed",
     "staged",
+    "single_staged",
 ]

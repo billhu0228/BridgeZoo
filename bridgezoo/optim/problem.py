@@ -51,6 +51,7 @@ class CableOptimizationProblem:
     target_line: TargetLine = field(default_factory=TargetLine)
     strand_area: float = 1.4e-4
     backend: str = "direct"
+    model_family: str = "staged"
 
     def builder_kwargs(self) -> dict:
         data = dict(self.model_kwargs)
