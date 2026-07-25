@@ -1,7 +1,9 @@
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from scripts import optimize_cables
 from scripts.bridge_config import (
     load_bridge_config,
     model_family_for_bridge_type,
@@ -61,6 +63,88 @@ def test_staged_analysis_uses_selected_bridge_and_allows_cli_override():
     assert args.bridge_defaults["n"] == 6
     assert args.anchor_base == 32.0
     assert args.wg == 12345.0
+
+
+def test_optimization_requires_explicit_bridge_yaml():
+    with pytest.raises(SystemExit):
+        optimize_cables.parse_args([])
+
+    args = optimize_cables.parse_args(["--bridge", "model"])
+    assert args.bridge == "model"
+    assert args.bridge_defaults["n"] == 6
+
+
+def test_best_design_payload_records_canonical_bridge_yaml():
+    ev = SimpleNamespace(
+        objective=1.0,
+        components=SimpleNamespace(
+            shape=0.1,
+            total_strands=0.2,
+            stress_uniform=0.3,
+            stress_violation=0.4,
+        ),
+        metrics=SimpleNamespace(
+            shape_rmse_m=0.001,
+            shape_max_abs_m=0.002,
+            total_strands=10,
+            stress_mean_mpa=500.0,
+            stress_std_mpa=1.0,
+            stress_min_mpa=499.0,
+            stress_max_mpa=501.0,
+            stress_violation_rms_mpa=0.0,
+            stress_violation_max_mpa=0.0,
+        ),
+        cable_ids=[1001],
+        design=SimpleNamespace(strands=[10], pretension=[1.0e6]),
+        cable_stress_mpa={1001: 500.0},
+        deck_errors_m={},
+    )
+    bridge_yaml = optimize_cables._bridge_yaml_reference("model")
+
+    payload = optimize_cables._evaluation_payload(ev, bridge_yaml)
+
+    assert payload["bridge_yaml"] == "scripts/bridges/model_defaults.yaml"
+
+
+def test_staged_analysis_restores_bridge_yaml_from_design(tmp_path: Path):
+    design = tmp_path / "best_design.json"
+    design.write_text(
+        """
+        {
+          "bridge_yaml": "scripts/bridges/model_defaults.yaml",
+          "cables": [{"cable_id": 1001, "strands": 10, "pretension_N": 1000000.0}]
+        }
+        """,
+        encoding="utf-8",
+    )
+
+    args = parse_staged_args(["--design", str(design), "--render", "text"])
+
+    assert args.bridge == "scripts/bridges/model_defaults.yaml"
+    assert args.bridge_defaults["n"] == 6
+
+
+def test_staged_analysis_rejects_missing_or_conflicting_design_yaml(tmp_path: Path):
+    legacy = tmp_path / "legacy_design.json"
+    legacy.write_text(
+        '{"cables": [{"cable_id": 1001, "strands": 10, "pretension_N": 1000000.0}]}',
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="bridge_yaml"):
+        parse_staged_args(["--design", str(legacy)])
+
+    design = tmp_path / "best_design.json"
+    design.write_text(
+        """
+        {
+          "bridge_yaml": "scripts/bridges/model_defaults.yaml",
+          "cables": [{"cable_id": 1001, "strands": 10, "pretension_N": 1000000.0}]
+        }
+        """,
+        encoding="utf-8",
+    )
+    with pytest.raises(SystemExit):
+        parse_staged_args(["--design", str(design), "--bridge", "p4b"])
 
 
 def test_validate_staged_can_use_p4b_defaults():

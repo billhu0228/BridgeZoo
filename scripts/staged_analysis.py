@@ -12,11 +12,12 @@ no assumption that ``x = node_id * seg_len``.
 
 Usage::
 
-    py -3.12 -m scripts.staged_analysis --n 6
-    py -3.12 -m scripts.staged_analysis --n 8 --scale 20 --backend opensees
-    py -3.12 -m scripts.staged_analysis --bridge model
-    py -3.12 -m scripts.staged_analysis --frames-dir results/staged_frames
-    py -3.12 -m scripts.staged_analysis --design results/cable_opt/best_design.json
+    python -m scripts.staged_analysis --bridge model --n 6
+    python -m scripts.staged_analysis --bridge p4b --n 8 --scale 20 --backend opensees
+    python -m scripts.staged_analysis --bridge model
+    python -m scripts.staged_analysis --bridge omo
+    python -m scripts.staged_analysis --bridge p4b --frames-dir results/staged_frames
+    python -m scripts.staged_analysis --design results/cable_opt/best_design.json
 
 Default output: ``results/staged_deck_growth.gif`` under the project root.
 """
@@ -60,17 +61,23 @@ def default_pretension(
     return out
 
 
-def _load_design(path: Path) -> tuple[dict[int, int], dict[int, float]]:
-    """读优化器输出的 ``best_design.json``,返回 {cable_id: 股数} / {cable_id: 张力 N}。"""
+def _load_design(path: Path) -> tuple[dict[int, int], dict[int, float], str]:
+    """读优化器输出，返回索股、张力和对应的桥梁 YAML。"""
     import json
 
     data = json.loads(path.read_text(encoding="utf-8"))
+    bridge_yaml = data.get("bridge_yaml")
+    if not isinstance(bridge_yaml, str) or not bridge_yaml.strip():
+        raise ValueError(
+            f"design file has no explicit 'bridge_yaml': {path}; "
+            "rerun scripts.optimize_cables with --bridge"
+        )
     cables = data.get("cables")
     if not cables:
         raise ValueError(f"design file has no 'cables' entries: {path}")
     strand_input = {int(c["cable_id"]): int(c["strands"]) for c in cables}
     force_input = {int(c["cable_id"]): float(c["pretension_N"]) for c in cables}
-    return strand_input, force_input
+    return strand_input, force_input, bridge_yaml
 
 
 def run(args) -> None:
@@ -79,7 +86,7 @@ def run(args) -> None:
     )
     if args.design:
         design_path = _resolve_project_path(args.design)
-        strand_input, force_input = _load_design(design_path)
+        strand_input, force_input, _ = _load_design(design_path)
         # 设计文件按 1000+i/2000+i 各 n 根索;--n 缺省时由文件推断。
         n = args.n if args.n is not None else len(strand_input) // 2
         print(f"使用优化设计:{design_path}（n={n}，总索股 {sum(strand_input.values())}）")
@@ -415,13 +422,17 @@ def _plot_animation(result, n, scale, out, frames_dir, fps, beam_depth: float = 
     plt.close(fig)
 
 
-def build_parser(bridge_defaults: dict[str, object]) -> argparse.ArgumentParser:
+def build_parser(
+    bridge_defaults: dict[str, object],
+    *,
+    bridge_default: str,
+) -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="绘制逐阶段双悬臂主梁增长与变形过程（扇面索）")
     p.set_defaults(bridge_defaults=dict(bridge_defaults))
     p.add_argument(
         "--bridge",
-        default="p4b",
-        help="桥梁 YAML 配置：内置名称 model/p4b，或 YAML 文件路径（默认 p4b）",
+        default=bridge_default,
+        help="桥梁 YAML 配置；未给 --design 时必须显式指定，给设计文件时从 bridge_yaml 恢复",
     )
     p.add_argument("--n", type=int, default=None,
                    help=f"每侧索数（缺省 {bridge_defaults['n']}；给 --design 时由设计文件推断）")
@@ -462,10 +473,44 @@ def build_parser(bridge_defaults: dict[str, object]) -> argparse.ArgumentParser:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     bootstrap = argparse.ArgumentParser(add_help=False)
-    bootstrap.add_argument("--bridge", default="p4b")
+    bootstrap.add_argument("--bridge")
+    bootstrap.add_argument("--design")
     known, _ = bootstrap.parse_known_args(argv)
-    defaults = load_bridge_config(known.bridge)
-    return build_parser(defaults).parse_args(argv)
+
+    design_bridge = None
+    if known.design is not None:
+        design_path = _resolve_project_path(known.design)
+        _, _, design_bridge = _load_design(design_path)
+
+    bridge_source = design_bridge or known.bridge
+    if bridge_source is None:
+        bootstrap.error("--bridge is required unless --design supplies an explicit bridge_yaml")
+
+    bridge_path = _resolve_bridge_yaml(bridge_source)
+    defaults = load_bridge_config(bridge_path)
+    parser = build_parser(defaults, bridge_default=bridge_source)
+    args = parser.parse_args(argv)
+
+    if design_bridge is not None and known.bridge is not None:
+        cli_path = _resolve_bridge_yaml(known.bridge).resolve()
+        if cli_path != bridge_path.resolve():
+            parser.error(
+                f"--bridge resolves to {cli_path}, but --design declares {bridge_path}"
+            )
+    return args
+
+
+def _resolve_bridge_yaml(source: str) -> Path:
+    """Resolve project-relative persisted paths as well as aliases/absolute paths."""
+
+    path = Path(source)
+    if not path.is_absolute():
+        project_path = PROJECT_ROOT / path
+        if project_path.is_file():
+            return project_path.resolve()
+    from scripts.bridge_config import resolve_bridge_config
+
+    return resolve_bridge_config(source).resolve()
 
 
 def main() -> None:

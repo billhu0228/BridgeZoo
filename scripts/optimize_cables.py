@@ -2,7 +2,8 @@
 
 Example::
 
-    py -3.12 -m scripts.optimize_cables --n 4 --outer-iterations 3 --random-trials 2
+    python -m scripts.optimize_cables --bridge p4b
+    python -m scripts.optimize_cables --bridge p4b --outer-iterations 3 --random-trials 2
 """
 
 from __future__ import annotations
@@ -33,7 +34,11 @@ from bridgezoo.optim import (  # noqa: E402
     IntegerSearchOptions,
     ObjectiveWeights,
 )
-from scripts.bridge_config import load_bridge_config, model_family_for_bridge_type  # noqa: E402
+from scripts.bridge_config import (  # noqa: E402
+    load_bridge_config,
+    model_family_for_bridge_type,
+    resolve_bridge_config,
+)
 from scripts.staged_analysis import default_pretension  # noqa: E402
 
 
@@ -81,8 +86,19 @@ def _initial_pretension(args) -> np.ndarray:
     )
 
 
-def _evaluation_payload(ev) -> dict:
+def _bridge_yaml_reference(source: str | Path) -> str:
+    """Return a stable YAML reference for persistence in optimization output."""
+
+    path = resolve_bridge_config(source).resolve()
+    try:
+        return path.relative_to(PROJECT_ROOT).as_posix()
+    except ValueError:
+        return str(path)
+
+
+def _evaluation_payload(ev, bridge_yaml: str) -> dict:
     return {
+        "bridge_yaml": bridge_yaml,
         "objective": ev.objective,
         "components": {
             "shape": ev.components.shape,
@@ -131,10 +147,16 @@ def _band_verdict_line(best, result, stress_lower: float, stress_upper: float) -
     )
 
 
-def _write_outputs(out_dir: Path, best, history, band_line: str | None = None) -> None:
+def _write_outputs(
+    out_dir: Path,
+    best,
+    history,
+    bridge_yaml: str,
+    band_line: str | None = None,
+) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "best_design.json").write_text(
-        json.dumps(_evaluation_payload(best), indent=2, ensure_ascii=False),
+        json.dumps(_evaluation_payload(best, bridge_yaml), indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
 
@@ -238,7 +260,13 @@ def run(args):
 
     out_dir = PROJECT_ROOT / args.out if not Path(args.out).is_absolute() else Path(args.out)
     band_line = _band_verdict_line(result.best, result, args.stress_lower, args.stress_upper)
-    _write_outputs(out_dir, result.best, result.history, band_line=band_line)
+    _write_outputs(
+        out_dir,
+        result.best,
+        result.history,
+        bridge_yaml=_bridge_yaml_reference(args.bridge),
+        band_line=band_line,
+    )
 
     print("Cable optimization complete")
     print(f"  objective: {result.best.objective:.6g}")
@@ -273,14 +301,14 @@ def run(args):
     return result
 
 
-def build_parser(bridge_defaults: dict[str, object] | None = None) -> argparse.ArgumentParser:
-    model_p = load_bridge_config("p4b") if bridge_defaults is None else bridge_defaults
+def build_parser(bridge_defaults: dict[str, object]) -> argparse.ArgumentParser:
+    model_p = bridge_defaults
     p = argparse.ArgumentParser(description="Optimize staged cable strands and pretensions.")
     p.set_defaults(bridge_defaults=dict(model_p))
     p.add_argument(
         "--bridge",
-        default="p4b",
-        help="桥梁 YAML 配置：内置名称 model/p4b，或 YAML 文件路径（默认 p4b）",
+        required=True,
+        help="桥梁 YAML 配置：内置名称 model/p4b/omo，或 YAML 文件路径（必须显式指定）",
     )
     p.add_argument("--n", type=int, default=model_p["n"])
     p.add_argument("--out", default="results/cable_opt")
@@ -352,8 +380,10 @@ def build_parser(bridge_defaults: dict[str, object] | None = None) -> argparse.A
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     bootstrap = argparse.ArgumentParser(add_help=False)
-    bootstrap.add_argument("--bridge", default="p4b")
+    bootstrap.add_argument("--bridge")
     known, _ = bootstrap.parse_known_args(argv)
+    if known.bridge is None:
+        bootstrap.error("--bridge is required; optimization must explicitly identify its YAML model")
     return build_parser(load_bridge_config(known.bridge)).parse_args(argv)
 
 
