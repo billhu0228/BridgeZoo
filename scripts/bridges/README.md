@@ -33,18 +33,26 @@ optimization entry points all dispatch from this field.
 The current `single_staged` implementation models an asymmetric single-tower
 bridge:
 
-- the right girder has one segment ending at one fully fixed node;
+- the right girder has one segment ending at one fully fixed node whose x
+  coordinate is the `single`-only YAML field `right_fix`;
 - each right stay terminates at an independent fully fixed ground anchor at
   `right_start + (i - 1) * right_spacing`, rather than at a girder node;
 - construction starts by activating the first girder segment on both sides;
 - cable stage 1 activates the first left/right stays, and every later cable
   stage activates one left girder segment plus its left/right stays;
-- the process currently ends with the free left tip segment at `tip_free`.
+- `tip_free` installs and solves the final free left segment;
+- the final `left_tip_uy_lock` stage locks node 201's vertical displacement at
+  its current deformed position;
+- the `left_span` stage then tangent-activates an additional segment extending
+  left by the `single`-only YAML length `left_span`, and locks its new end node
+  202 vertically at its birth position;
+- when `dw != 0`, the final `phase2` stage applies `-dw` to every active deck
+  frame, including the right fixed segment and the new `left_span` segment.
 
-No closure support or `phase2` step is added after `tip_free` yet. Accordingly,
-`dw` and `right_end` remain accepted shared configuration fields but are not
+Both `right_fix` and `left_span` are required, positive, `single`-only YAML
+fields. `right_end` remains an accepted shared configuration field but is not
 applied by the current `single_staged` process. The `normal` model retains its
-existing symmetric double-cantilever sequence and `phase2` behavior.
+existing symmetric double-cantilever sequence and its own `phase2` behavior.
 
 ## Tower stiffness
 

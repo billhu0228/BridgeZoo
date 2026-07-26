@@ -93,8 +93,11 @@ step(actions)  // 每次推进一个施工阶段
 `completed/` 经 `staged.completed` 由同一施工计划派生），同模式内两后端必须共用同一套编号，否则无法交叉校核。
 
 `single_staged/` 源码与内部导入完全独立，采用独塔左悬臂拓扑：右梁只有一个全固定端节点，
-每根右索连接独立的全固定地锚；当前施工序列止于左侧自由端 `tip_free`，尚不进入后续合龙或
-二期恒载过程。分析和优化统一使用 `scripts.staged_analysis` 与
+每根右索连接独立的全固定地锚；`tip_free` 安装并求解左侧自由端，随后最终
+`left_tip_uy_lock` 阶段把节点 201 的竖向位移锁定在当前位置，之后 `left_span` 阶段按
+YAML 同名长度向左切线激活辅助跨并把新端节点 202 的竖向位移锁定在诞生位置；当
+`dw != 0` 时，最终 `phase2` 阶段对全部主梁单元施加二期均布荷载。
+分析和优化统一使用 `scripts.staged_analysis` 与
 `scripts.optimize_cables` 入口。桥梁 YAML 的 `bridge_type` 负责模型分派：`normal` 使用
 `staged`，`single` 使用 `single_staged`；通用优化算法内部对应
 `CableOptimizationProblem.model_family`。

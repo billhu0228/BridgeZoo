@@ -31,9 +31,8 @@ def test_bundled_bridge_configs_keep_previous_values():
     assert p4b["beam_E"] == 200e9
     assert p4b["tower_stiffness"][-1][0] == 110.0
     assert omo["bridge_type"] == "single"
-    assert {key: value for key, value in omo.items() if key != "bridge_type"} == {
-        key: value for key, value in p4b.items() if key != "bridge_type"
-    }
+    assert omo["right_fix"] == pytest.approx(3.0)
+    assert omo["left_span"] == pytest.approx(25.0)
 
 
 def test_bridge_config_alias_resolves_to_yaml():
@@ -171,3 +170,33 @@ def test_bridge_config_rejects_unknown_bridge_type(tmp_path: Path):
 
     with pytest.raises(ValueError, match="bridge_type"):
         load_bridge_config(path)
+
+
+def test_single_only_geometry_is_required_for_single_and_rejected_for_normal(tmp_path: Path):
+    single_source = resolve_bridge_config("omo").read_text(encoding="utf-8")
+    missing = tmp_path / "missing_right_fix.yaml"
+    missing.write_text(
+        "\n".join(line for line in single_source.splitlines() if not line.startswith("right_fix:")),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="requires 'right_fix'"):
+        load_bridge_config(missing)
+
+    missing_span = tmp_path / "missing_left_span.yaml"
+    missing_span.write_text(
+        "\n".join(line for line in single_source.splitlines() if not line.startswith("left_span:")),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="requires 'left_span'"):
+        load_bridge_config(missing_span)
+
+    normal_source = resolve_bridge_config("model").read_text(encoding="utf-8")
+    normal = tmp_path / "normal_right_fix.yaml"
+    normal.write_text(normal_source + "\nright_fix: 3.0\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="only valid for 'single'"):
+        load_bridge_config(normal)
+
+    normal_span = tmp_path / "normal_left_span.yaml"
+    normal_span.write_text(normal_source + "\nleft_span: 25.0\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="only valid for 'single'"):
+        load_bridge_config(normal_span)

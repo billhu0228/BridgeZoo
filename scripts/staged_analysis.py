@@ -129,6 +129,14 @@ def run(args) -> None:
         tower_axial_rigidity=args.bridge_defaults["tower_axial_rigidity"],
         strands=strand_input,
         pretension=force_input,
+        **(
+            {
+                "right_fix": args.bridge_defaults["right_fix"],
+                "left_span": args.bridge_defaults["left_span"],
+            }
+            if args.bridge_defaults["bridge_type"] == "single"
+            else {}
+        ),
     )
     solver = StagedOpenSeesSolver() if args.backend == "opensees" else StagedDirectSolver()
     result = solver.run(plan)
@@ -155,6 +163,17 @@ def _present_deck(result, record) -> list[int]:
     """本阶段已安装的主梁节点，按 x 升序（左端→右端）。"""
     ids = [nid for nid in result.deck_ids if nid in record.disp]
     return sorted(ids, key=lambda nid: result.coords[nid][0])
+
+
+def _farthest_deck_deformation_text(result, record) -> str:
+    """Return the farthest installed deck node's true vertical displacement."""
+
+    deck = _present_deck(result, record)
+    if not deck:
+        return "当前最远端真实竖向变形 dy=--"
+    farthest = max(deck, key=lambda nid: abs(result.coords[nid][0]))
+    true_dy_mm = record.disp[farthest][1] * 1000.0
+    return f"当前最远端真实竖向变形 dy={true_dy_mm:.1f} mm"
 
 
 def _force_label(fx: float, fy: float, mz: float) -> str:
@@ -391,11 +410,16 @@ def _plot_animation(result, n, scale, out, frames_dir, fps, beam_depth: float = 
                             rec.disp[deck[nb]], rec.disp[nid], scale=scale)
                         ax.plot(hx, hy, color="#b2182b", lw=4.0, alpha=0.9)
 
-        tips = [nid for nid in (200, 201) if nid in rec.disp]
+        left_tip_id = 202 if 202 in result.deck_ids else 201
+        tips = [nid for nid in (200, left_tip_id) if nid in rec.disp]
         tiptxt = "  ".join(f"{'右' if t == 200 else '左'}端 dy={rec.disp[t][1] * 1000:.1f}mm" for t in tips)
+        farthest_deformation = _farthest_deck_deformation_text(result, rec)
         if k == len(records) - 1:
             _draw_applied_loads(ax, result, rec, scale, span)
-        ax.set_title(f"正向逐阶段半桥施工：{rec.label}   {tiptxt}")
+        title_parts = [f"正向逐阶段半桥施工：{rec.label}", farthest_deformation]
+        if tiptxt:
+            title_parts.append(tiptxt)
+        ax.set_title("   ".join(title_parts))
         ax.set_xlabel("x [m]")
         ax.set_ylabel(f"y [m]  (位移放大 {scale:g} 倍)")
         ax.set_xlim(xmin, xmax)

@@ -100,6 +100,9 @@ def run(args, tol_rel: float) -> bool:
             "beam_E": args.bridge_defaults["beam_E"],
             "beam_A": args.bridge_defaults["beam_A"],
             "beam_Iz": args.bridge_defaults["beam_Iz"],
+            "right_fix": args.bridge_defaults["right_fix"],
+            "left_span": args.bridge_defaults["left_span"],
+            "dw": args.bridge_defaults["dw"],
         }
         if bridge_type == "single"
         else {}
@@ -179,8 +182,11 @@ def run(args, tol_rel: float) -> bool:
             print(f"  {key:<8} : {res_direct[key]:.6e}  {res_ops[key]:.6e}")
         print(f"  max residual : {residual:.6e}")
     else:
-        print("\n=== tip_free boundary ===")
-        print("  single bridge tip remains free; no closure lock-in residual is imposed.")
+        print("\n=== single-tower final boundary ===")
+        print("  nodes 201/202 use staged vertical lock-in at their current positions;")
+        print("  no normal-bridge closure residual is evaluated.")
+        if args.bridge_defaults["dw"] != 0.0:
+            print("  phase2 applies the configured secondary load to every deck frame.")
 
     closure_ok = bridge_type != "normal" or residual < args.closure_tol
     ok = max_row["rel"] < tol_rel and closure_ok

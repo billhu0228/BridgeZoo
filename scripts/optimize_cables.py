@@ -43,7 +43,7 @@ from scripts.staged_analysis import default_pretension  # noqa: E402
 
 
 def _model_kwargs(args) -> dict:
-    return {
+    kwargs = {
         "anchor_base_height": args.anchor_base,
         "anchor_spacing": args.anchor_spacing,
         "anchor_top_free": args.anchor_free,
@@ -62,6 +62,10 @@ def _model_kwargs(args) -> dict:
         "tower_element_size": args.bridge_defaults["tower_element_size"],
         "tower_axial_rigidity": args.bridge_defaults["tower_axial_rigidity"],
     }
+    if args.bridge_defaults["bridge_type"] == "single":
+        kwargs["right_fix"] = args.bridge_defaults["right_fix"]
+        kwargs["left_span"] = args.bridge_defaults["left_span"]
+    return kwargs
 
 
 def _flatten_stage_pairs(pairs) -> np.ndarray:

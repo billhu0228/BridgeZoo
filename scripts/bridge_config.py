@@ -8,6 +8,7 @@ inline sequence or the usual indented YAML list form.
 from __future__ import annotations
 
 import ast
+import math
 import re
 from pathlib import Path
 
@@ -43,6 +44,7 @@ _REQUIRED_KEYS = {
     "tower_element_size",
     "tower_axial_rigidity",
 }
+_SINGLE_ONLY_KEYS = {"right_fix", "left_span"}
 _KEY_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
@@ -107,7 +109,7 @@ def load_bridge_config(source: str | Path) -> dict[str, object]:
     path = resolve_bridge_config(source)
     config = _parse_flat_yaml(path)
     missing = sorted(_REQUIRED_KEYS - config.keys())
-    unknown = sorted(config.keys() - _REQUIRED_KEYS)
+    unknown = sorted(config.keys() - _REQUIRED_KEYS - _SINGLE_ONLY_KEYS)
     if missing:
         raise ValueError(f"{path}: missing bridge config keys: {missing}")
     if unknown:
@@ -117,7 +119,16 @@ def load_bridge_config(source: str | Path) -> dict[str, object]:
     bridge_type = config["bridge_type"]
     if bridge_type not in {"normal", "single"}:
         raise ValueError(f"{path}: 'bridge_type' must be 'normal' or 'single'")
-    numeric_keys = _REQUIRED_KEYS - {"bridge_type", "n", "tower_stiffness"}
+    if bridge_type == "single":
+        for key in sorted(_SINGLE_ONLY_KEYS):
+            if key not in config:
+                raise ValueError(f"{path}: 'single' bridge config requires {key!r}")
+    else:
+        for key in sorted(_SINGLE_ONLY_KEYS & config.keys()):
+            raise ValueError(f"{path}: {key!r} is only valid for 'single' bridges")
+    numeric_keys = (
+        _REQUIRED_KEYS | (_SINGLE_ONLY_KEYS & config.keys())
+    ) - {"bridge_type", "n", "tower_stiffness"}
     for key in numeric_keys:
         value = config[key]
         if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -143,6 +154,9 @@ def load_bridge_config(source: str | Path) -> dict[str, object]:
         raise ValueError(f"{path}: 'tower_element_size' must be positive")
     if config["tower_axial_rigidity"] <= 0.0:
         raise ValueError(f"{path}: 'tower_axial_rigidity' must be positive")
+    for key in sorted(_SINGLE_ONLY_KEYS & config.keys()):
+        if not math.isfinite(config[key]) or config[key] <= 0.0:
+            raise ValueError(f"{path}: {key!r} must be finite and positive")
     return config
 
 

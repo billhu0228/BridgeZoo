@@ -10,11 +10,13 @@ each side:
     fixed right girder node      : 1
     left cable deck node i       : 100 + i
     left free tip                : 201
+    left auxiliary-span end      : 202
     tower anchor i               : 300 + i
     fixed right cable support i  : 400 + i
     right girder element         : 11
     left girder element i        : 110 + i
     left free-tip element        : 190
+    left auxiliary-span element  : 191
     right cable i                : 1000 + i
     left cable i                 : 2000 + i
     tower base                   : 300
@@ -30,6 +32,7 @@ from collections.abc import Mapping, Sequence
 from bridgezoo.fem.single_staged.plan import (
     BuildStep,
     CompletedState,
+    MemberLoad,
     NewCable,
     NewFrame,
     NewNode,
@@ -279,6 +282,8 @@ def build_staged_cantilever(
     right_start: float = 6.0,
     right_spacing: float = 8.0,
     right_end: float = 4.0,
+    right_fix: float | None = None,
+    left_span: float | None = None,
     # Section and material properties.
     beam_E: float = 20e9,
     beam_A: float = 10.0,
@@ -297,7 +302,9 @@ def build_staged_cantilever(
     """Build the current single-tower staged cable-stayed bridge plan.
 
     The right girder consists of one segment from the tower/deck root to one
-    fully fixed node.  Every right stay terminates at its own fully fixed ground
+    fully fixed node at ``x=right_fix``.  When ``right_fix`` is omitted, it
+    defaults to ``right_start`` for backward compatibility.  Every right stay
+    terminates at its own fully fixed ground
     anchor and therefore does not connect to the girder.  Ground-anchor
     positions retain the shared geometry convention
     ``right_start + (i - 1) * right_spacing``.
@@ -307,11 +314,16 @@ def build_staged_cantilever(
     cable stage activates one new left girder segment together with its left
     stay and the corresponding fixed-anchor right stay.
 
-    The current process ends at ``tip_free``, which tangent-activates only the
-    final free left girder segment.  It adds no closure support and deliberately
-    appends no ``phase2`` step.  ``dw`` and ``right_end`` remain accepted for
-    compatibility with shared configuration/CLI code but are reserved until
-    the post-``tip_free`` single-tower construction process is implemented.
+    The ``tip_free`` step tangent-activates the final free left girder segment.
+    A separate ``left_tip_uy_lock`` stage then locks that farthest-left node at
+    its current vertical position; it does not move the node back to its
+    undeformed position.  When ``left_span`` is provided, a final ``left_span``
+    stage tangent-activates one more girder segment of that x length and locks
+    its new farthest-left node vertically at its birth position.  When ``dw``
+    is nonzero, the final ``phase2`` stage applies that downward distributed
+    load to every active deck frame.  ``right_end`` remains accepted for
+    compatibility with shared configuration/CLI code but is reserved until the
+    later single-tower construction process is implemented.
 
     The tower is a fixed-base Euler-Bernoulli frame. ``tower_stiffness`` gives
     ``(z, EI)`` control points (m, N·m²); EI is linearly interpolated at element
@@ -326,6 +338,12 @@ def build_staged_cantilever(
     assert n_seg < 90, "current numbering convention requires n_seg < 90"
     if not math.isfinite(anchor_top_free) or anchor_top_free < 0.0:
         raise ValueError("anchor_top_free must be finite and nonnegative")
+    if right_fix is None:
+        right_fix = right_start
+    if not math.isfinite(right_fix) or right_fix <= 0.0:
+        raise ValueError("right_fix must be finite and positive")
+    if left_span is not None and (not math.isfinite(left_span) or left_span <= 0.0):
+        raise ValueError("left_span must be finite and positive")
 
     plan = StagedPlan(name=f"single_tower_bridge_N{n_seg}")
 
@@ -403,7 +421,7 @@ def build_staged_cantilever(
         ]
 
         if i == 1:
-            right_girder_node = NewNode(1, right_start, 0.0, attach=_ROOT, role="deck")
+            right_girder_node = NewNode(1, right_fix, 0.0, attach=_ROOT, role="deck")
             right_girder = NewFrame(
                 11,
                 _ROOT,
@@ -458,27 +476,88 @@ def build_staged_cantilever(
         new_frames=[left_tip_frame],
         record=True,
     ))
+    plan.steps.append(BuildStep(
+        label="left_tip_uy_lock",
+        new_supports=[(left_tip.id, False, True, False)],
+        record=True,
+    ))
+    if left_span is not None:
+        left_span_node = NewNode(
+            202,
+            left_tip_x - left_span,
+            0.0,
+            attach=left_tip.id,
+            role="deck",
+        )
+        left_span_frame = NewFrame(
+            191,
+            left_tip.id,
+            left_span_node.id,
+            beam_E,
+            beam_A,
+            beam_Iz,
+            udl_wy=-wg,
+            group="deck",
+        )
+        plan.steps.append(BuildStep(
+            label="left_span",
+            new_nodes=[left_span_node],
+            new_frames=[left_span_frame],
+            new_supports=[(left_span_node.id, False, True, False)],
+            record=True,
+        ))
 
-    plan.completed = _build_completed_state(plan)
+    if dw != 0.0:
+        girder_members = [
+            (frame.id, frame.i, frame.j)
+            for step in plan.steps
+            for frame in step.new_frames
+            if frame.group == "deck"
+        ]
+        plan.steps.append(BuildStep(
+            label="phase2",
+            member_loads=[
+                MemberLoad(member, i, j, -dw)
+                for member, i, j in girder_members
+            ],
+            record=True,
+        ))
+
+    plan.completed = _build_completed_state(plan, dw=dw)
 
     return plan
 
 
-def _build_completed_state(plan: StagedPlan) -> CompletedState:
+def _build_completed_state(plan: StagedPlan, dw: float = 0.0) -> CompletedState:
     nodes = list(plan.init_nodes)
     frames = []
     cables = []
+    supports = list(plan.supports)
     nodal_loads = []
     for step in plan.steps:
         nodes.extend(step.new_nodes)
-        frames.extend(step.new_frames)
+        for frame in step.new_frames:
+            if dw != 0.0 and frame.group == "deck":
+                frames.append(NewFrame(
+                    frame.id,
+                    frame.i,
+                    frame.j,
+                    frame.E,
+                    frame.A,
+                    frame.I,
+                    udl_wy=frame.udl_wy - dw,
+                    group=frame.group,
+                ))
+            else:
+                frames.append(frame)
         cables.extend(step.new_cables)
+        supports.extend(step.new_supports)
         nodal_loads.extend(step.nodal_loads)
 
     return CompletedState(
         nodes=nodes,
         frames=frames,
         cables=cables,
-        supports=list(plan.supports),
+        supports=supports,
         nodal_loads=nodal_loads,
     )
