@@ -78,6 +78,7 @@ def test_best_design_payload_records_canonical_bridge_yaml():
         objective=1.0,
         components=SimpleNamespace(
             shape=0.1,
+            tower_displacement=0.5,
             total_strands=0.2,
             stress_uniform=0.3,
             stress_violation=0.4,
@@ -85,6 +86,7 @@ def test_best_design_payload_records_canonical_bridge_yaml():
         metrics=SimpleNamespace(
             shape_rmse_m=0.001,
             shape_max_abs_m=0.002,
+            tower_top_dx_m=0.003,
             total_strands=10,
             stress_mean_mpa=500.0,
             stress_std_mpa=1.0,
@@ -103,6 +105,8 @@ def test_best_design_payload_records_canonical_bridge_yaml():
     payload = optimize_cables._evaluation_payload(ev, bridge_yaml)
 
     assert payload["bridge_yaml"] == "scripts/bridges/model_defaults.yaml"
+    assert payload["components"]["tower_displacement"] == pytest.approx(0.5)
+    assert payload["metrics"]["tower_top_dx_mm"] == pytest.approx(3.0)
 
 
 def test_staged_analysis_restores_bridge_yaml_from_design(tmp_path: Path):

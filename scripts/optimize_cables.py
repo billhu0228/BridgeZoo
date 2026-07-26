@@ -58,6 +58,7 @@ _HISTORY_HEADER = [
     "objective",
     "shape_rmse_mm",
     "shape_max_abs_mm",
+    "tower_top_dx_mm",
     "total_strands",
     "stress_mean_mpa",
     "stress_std_mpa",
@@ -614,6 +615,7 @@ def _evaluation_payload(
         "objective": ev.objective,
         "components": {
             "shape": ev.components.shape,
+            "tower_displacement": ev.components.tower_displacement,
             "total_strands": ev.components.total_strands,
             "stress_uniform": ev.components.stress_uniform,
             "stress_violation": ev.components.stress_violation,
@@ -621,6 +623,7 @@ def _evaluation_payload(
         "metrics": {
             "shape_rmse_mm": ev.metrics.shape_rmse_m * 1000.0,
             "shape_max_abs_mm": ev.metrics.shape_max_abs_m * 1000.0,
+            "tower_top_dx_mm": ev.metrics.tower_top_dx_m * 1000.0,
             "total_strands": ev.metrics.total_strands,
             "stress_mean_mpa": ev.metrics.stress_mean_mpa,
             "stress_std_mpa": ev.metrics.stress_std_mpa,
@@ -703,6 +706,7 @@ def _write_outputs(
                 ev.objective,
                 ev.metrics.shape_rmse_m * 1000.0,
                 ev.metrics.shape_max_abs_m * 1000.0,
+                ev.metrics.tower_top_dx_m * 1000.0,
                 ev.metrics.total_strands,
                 ev.metrics.stress_mean_mpa,
                 ev.metrics.stress_std_mpa,
@@ -716,6 +720,7 @@ def _write_outputs(
         f"objective: {best.objective:.6g}",
         f"shape rmse: {best.metrics.shape_rmse_m * 1000.0:.6f} mm",
         f"shape max abs: {best.metrics.shape_max_abs_m * 1000.0:.6f} mm",
+        f"tower top dx: {best.metrics.tower_top_dx_m * 1000.0:.6f} mm (target 0 mm)",
         f"total strands: {best.metrics.total_strands}",
         "final strand counts (left to right): "
         + ", ".join(str(value) for value in _left_to_right_strand_counts(best)),
@@ -776,6 +781,7 @@ def run(args):
             shape_scale_m=args.shape_scale_mm / 1000.0,
             stress_scale_mpa=args.stress_scale,
             strand_scale=args.strand_scale,
+            tower_displacement=args.weight_tower_displacement,
         ),
         backend="direct",
         model_family=model_family_for_bridge_type(args.bridge_defaults["bridge_type"]),
@@ -877,6 +883,7 @@ def run(args):
     print(f"  model family: {problem.model_family}")
     print(f"  objective: {result.best.objective:.6g}")
     print(f"  shape rmse: {result.best.metrics.shape_rmse_m * 1000.0:.6f} mm")
+    print(f"  tower top dx: {result.best.metrics.tower_top_dx_m * 1000.0:.6f} mm (target 0 mm)")
     print(f"  total strands: {result.best.metrics.total_strands}")
     print(
         "  stress MPa: "
@@ -903,6 +910,7 @@ def run(args):
         )
         print("OpenSees verification")
         print(f"  shape rmse: {verify.metrics.shape_rmse_m * 1000.0:.6f} mm")
+        print(f"  tower top dx: {verify.metrics.tower_top_dx_m * 1000.0:.6f} mm (target 0 mm)")
         print(
             "  stress MPa: "
             f"mean={verify.metrics.stress_mean_mpa:.3f}, "
@@ -955,12 +963,13 @@ def build_parser(bridge_defaults: dict[str, object]) -> argparse.ArgumentParser:
 
     p.add_argument("--strand-min", type=int, default=5)
     p.add_argument("--strand-max", type=int, default=200)
-    p.add_argument("--initial-strands", type=int, default=12)
+    p.add_argument("--initial-strands", type=int, default=20)
     p.add_argument("--stress-lower", type=float, default=400.0)
     p.add_argument("--stress-upper", type=float, default=600.0)
     p.add_argument("--tension-bound-stress", type=float, default=1600.0)
 
     p.add_argument("--weight-shape", type=float, default=1.0)
+    p.add_argument("--weight-tower-displacement", type=float, default=1.0)
     p.add_argument("--weight-strands", type=float, default=0.02)
     p.add_argument("--weight-stress-uniform", type=float, default=0.2)
     p.add_argument("--weight-stress-violation", type=float, default=100.0)

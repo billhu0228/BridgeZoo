@@ -15,10 +15,17 @@ class ObjectiveBreakdown:
     total_strands: float
     stress_uniform: float
     stress_violation: float
+    tower_displacement: float = 0.0
 
     @property
     def total(self) -> float:
-        return self.shape + self.total_strands + self.stress_uniform + self.stress_violation
+        return (
+            self.shape
+            + self.total_strands
+            + self.stress_uniform
+            + self.stress_violation
+            + self.tower_displacement
+        )
 
 
 def stress_violation_mpa(stress_mpa: np.ndarray, bounds: CableBounds) -> np.ndarray:
@@ -34,14 +41,17 @@ def objective_breakdown(
     stress_std_mpa: float,
     stress_violation_rms_mpa: float,
     weights: ObjectiveWeights,
+    tower_top_dx_m: float = 0.0,
 ) -> ObjectiveBreakdown:
     shape = weights.shape * (shape_rmse_m / weights.shape_scale_m) ** 2
     strands = weights.total_strands * (total_strands / weights.strand_scale)
     uniform = weights.stress_uniform * (stress_std_mpa / weights.stress_scale_mpa) ** 2
     violation = weights.stress_violation * (stress_violation_rms_mpa / weights.stress_scale_mpa) ** 2
+    tower = weights.tower_displacement * (tower_top_dx_m / weights.shape_scale_m) ** 2
     return ObjectiveBreakdown(
         shape=float(shape),
         total_strands=float(strands),
         stress_uniform=float(uniform),
         stress_violation=float(violation),
+        tower_displacement=float(tower),
     )

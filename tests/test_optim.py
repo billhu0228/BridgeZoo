@@ -286,10 +286,11 @@ def test_default_bounds_and_continuous_method():
     # 用户决定:索股默认下限 1;连续层默认走线性模型路径。
     assert CableBounds().strand_min == 1
     assert ContinuousOptions().method == "linear"
+    assert ObjectiveWeights().tower_displacement == pytest.approx(1.0)
 
 
 def test_affine_model_matches_fem():
-    """线性后端下仿射模型 σ=σ0+M·T、err=err0+D·T 应逐项精确(数值噪声内)。"""
+    """线性后端下应力、线形和塔顶水平位移的仿射模型均应精确。"""
     problem = _problem()
     evaluator = CableDesignEvaluator(problem)
     strands = np.array([20, 18, 22, 16])
@@ -297,12 +298,21 @@ def test_affine_model_matches_fem():
 
     rng = np.random.default_rng(42)
     tension = rng.uniform(0.5e6, 3.0e6, size=4)
-    ev = evaluator.evaluate(strands, tension)
+    ev = evaluator.evaluate(strands, tension, keep_result=True)
     sigma_fem = np.asarray([ev.cable_stress_mpa[cid] for cid in model.cable_ids])
     err_fem = np.asarray([ev.deck_errors_m[nid] for nid in model.deck_nodes])
     # 模型对线性求解器精确,容差只覆盖浮点累计噪声(应力 ~1e3 MPa、线形 ~0.1 m 量级)。
     assert float(np.max(np.abs(model.stress_mpa(tension) - sigma_fem))) < 1e-6
     assert float(np.max(np.abs(model.deck_err_m(tension) - err_fem))) < 1e-9
+    assert model.tower_dx_m(tension) == pytest.approx(ev.metrics.tower_top_dx_m, abs=1e-9)
+    assert ev.components.tower_displacement == pytest.approx(
+        problem.weights.tower_displacement
+        * (ev.metrics.tower_top_dx_m / problem.weights.shape_scale_m) ** 2
+    )
+
+    final = ev.staged_result.records[-1]
+    tower_top = max(ev.staged_result.tower_ids, key=lambda nid: ev.staged_result.coords[nid][1])
+    assert ev.metrics.tower_top_dx_m == pytest.approx(final.disp[tower_top][0], abs=1e-12)
 
 
 def test_single_affine_model_matches_full_staged_fem():
@@ -319,8 +329,29 @@ def test_single_affine_model_matches_full_staged_fem():
     err_fem = np.asarray([evaluation.deck_errors_m[nid] for nid in model.deck_nodes])
     assert float(np.max(np.abs(model.stress_mpa(tension) - sigma_fem))) < 1e-6
     assert float(np.max(np.abs(model.deck_err_m(tension) - err_fem))) < 1e-9
+    assert model.tower_dx_m(tension) == pytest.approx(
+        evaluation.metrics.tower_top_dx_m, abs=1e-9
+    )
     assert 202 in model.deck_nodes
     assert evaluation.staged_result.records[-1].label == "phase2"
+
+
+def test_linear_model_objective_includes_tower_displacement_component():
+    """线性内层使用的代理目标必须与真实评估的全部连续项一致。"""
+
+    problem = _problem()
+    evaluator = CableDesignEvaluator(problem)
+    strands = np.array([20, 18, 22, 16])
+    tension = np.array([1.1e6, 1.7e6, 1.3e6, 1.9e6])
+    model = build_affine_model(evaluator, strands)
+    optimizer = LinearTensionOptimizer(evaluator)
+
+    model_value, _ = optimizer._model_objective_and_grad(model)(tension)
+    evaluation = evaluator.evaluate(strands, tension)
+    expected = evaluation.objective - evaluation.components.total_strands
+
+    assert evaluation.components.tower_displacement > 0.0
+    assert model_value == pytest.approx(expected, rel=1e-9, abs=1e-9)
 
 
 def test_single_cli_runs_shared_optimizer_and_records_model_family(tmp_path):
@@ -486,7 +517,7 @@ def test_linear_optimizer_matches_exact_lsq_on_shape_only():
         ),
         weights=ObjectiveWeights(
             shape=1.0, total_strands=0.0, stress_uniform=0.0, stress_violation=0.0,
-            shape_scale_m=0.1,
+            shape_scale_m=0.1, tower_displacement=0.0,
         ),
     )
     evaluator = CableDesignEvaluator(problem)
