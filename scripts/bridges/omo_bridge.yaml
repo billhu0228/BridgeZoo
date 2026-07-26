@@ -15,8 +15,8 @@ left_span: 25.0 # single 独有参数，左侧辅助跨径
 wg: 3.2e5
 dw: 4.0e5
 beam_E: 200.0e9
-beam_A: 2.3
-beam_Iz: 2.0
+beam_A: 0.9437
+beam_Iz: 1.1066
 
 # Tower z-EI curve: z [m], flexural rigidity EI [N*m^2].
 tower_stiffness:

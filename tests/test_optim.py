@@ -1,3 +1,5 @@
+import json
+
 import numpy as np
 import pytest
 
@@ -19,6 +21,7 @@ from bridgezoo.optim import (
     build_affine_model,
 )
 from bridgezoo.optim.objectives import ObjectiveBreakdown
+from scripts import optimize_cables
 
 
 def _problem(n=2, bounds=None):
@@ -40,6 +43,35 @@ def _problem(n=2, bounds=None):
     )
 
 
+def _single_problem(n=2):
+    return CableOptimizationProblem(
+        n_seg=n,
+        model_kwargs={
+            "anchor_base_height": 20.0,
+            "anchor_spacing": 3.0,
+            "anchor_top_free": 5.0,
+            "left_start": 6.0,
+            "left_spacing": 8.0,
+            "left_end": 4.0,
+            "right_start": 8.0,
+            "right_spacing": 2.0,
+            "right_end": 4.0,
+            "right_fix": 3.0,
+            "left_span": 5.0,
+            "wg": 5.0e4,
+            "dw": 2.0e4,
+        },
+        bounds=CableBounds(
+            strand_min=8,
+            strand_max=40,
+            stress_lower_mpa=400.0,
+            stress_upper_mpa=600.0,
+        ),
+        weights=ObjectiveWeights(stress_violation=100.0),
+        model_family="single_staged",
+    )
+
+
 def _fake_evaluation(problem, strands, stresses_mpa) -> EvaluationResult:
     """构造仅含 resize 所需字段的合成评价结果(其余字段填占位值)。"""
     layout = CableLayout(problem.n_seg)
@@ -51,6 +83,23 @@ def _fake_evaluation(problem, strands, stresses_mpa) -> EvaluationResult:
         cable_ids=layout.cable_ids,
         cable_stress_mpa={cid: float(s) for cid, s in zip(layout.cable_ids, stresses_mpa)},
     )
+
+
+@pytest.mark.parametrize("model_family", ["staged", "single_staged"])
+def test_summary_lists_final_strand_counts_from_left_to_right(tmp_path, model_family):
+    problem = _problem()
+    best = _fake_evaluation(problem, [20, 18, 22, 16], [500.0] * 4)
+
+    optimize_cables._write_outputs(
+        tmp_path,
+        best,
+        [best],
+        bridge_yaml="bridge.yaml",
+        model_family=model_family,
+    )
+
+    summary = (tmp_path / "summary.txt").read_text(encoding="utf-8")
+    assert "final strand counts (left to right): 16, 18, 20, 22\n" in summary
 
 
 def test_cable_design_evaluator_reports_metrics():
@@ -143,6 +192,48 @@ def test_affine_model_matches_fem():
     # 模型对线性求解器精确,容差只覆盖浮点累计噪声(应力 ~1e3 MPa、线形 ~0.1 m 量级)。
     assert float(np.max(np.abs(model.stress_mpa(tension) - sigma_fem))) < 1e-6
     assert float(np.max(np.abs(model.deck_err_m(tension) - err_fem))) < 1e-9
+
+
+def test_single_affine_model_matches_full_staged_fem():
+    """Single 的锁定、辅助跨与 phase2 仍须保持同一精确仿射优化模型。"""
+
+    problem = _single_problem()
+    evaluator = CableDesignEvaluator(problem)
+    strands = np.array([20, 18, 22, 16])
+    model = build_affine_model(evaluator, strands)
+    tension = np.array([1.1e6, 1.7e6, 1.3e6, 1.9e6])
+    evaluation = evaluator.evaluate(strands, tension, keep_result=True)
+
+    sigma_fem = np.asarray([evaluation.cable_stress_mpa[cid] for cid in model.cable_ids])
+    err_fem = np.asarray([evaluation.deck_errors_m[nid] for nid in model.deck_nodes])
+    assert float(np.max(np.abs(model.stress_mpa(tension) - sigma_fem))) < 1e-6
+    assert float(np.max(np.abs(model.deck_err_m(tension) - err_fem))) < 1e-9
+    assert 202 in model.deck_nodes
+    assert evaluation.staged_result.records[-1].label == "phase2"
+
+
+def test_single_cli_runs_shared_optimizer_and_records_model_family(tmp_path):
+    pytest.importorskip("scipy")
+    out = tmp_path / "single_opt"
+    args = optimize_cables.parse_args([
+        "--bridge", "omo",
+        "--n", "2",
+        "--outer-iterations", "0",
+        "--random-trials", "0",
+        "--quiet",
+        "--out", str(out),
+    ])
+
+    result = optimize_cables.run(args)
+    payload = json.loads((out / "best_design.json").read_text(encoding="utf-8"))
+
+    assert np.isfinite(result.best.objective)
+    assert result.best.components.total == pytest.approx(result.best.objective)
+    assert result.best.staged_result.records[-1].label == "phase2"
+    assert 202 in result.best.deck_errors_m
+    assert payload["model_family"] == "single_staged"
+    assert payload["bridge_yaml"] == "scripts/bridges/omo_bridge.yaml"
+    assert "model family: single_staged" in (out / "summary.txt").read_text(encoding="utf-8")
 
 
 def test_linear_optimizer_finds_feasible_band_when_reachable():

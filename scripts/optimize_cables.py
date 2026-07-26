@@ -100,8 +100,12 @@ def _bridge_yaml_reference(source: str | Path) -> str:
         return str(path)
 
 
-def _evaluation_payload(ev, bridge_yaml: str) -> dict:
-    return {
+def _evaluation_payload(
+    ev,
+    bridge_yaml: str,
+    model_family: str | None = None,
+) -> dict:
+    payload = {
         "bridge_yaml": bridge_yaml,
         "objective": ev.objective,
         "components": {
@@ -134,6 +138,9 @@ def _evaluation_payload(ev, bridge_yaml: str) -> dict:
         ],
         "deck_errors_mm": {str(node): err * 1000.0 for node, err in ev.deck_errors_m.items()},
     }
+    if model_family is not None:
+        payload["model_family"] = model_family
+    return payload
 
 
 def _band_verdict_line(best, result, stress_lower: float, stress_upper: float) -> str:
@@ -151,16 +158,28 @@ def _band_verdict_line(best, result, stress_lower: float, stress_upper: float) -
     )
 
 
+def _left_to_right_strand_counts(best) -> list[int]:
+    """Return strand counts in physical deck order: left tip to right tip."""
+
+    strands = np.asarray(best.design.strands, dtype=int)
+    return [int(value) for value in np.concatenate((strands[1::2][::-1], strands[0::2]))]
+
+
 def _write_outputs(
     out_dir: Path,
     best,
     history,
     bridge_yaml: str,
+    model_family: str,
     band_line: str | None = None,
 ) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "best_design.json").write_text(
-        json.dumps(_evaluation_payload(best, bridge_yaml), indent=2, ensure_ascii=False),
+        json.dumps(
+            _evaluation_payload(best, bridge_yaml, model_family=model_family),
+            indent=2,
+            ensure_ascii=False,
+        ),
         encoding="utf-8",
     )
 
@@ -193,10 +212,13 @@ def _write_outputs(
             ])
 
     summary = [
+        f"model family: {model_family}",
         f"objective: {best.objective:.6g}",
         f"shape rmse: {best.metrics.shape_rmse_m * 1000.0:.6f} mm",
         f"shape max abs: {best.metrics.shape_max_abs_m * 1000.0:.6f} mm",
         f"total strands: {best.metrics.total_strands}",
+        "final strand counts (left to right): "
+        + ", ".join(str(value) for value in _left_to_right_strand_counts(best)),
         (
             "stress MPa: "
             f"mean={best.metrics.stress_mean_mpa:.3f}, "
@@ -269,10 +291,12 @@ def run(args):
         result.best,
         result.history,
         bridge_yaml=_bridge_yaml_reference(args.bridge),
+        model_family=problem.model_family,
         band_line=band_line,
     )
 
     print("Cable optimization complete")
+    print(f"  model family: {problem.model_family}")
     print(f"  objective: {result.best.objective:.6g}")
     print(f"  shape rmse: {result.best.metrics.shape_rmse_m * 1000.0:.6f} mm")
     print(f"  total strands: {result.best.metrics.total_strands}")
@@ -358,7 +382,7 @@ def build_parser(bridge_defaults: dict[str, object]) -> argparse.ArgumentParser:
     p.add_argument("--continuous-maxiter", type=int, default=80)
     p.add_argument("--continuous-ftol", type=float, default=1.0e-7)
     p.add_argument("--progress-every", type=int, default=10, help="Print every N SLSQP objective evaluations.")
-    p.add_argument("--outer-iterations", type=int, default=4)
+    p.add_argument("--outer-iterations", type=int, default=8)
     p.add_argument("--coordinate-step", type=int, default=1)
     p.add_argument("--random-trials", type=int, default=0)
     p.add_argument(
