@@ -266,6 +266,7 @@ class LinearTensionOptimizer:
         self._emit(
             "    linear QP done: "
             f"success={bool(res.success)} objective={evaluation.objective:.6g} "
+            f"shape_rmse={evaluation.metrics.shape_rmse_m * 1000.0:.3f} mm "
             f"stress=[{evaluation.metrics.stress_min_mpa:.1f}, {evaluation.metrics.stress_max_mpa:.1f}] MPa "
             f"stress_violation_rms={evaluation.metrics.stress_violation_rms_mpa:.3f} MPa "
             f"model_mismatch={mismatch:.2e} MPa"
