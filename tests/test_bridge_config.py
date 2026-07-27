@@ -79,6 +79,7 @@ def test_best_design_payload_records_canonical_bridge_yaml():
         components=SimpleNamespace(
             shape=0.1,
             tower_displacement=0.5,
+            tower_anchor_displacement=0.6,
             total_strands=0.2,
             stress_uniform=0.3,
             stress_violation=0.4,
@@ -87,6 +88,7 @@ def test_best_design_payload_records_canonical_bridge_yaml():
             shape_rmse_m=0.001,
             shape_max_abs_m=0.002,
             tower_top_dx_m=0.003,
+            tower_anchor_dx_rmse_m=0.004,
             total_strands=10,
             stress_mean_mpa=500.0,
             stress_std_mpa=1.0,
@@ -99,6 +101,7 @@ def test_best_design_payload_records_canonical_bridge_yaml():
         design=SimpleNamespace(strands=[10], pretension=[1.0e6]),
         cable_stress_mpa={1001: 500.0},
         deck_errors_m={},
+        tower_anchor_dx_m={301: 0.004},
     )
     bridge_yaml = optimize_cables._bridge_yaml_reference("model")
 
@@ -106,7 +109,10 @@ def test_best_design_payload_records_canonical_bridge_yaml():
 
     assert payload["bridge_yaml"] == "scripts/bridges/model_defaults.yaml"
     assert payload["components"]["tower_displacement"] == pytest.approx(0.5)
+    assert payload["components"]["tower_anchor_displacement"] == pytest.approx(0.6)
     assert payload["metrics"]["tower_top_dx_mm"] == pytest.approx(3.0)
+    assert payload["metrics"]["tower_anchor_dx_rmse_mm"] == pytest.approx(4.0)
+    assert payload["tower_anchor_dx_mm"]["301"] == pytest.approx(4.0)
 
 
 def test_staged_analysis_restores_bridge_yaml_from_design(tmp_path: Path):

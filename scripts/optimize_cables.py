@@ -59,6 +59,7 @@ _HISTORY_HEADER = [
     "shape_rmse_mm",
     "shape_max_abs_mm",
     "tower_top_dx_mm",
+    "tower_anchor_dx_rmse_mm",
     "total_strands",
     "stress_mean_mpa",
     "stress_std_mpa",
@@ -616,6 +617,7 @@ def _evaluation_payload(
         "components": {
             "shape": ev.components.shape,
             "tower_displacement": ev.components.tower_displacement,
+            "tower_anchor_displacement": ev.components.tower_anchor_displacement,
             "total_strands": ev.components.total_strands,
             "stress_uniform": ev.components.stress_uniform,
             "stress_violation": ev.components.stress_violation,
@@ -624,6 +626,7 @@ def _evaluation_payload(
             "shape_rmse_mm": ev.metrics.shape_rmse_m * 1000.0,
             "shape_max_abs_mm": ev.metrics.shape_max_abs_m * 1000.0,
             "tower_top_dx_mm": ev.metrics.tower_top_dx_m * 1000.0,
+            "tower_anchor_dx_rmse_mm": ev.metrics.tower_anchor_dx_rmse_m * 1000.0,
             "total_strands": ev.metrics.total_strands,
             "stress_mean_mpa": ev.metrics.stress_mean_mpa,
             "stress_std_mpa": ev.metrics.stress_std_mpa,
@@ -644,6 +647,9 @@ def _evaluation_payload(
             for idx, cid in enumerate(ev.cable_ids)
         ],
         "deck_errors_mm": {str(node): err * 1000.0 for node, err in ev.deck_errors_m.items()},
+        "tower_anchor_dx_mm": {
+            str(node): dx * 1000.0 for node, dx in ev.tower_anchor_dx_m.items()
+        },
     }
     if model_family is not None:
         payload["model_family"] = model_family
@@ -707,6 +713,7 @@ def _write_outputs(
                 ev.metrics.shape_rmse_m * 1000.0,
                 ev.metrics.shape_max_abs_m * 1000.0,
                 ev.metrics.tower_top_dx_m * 1000.0,
+                ev.metrics.tower_anchor_dx_rmse_m * 1000.0,
                 ev.metrics.total_strands,
                 ev.metrics.stress_mean_mpa,
                 ev.metrics.stress_std_mpa,
@@ -721,6 +728,10 @@ def _write_outputs(
         f"shape rmse: {best.metrics.shape_rmse_m * 1000.0:.6f} mm",
         f"shape max abs: {best.metrics.shape_max_abs_m * 1000.0:.6f} mm",
         f"tower top dx: {best.metrics.tower_top_dx_m * 1000.0:.6f} mm (target 0 mm)",
+        (
+            "tower anchor dx rmse: "
+            f"{best.metrics.tower_anchor_dx_rmse_m * 1000.0:.6f} mm (target 0 mm)"
+        ),
         f"total strands: {best.metrics.total_strands}",
         "final strand counts (left to right): "
         + ", ".join(str(value) for value in _left_to_right_strand_counts(best)),
@@ -782,6 +793,7 @@ def run(args):
             stress_scale_mpa=args.stress_scale,
             strand_scale=args.strand_scale,
             tower_displacement=args.weight_tower_displacement,
+            tower_anchor_displacement=args.weight_tower_anchor_displacement,
         ),
         backend="direct",
         model_family=model_family_for_bridge_type(args.bridge_defaults["bridge_type"]),
@@ -884,6 +896,10 @@ def run(args):
     print(f"  objective: {result.best.objective:.6g}")
     print(f"  shape rmse: {result.best.metrics.shape_rmse_m * 1000.0:.6f} mm")
     print(f"  tower top dx: {result.best.metrics.tower_top_dx_m * 1000.0:.6f} mm (target 0 mm)")
+    print(
+        "  tower anchor dx rmse: "
+        f"{result.best.metrics.tower_anchor_dx_rmse_m * 1000.0:.6f} mm (target 0 mm)"
+    )
     print(f"  total strands: {result.best.metrics.total_strands}")
     print(
         "  stress MPa: "
@@ -911,6 +927,10 @@ def run(args):
         print("OpenSees verification")
         print(f"  shape rmse: {verify.metrics.shape_rmse_m * 1000.0:.6f} mm")
         print(f"  tower top dx: {verify.metrics.tower_top_dx_m * 1000.0:.6f} mm (target 0 mm)")
+        print(
+            "  tower anchor dx rmse: "
+            f"{verify.metrics.tower_anchor_dx_rmse_m * 1000.0:.6f} mm (target 0 mm)"
+        )
         print(
             "  stress MPa: "
             f"mean={verify.metrics.stress_mean_mpa:.3f}, "
@@ -970,6 +990,7 @@ def build_parser(bridge_defaults: dict[str, object]) -> argparse.ArgumentParser:
 
     p.add_argument("--weight-shape", type=float, default=1.0)
     p.add_argument("--weight-tower-displacement", type=float, default=1.0)
+    p.add_argument("--weight-tower-anchor-displacement", type=float, default=1.0)
     p.add_argument("--weight-strands", type=float, default=0.02)
     p.add_argument("--weight-stress-uniform", type=float, default=0.2)
     p.add_argument("--weight-stress-violation", type=float, default=100.0)

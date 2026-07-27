@@ -1,5 +1,6 @@
 import io
 import json
+from dataclasses import replace
 
 import numpy as np
 import pytest
@@ -223,6 +224,11 @@ def test_cable_design_evaluator_reports_metrics():
     assert result.metrics.total_strands == 76
     assert len(result.cable_stress_mpa) == 4
     assert len(result.deck_errors_m) > 0
+    assert len(result.tower_anchor_dx_m) == problem.n_seg
+    anchor_dx = np.asarray(list(result.tower_anchor_dx_m.values()))
+    assert result.metrics.tower_anchor_dx_rmse_m == pytest.approx(
+        float(np.sqrt(np.mean(anchor_dx * anchor_dx)))
+    )
 
 
 def test_cable_design_evaluator_rejects_invalid_variables():
@@ -287,10 +293,11 @@ def test_default_bounds_and_continuous_method():
     assert CableBounds().strand_min == 1
     assert ContinuousOptions().method == "linear"
     assert ObjectiveWeights().tower_displacement == pytest.approx(1.0)
+    assert ObjectiveWeights().tower_anchor_displacement == pytest.approx(1.0)
 
 
 def test_affine_model_matches_fem():
-    """线性后端下应力、线形和塔顶水平位移的仿射模型均应精确。"""
+    """线性后端下应力、线形、塔顶和全部塔锚水平位移的仿射模型均应精确。"""
     problem = _problem()
     evaluator = CableDesignEvaluator(problem)
     strands = np.array([20, 18, 22, 16])
@@ -305,14 +312,25 @@ def test_affine_model_matches_fem():
     assert float(np.max(np.abs(model.stress_mpa(tension) - sigma_fem))) < 1e-6
     assert float(np.max(np.abs(model.deck_err_m(tension) - err_fem))) < 1e-9
     assert model.tower_dx_m(tension) == pytest.approx(ev.metrics.tower_top_dx_m, abs=1e-9)
+    anchor_dx_fem = np.asarray([ev.tower_anchor_dx_m[nid] for nid in model.anchor_nodes])
+    assert float(np.max(np.abs(model.anchor_dx_m(tension) - anchor_dx_fem))) < 1e-9
     assert ev.components.tower_displacement == pytest.approx(
         problem.weights.tower_displacement
         * (ev.metrics.tower_top_dx_m / problem.weights.shape_scale_m) ** 2
+    )
+    assert ev.components.tower_anchor_displacement == pytest.approx(
+        problem.weights.tower_anchor_displacement
+        * (ev.metrics.tower_anchor_dx_rmse_m / problem.weights.shape_scale_m) ** 2
     )
 
     final = ev.staged_result.records[-1]
     tower_top = max(ev.staged_result.tower_ids, key=lambda nid: ev.staged_result.coords[nid][1])
     assert ev.metrics.tower_top_dx_m == pytest.approx(final.disp[tower_top][0], abs=1e-12)
+    assert set(model.anchor_nodes) == set(ev.staged_result.anchor_ids)
+    for anchor_id in model.anchor_nodes:
+        assert ev.tower_anchor_dx_m[anchor_id] == pytest.approx(
+            final.disp[anchor_id][0], abs=1e-12
+        )
 
 
 def test_single_affine_model_matches_full_staged_fem():
@@ -332,11 +350,15 @@ def test_single_affine_model_matches_full_staged_fem():
     assert model.tower_dx_m(tension) == pytest.approx(
         evaluation.metrics.tower_top_dx_m, abs=1e-9
     )
+    anchor_dx_fem = np.asarray(
+        [evaluation.tower_anchor_dx_m[nid] for nid in model.anchor_nodes]
+    )
+    assert float(np.max(np.abs(model.anchor_dx_m(tension) - anchor_dx_fem))) < 1e-9
     assert 202 in model.deck_nodes
     assert evaluation.staged_result.records[-1].label == "phase2"
 
 
-def test_linear_model_objective_includes_tower_displacement_component():
+def test_linear_model_objective_includes_all_tower_displacement_components():
     """线性内层使用的代理目标必须与真实评估的全部连续项一致。"""
 
     problem = _problem()
@@ -351,7 +373,44 @@ def test_linear_model_objective_includes_tower_displacement_component():
     expected = evaluation.objective - evaluation.components.total_strands
 
     assert evaluation.components.tower_displacement > 0.0
+    assert evaluation.components.tower_anchor_displacement > 0.0
     assert model_value == pytest.approx(expected, rel=1e-9, abs=1e-9)
+
+
+def test_tower_anchor_objective_gradient_matches_finite_difference():
+    """塔锚位移 RMSE² 项的解析梯度必须与数值差分一致。"""
+
+    base_problem = _problem()
+    problem = replace(
+        base_problem,
+        weights=ObjectiveWeights(
+            shape=0.0,
+            total_strands=0.0,
+            stress_uniform=0.0,
+            stress_violation=0.0,
+            tower_displacement=0.0,
+            tower_anchor_displacement=1.0,
+            shape_scale_m=0.01,
+        ),
+    )
+    evaluator = CableDesignEvaluator(problem)
+    strands = np.array([20, 18, 22, 16])
+    tension = np.array([1.1e6, 1.7e6, 1.3e6, 1.9e6])
+    objective = LinearTensionOptimizer(evaluator)._model_objective_and_grad(
+        build_affine_model(evaluator, strands)
+    )
+
+    _, analytic = objective(tension)
+    step_n = 100.0
+    numerical = np.zeros_like(tension)
+    for index in range(tension.size):
+        delta = np.zeros_like(tension)
+        delta[index] = step_n
+        numerical[index] = (
+            objective(tension + delta)[0] - objective(tension - delta)[0]
+        ) / (2.0 * step_n)
+
+    assert np.allclose(analytic, numerical, rtol=1.0e-6, atol=1.0e-12)
 
 
 def test_single_cli_runs_shared_optimizer_and_records_model_family(tmp_path):
@@ -375,6 +434,11 @@ def test_single_cli_runs_shared_optimizer_and_records_model_family(tmp_path):
     assert 202 in result.best.deck_errors_m
     assert payload["model_family"] == "single_staged"
     assert payload["bridge_yaml"] == "scripts/bridges/omo_bridge.yaml"
+    assert payload["problem"]["weights"]["tower_anchor_displacement"] == pytest.approx(1.0)
+    assert "tower_anchor_displacement" in payload["components"]
+    assert "tower_anchor_dx_rmse_mm" in payload["metrics"]
+    history_header = (out / "history.csv").read_text(encoding="utf-8").splitlines()[0]
+    assert "tower_anchor_dx_rmse_mm" in history_header
     assert "model family: single_staged" in (out / "summary.txt").read_text(encoding="utf-8")
 
 
@@ -517,7 +581,7 @@ def test_linear_optimizer_matches_exact_lsq_on_shape_only():
         ),
         weights=ObjectiveWeights(
             shape=1.0, total_strands=0.0, stress_uniform=0.0, stress_violation=0.0,
-            shape_scale_m=0.1, tower_displacement=0.0,
+            shape_scale_m=0.1, tower_displacement=0.0, tower_anchor_displacement=0.0,
         ),
     )
     evaluator = CableDesignEvaluator(problem)

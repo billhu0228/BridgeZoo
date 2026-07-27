@@ -11,6 +11,14 @@ from bridgezoo.optim.objectives import ObjectiveBreakdown, objective_breakdown, 
 from bridgezoo.optim.problem import CableOptimizationProblem
 from bridgezoo.optim.variables import CableLayout, validate_strand_vector, validate_tension_vector
 
+_AffineCase = tuple[dict[int, float], dict[int, float], float]
+_AffineCaseWithAnchors = tuple[
+    dict[int, float],
+    dict[int, float],
+    float,
+    dict[int, float],
+]
+
 
 @dataclass(frozen=True)
 class CableDesign:
@@ -30,6 +38,7 @@ class DesignMetrics:
     stress_violation_rms_mpa: float
     stress_violation_max_mpa: float
     tower_top_dx_m: float = 0.0
+    tower_anchor_dx_rmse_m: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -42,6 +51,7 @@ class EvaluationResult:
     deck_errors_m: dict[int, float] = field(default_factory=dict)
     cable_stress_mpa: dict[int, float] = field(default_factory=dict)
     staged_result: StagedResult | None = None
+    tower_anchor_dx_m: dict[int, float] = field(default_factory=dict)
 
 
 class CableDesignEvaluator:
@@ -74,12 +84,13 @@ class CableDesignEvaluator:
 
     def _extract_case(
         self, result: StagedResult
-    ) -> tuple[dict[int, float], dict[int, float], float]:
-        """从一次 staged 结果末态提取线形误差、索应力和塔顶水平位移。
+    ) -> _AffineCaseWithAnchors:
+        """从一次 staged 结果末态提取线形、索应力、塔顶及塔锚水平位移。
 
         单解与批量(:meth:`evaluate_batch`)共用,保证两条路径的后处理逐位一致。
         deck 节点按 x 升序;线形误差 = 末态 uy − 目标线形;索应力换算到 MPa;
-        塔顶取 ``tower_ids`` 中设计高程最高的节点,目标水平位移为 0。
+        塔顶取 ``tower_ids`` 中设计高程最高的节点;塔锚取全部 ``anchor_ids``。
+        两者的目标水平位移均为 0。
         """
         if not result.records:
             raise RuntimeError("staged solver produced no records")
@@ -100,12 +111,25 @@ class CableDesignEvaluator:
             raise RuntimeError("staged solver produced no displaced tower nodes")
         tower_top = max(tower_nodes, key=lambda nid: result.coords[nid][1])
         tower_top_dx_m = float(final.disp[tower_top][0])
-        return deck_errors, cable_stress_mpa, tower_top_dx_m
+        anchor_nodes = [
+            nid for nid in result.anchor_ids if nid in result.coords and nid in final.disp
+        ]
+        if not anchor_nodes:
+            raise RuntimeError("staged solver produced no displaced tower anchor nodes")
+        tower_anchor_dx_m = {
+            nid: float(final.disp[nid][0])
+            for nid in sorted(anchor_nodes, key=lambda nid: result.coords[nid][1])
+        }
+        return deck_errors, cable_stress_mpa, tower_top_dx_m, tower_anchor_dx_m
 
     def evaluate_affine_batch(
-        self, strands, tension_matrix
-    ) -> list[tuple[dict[int, float], dict[int, float], float]]:
-        """批量提取仿射模型所需的线形、索应力和塔顶水平位移。"""
+        self, strands, tension_matrix, *, include_anchor_displacements: bool = False
+    ) -> list[_AffineCase | _AffineCaseWithAnchors]:
+        """批量提取仿射模型所需的线形、索应力及塔水平位移。
+
+        默认维持原有三元组返回值;内部构造完整仿射模型时通过
+        ``include_anchor_displacements=True`` 追加逐塔锚水平位移字典。
+        """
         strands = validate_strand_vector(
             strands,
             self.layout,
@@ -121,8 +145,12 @@ class CableDesignEvaluator:
         plans = [self.build_plan(strands, tension_matrix[:, k]) for k in range(ncase)]
         if self.problem.backend == "direct":
             results = self._batch_solver().run_batch(plans)
-            return [self._extract_case(result) for result in results]
-        return [self._extract_case(self.run_solver(plan)) for plan in plans]
+            cases = [self._extract_case(result) for result in results]
+        else:
+            cases = [self._extract_case(self.run_solver(plan)) for plan in plans]
+        if include_anchor_displacements:
+            return cases
+        return [(deck, stress, tower) for deck, stress, tower, _ in cases]
 
     def evaluate_batch(
         self, strands, tension_matrix
@@ -148,13 +176,19 @@ class CableDesignEvaluator:
         pretension = validate_tension_vector(pretension, self.layout)
         plan = self.build_plan(strands, pretension)
         result = self.run_solver(plan)
-        deck_errors, cable_stress_mpa, tower_top_dx_m = self._extract_case(result)
+        (
+            deck_errors,
+            cable_stress_mpa,
+            tower_top_dx_m,
+            tower_anchor_dx_m,
+        ) = self._extract_case(result)
 
         err = np.asarray(list(deck_errors.values()), dtype=float)
         shape_rmse = float(np.sqrt(np.mean(err * err))) if err.size else 0.0
         shape_max = float(np.max(np.abs(err))) if err.size else 0.0
 
         stress = np.asarray([cable_stress_mpa[cid] for cid in self.layout.cable_ids], dtype=float)
+        anchor_dx = np.asarray(list(tower_anchor_dx_m.values()), dtype=float)
         violations = stress_violation_mpa(stress, self.problem.bounds)
         stress_std = float(np.std(stress))
         metrics = DesignMetrics(
@@ -168,6 +202,7 @@ class CableDesignEvaluator:
             stress_violation_rms_mpa=float(np.sqrt(np.mean(violations * violations))),
             stress_violation_max_mpa=float(np.max(violations)),
             tower_top_dx_m=tower_top_dx_m,
+            tower_anchor_dx_rmse_m=float(np.sqrt(np.mean(anchor_dx * anchor_dx))),
         )
         components = objective_breakdown(
             shape_rmse_m=metrics.shape_rmse_m,
@@ -176,6 +211,7 @@ class CableDesignEvaluator:
             stress_violation_rms_mpa=metrics.stress_violation_rms_mpa,
             weights=self.problem.weights,
             tower_top_dx_m=metrics.tower_top_dx_m,
+            tower_anchor_dx_rmse_m=metrics.tower_anchor_dx_rmse_m,
         )
         return EvaluationResult(
             design=CableDesign(strands=strands.copy(), pretension=pretension.copy()),
@@ -185,6 +221,7 @@ class CableDesignEvaluator:
             cable_ids=self.layout.cable_ids,
             deck_errors_m=deck_errors,
             cable_stress_mpa=cable_stress_mpa,
+            tower_anchor_dx_m=tower_anchor_dx_m,
             staged_result=result if keep_result else None,
         )
 

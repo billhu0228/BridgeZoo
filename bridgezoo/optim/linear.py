@@ -1,19 +1,21 @@
 """Affine (linear-model) continuous tension optimization.
 
 direct 后端(以及 OpenSees ``linear`` Truss 模式)是线性求解器,固定索股时终态索
-应力、主梁线形误差与塔顶水平位移都是预张力向量 T 的**仿射函数**::
+应力、主梁线形误差、塔顶及全部塔锚水平位移都是预张力向量 T 的**仿射函数**::
 
     sigma(T) = sigma0 + M @ T   [MPa]   (M: MPa/N)
     err(T)   = err0   + D @ T   [m]     (D: m/N)
     ux(T)    = ux0    + q @ T   [m]     (q: m/N)
+    ua(T)    = ua0    + Q @ T   [m]     (Q: m/N)
 
 因此连续子问题先用 m+1 次真实 FEM 构造**精确**仿射模型,再在模型上(纯 numpy,
 无 FEM 内层)分两相求解:
 
 1. **LP 可行性相**:最小化应力带最大违反量 s,得到 s*(s*≈0 即该索股配置下
    [lower, upper] MPa 可达)与 warm-start 张力;
-2. **二次相**:SLSQP + 解析梯度最小化完整目标(线形 + 塔顶水平位移 + 均匀度
-   + hinge² 违反惩罚;索股项为常数故略去),线性带宽约束按 s* 放宽,保证最大
+2. **二次相**:SLSQP + 解析梯度最小化完整目标(线形 + 塔顶水平位移 + 塔锚
+   水平位移 RMSE + 均匀度 + hinge² 违反惩罚;索股项为常数故略去),线性带宽
+   约束按 s* 放宽,保证最大
    违反不劣于 LP 最优。
    变量取缩放形式 x = T/hi ∈ [0,1](hi 为各索张拉上限):直接用牛顿量纲的
    T(~1e7 N)会令 SLSQP 的步长/收敛判据失效,首步即误判收敛并停在离最优
@@ -21,7 +23,7 @@ direct 后端(以及 OpenSees ``linear`` Truss 模式)是线性求解器,固定�
 
 这修复了把 FEM 嵌进 SLSQP 时"硬约束不可行 → 原地不动"的失效模式。终点用真实
 求解器复评并与模型交叉校核;若后端非线性(如 corot),校核失败并提示改用
-``method="slsqp"``。单位:张力 N,应力 MPa,线形误差与塔顶位移 m。
+``method="slsqp"``。单位:张力 N,应力 MPa,线形误差及塔节点位移 m。
 """
 
 from __future__ import annotations
@@ -43,7 +45,7 @@ MODEL_DISPLACEMENT_MISMATCH_TOL_M = 1.0e-6
 
 @dataclass(frozen=True)
 class AffineCableModel:
-    """固定索股下应力、主梁误差和塔顶水平位移的精确仿射模型。"""
+    """固定索股下应力、主梁误差和塔节点水平位移的精确仿射模型。"""
 
     cable_ids: tuple[int, ...]
     deck_nodes: tuple[int, ...]
@@ -53,6 +55,9 @@ class AffineCableModel:
     d_m_per_n: np.ndarray         # (d, m)
     tower_dx0_m: float = 0.0
     tower_dx_m_per_n: np.ndarray | None = None  # (m,)
+    anchor_nodes: tuple[int, ...] = ()
+    anchor_dx0_m: np.ndarray | None = None       # (a,)
+    anchor_dx_m_per_n: np.ndarray | None = None  # (a, m)
 
     def stress_mpa(self, tension_n: np.ndarray) -> np.ndarray:
         return self.sigma0_mpa + self.m_mpa_per_n @ tension_n
@@ -64,6 +69,13 @@ class AffineCableModel:
         if self.tower_dx_m_per_n is None:
             return float(self.tower_dx0_m)
         return float(self.tower_dx0_m + self.tower_dx_m_per_n @ tension_n)
+
+    def anchor_dx_m(self, tension_n: np.ndarray) -> np.ndarray:
+        if self.anchor_dx0_m is None:
+            return np.zeros(0)
+        if self.anchor_dx_m_per_n is None:
+            return self.anchor_dx0_m.copy()
+        return self.anchor_dx0_m + self.anchor_dx_m_per_n @ tension_n
 
 
 def build_affine_model(
@@ -87,23 +99,32 @@ def build_affine_model(
     # 多右端:第 0 列 T=0,其余各列为单索单位扰动。
     tension_matrix = np.zeros((m, m + 1))
     tension_matrix[:, 1:] = np.eye(m) * tension_step_n
-    cases = evaluator.evaluate_affine_batch(strands, tension_matrix)
+    cases = evaluator.evaluate_affine_batch(
+        strands,
+        tension_matrix,
+        include_anchor_displacements=True,
+    )
 
-    base_err, base_sigma, tower_dx0 = cases[0]
+    base_err, base_sigma, tower_dx0, base_anchor_dx = cases[0]
     deck_nodes = tuple(base_err.keys())
+    anchor_nodes = tuple(base_anchor_dx.keys())
     sigma0 = np.asarray([base_sigma[cid] for cid in ids], dtype=float)
     err0 = np.asarray([base_err[nid] for nid in deck_nodes], dtype=float)
+    anchor_dx0 = np.asarray([base_anchor_dx[nid] for nid in anchor_nodes], dtype=float)
 
     M = np.zeros((m, m))
     D = np.zeros((len(deck_nodes), m))
     tower_dx_sensitivity = np.zeros(m)
+    anchor_dx_sensitivity = np.zeros((len(anchor_nodes), m))
     for j in range(m):
-        err_j, sigma_j, tower_dx_j = cases[j + 1]
+        err_j, sigma_j, tower_dx_j, anchor_dx_j = cases[j + 1]
         sigma = np.asarray([sigma_j[cid] for cid in ids], dtype=float)
         err = np.asarray([err_j[nid] for nid in deck_nodes], dtype=float)
+        anchor_dx = np.asarray([anchor_dx_j[nid] for nid in anchor_nodes], dtype=float)
         M[:, j] = (sigma - sigma0) / tension_step_n
         D[:, j] = (err - err0) / tension_step_n
         tower_dx_sensitivity[j] = (tower_dx_j - tower_dx0) / tension_step_n
+        anchor_dx_sensitivity[:, j] = (anchor_dx - anchor_dx0) / tension_step_n
 
     return AffineCableModel(
         cable_ids=ids,
@@ -114,6 +135,9 @@ def build_affine_model(
         d_m_per_n=D,
         tower_dx0_m=tower_dx0,
         tower_dx_m_per_n=tower_dx_sensitivity,
+        anchor_nodes=anchor_nodes,
+        anchor_dx0_m=anchor_dx0,
+        anchor_dx_m_per_n=anchor_dx_sensitivity,
     )
 
 
@@ -167,7 +191,7 @@ class LinearTensionOptimizer:
 
     # ------------------------------------------------------------- 二次相
     def _model_objective_and_grad(self, model: AffineCableModel):
-        """仿射模型上的目标(shape + tower + uniform + hinge² violation)及解析梯度。
+        """仿射模型上的连续目标及解析梯度。
 
         与 :func:`bridgezoo.optim.objectives.objective_breakdown` 一致(rmse² =
         mean(err²)、std² = var(σ)、rms² = mean(v²));索股项与 T 无关,略去。
@@ -177,6 +201,7 @@ class LinearTensionOptimizer:
         upper = self.problem.bounds.stress_upper_mpa
         m = self.layout.size
         d = model.err0_m.size
+        a = len(model.anchor_nodes)
 
         def value_and_grad(tension: np.ndarray) -> tuple[float, np.ndarray]:
             sigma = model.stress_mpa(tension)
@@ -199,6 +224,24 @@ class LinearTensionOptimizer:
                     * 2.0
                     * tower_dx
                     * tower_sensitivity
+                    / w.shape_scale_m**2
+                )
+            if w.tower_anchor_displacement != 0.0 and a > 0:
+                anchor_dx = model.anchor_dx_m(tension)
+                anchor_sensitivity = (
+                    np.zeros((a, m))
+                    if model.anchor_dx_m_per_n is None
+                    else model.anchor_dx_m_per_n
+                )
+                total += (
+                    w.tower_anchor_displacement
+                    * np.mean(anchor_dx * anchor_dx)
+                    / w.shape_scale_m**2
+                )
+                grad += (
+                    w.tower_anchor_displacement
+                    * (2.0 / a)
+                    * (anchor_sensitivity.T @ anchor_dx)
                     / w.shape_scale_m**2
                 )
             if w.stress_uniform != 0.0:
@@ -288,14 +331,25 @@ class LinearTensionOptimizer:
         sigma_fem = np.asarray([evaluation.cable_stress_mpa[cid] for cid in self.layout.cable_ids], dtype=float)
         mismatch = float(np.max(np.abs(model.stress_mpa(x) - sigma_fem))) if sigma_fem.size else 0.0
         displacement_mismatch = abs(model.tower_dx_m(x) - evaluation.metrics.tower_top_dx_m)
+        anchor_dx_fem = np.asarray(
+            [evaluation.tower_anchor_dx_m[nid] for nid in model.anchor_nodes],
+            dtype=float,
+        )
+        anchor_displacement_mismatch = (
+            float(np.max(np.abs(model.anchor_dx_m(x) - anchor_dx_fem)))
+            if anchor_dx_fem.size
+            else 0.0
+        )
         if (
             mismatch > MODEL_MISMATCH_TOL_MPA
             or displacement_mismatch > MODEL_DISPLACEMENT_MISMATCH_TOL_M
+            or anchor_displacement_mismatch > MODEL_DISPLACEMENT_MISMATCH_TOL_M
         ):
             raise RuntimeError(
                 "affine model mismatch: "
                 f"stress={mismatch:.3f} MPa (tol {MODEL_MISMATCH_TOL_MPA:.1f} MPa), "
                 f"tower displacement={displacement_mismatch:.3e} m "
+                f"and anchor displacement={anchor_displacement_mismatch:.3e} m "
                 f"(tol {MODEL_DISPLACEMENT_MISMATCH_TOL_M:.1e} m); backend appears nonlinear; "
                 "use ContinuousOptions(method='slsqp') instead"
             )
@@ -303,10 +357,12 @@ class LinearTensionOptimizer:
             "    linear QP done: "
             f"success={bool(res.success)} objective={evaluation.objective:.6g} "
             f"shape_rmse={evaluation.metrics.shape_rmse_m * 1000.0:.3f} mm "
+            f"anchor_dx_rmse={evaluation.metrics.tower_anchor_dx_rmse_m * 1000.0:.3f} mm "
             f"stress=[{evaluation.metrics.stress_min_mpa:.1f}, {evaluation.metrics.stress_max_mpa:.1f}] MPa "
             f"stress_violation_rms={evaluation.metrics.stress_violation_rms_mpa:.3f} MPa "
             f"model_mismatch={mismatch:.2e} MPa "
             f"tower_mismatch={displacement_mismatch:.2e} m"
+            f" anchor_mismatch={anchor_displacement_mismatch:.2e} m"
         )
         return ContinuousOptimizationResult(
             evaluation=evaluation,

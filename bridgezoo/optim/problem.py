@@ -25,6 +25,7 @@ class ObjectiveWeights:
     stress_scale_mpa: float = 100.0
     strand_scale: float = 20.0
     tower_displacement: float = 1.0
+    tower_anchor_displacement: float = 1.0
 
 
 @dataclass(frozen=True)

@@ -16,6 +16,7 @@ class ObjectiveBreakdown:
     stress_uniform: float
     stress_violation: float
     tower_displacement: float = 0.0
+    tower_anchor_displacement: float = 0.0
 
     @property
     def total(self) -> float:
@@ -25,6 +26,7 @@ class ObjectiveBreakdown:
             + self.stress_uniform
             + self.stress_violation
             + self.tower_displacement
+            + self.tower_anchor_displacement
         )
 
 
@@ -42,16 +44,21 @@ def objective_breakdown(
     stress_violation_rms_mpa: float,
     weights: ObjectiveWeights,
     tower_top_dx_m: float = 0.0,
+    tower_anchor_dx_rmse_m: float = 0.0,
 ) -> ObjectiveBreakdown:
     shape = weights.shape * (shape_rmse_m / weights.shape_scale_m) ** 2
     strands = weights.total_strands * (total_strands / weights.strand_scale)
     uniform = weights.stress_uniform * (stress_std_mpa / weights.stress_scale_mpa) ** 2
     violation = weights.stress_violation * (stress_violation_rms_mpa / weights.stress_scale_mpa) ** 2
     tower = weights.tower_displacement * (tower_top_dx_m / weights.shape_scale_m) ** 2
+    tower_anchors = weights.tower_anchor_displacement * (
+        tower_anchor_dx_rmse_m / weights.shape_scale_m
+    ) ** 2
     return ObjectiveBreakdown(
         shape=float(shape),
         total_strands=float(strands),
         stress_uniform=float(uniform),
         stress_violation=float(violation),
         tower_displacement=float(tower),
+        tower_anchor_displacement=float(tower_anchors),
     )
