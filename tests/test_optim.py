@@ -198,7 +198,7 @@ def test_progress_display_redraws_dashboard_with_progress_and_trend():
         "accepted resize: 10 -> 4 s*=0.000 MPa",
         "candidate cable=2001 strand_delta=-1 180->179 (stress ok)",
         "finished: objective=3.5 total_strands=710 shape_rmse=110.000 mm "
-        "stress=[410.0, 590.0] MPa LP bound s*=0.000 MPa",
+        "stress=[410.0, 590.0] MPa target-band LP s*=0.000 MPa",
     ]
     for message in messages:
         clock.advance()
@@ -314,11 +314,14 @@ def test_hybrid_strand_moves_follow_stress_direction():
 
 
 def test_default_bounds_and_continuous_method():
-    # 用户决定:索股默认下限 1;连续层默认走线性模型路径。
+    # 用户决定:索股默认下限 1;连续层默认走线性模型路径;应力带默认仅作软目标。
     assert CableBounds().strand_min == 1
     assert ContinuousOptions().method == "linear"
+    assert IntegerSearchOptions().band_priority is False
     assert ObjectiveWeights().tower_displacement == pytest.approx(1.0)
     assert ObjectiveWeights().tower_anchor_displacement == pytest.approx(1.0)
+    assert optimize_cables.parse_args(["--bridge", "model"]).band_priority is False
+    assert optimize_cables.parse_args(["--bridge", "model", "--band-priority"]).band_priority is True
 
 
 def test_affine_model_matches_fem():
@@ -544,32 +547,47 @@ def test_cli_resume_rejects_changed_problem_definition(tmp_path):
         optimize_cables.run(optimize_cables.parse_args([*common, "--resume", "--strand-min", "101"]))
 
 
-def test_linear_optimizer_finds_feasible_band_when_reachable():
+def test_linear_optimizer_reports_reachable_target_band_without_hard_cap():
     pytest.importorskip("scipy")
-    # 该几何 + 每索 8 股时 [800,1200] MPa 可行(LP 验证 s*=0,σ∈[800,918])。
-    problem = _problem()
-    result = LinearTensionOptimizer(CableDesignEvaluator(problem)).optimize([8, 8, 8, 8])
+    # [0,100] MPa 目标带可达(s*=0),但结构目标更偏好带外解。终态应力必须允许
+    # 客观超过 100 MPa,越界只通过 stress_violation 软惩罚进入目标。
+    problem = replace(
+        _problem(
+            bounds=CableBounds(
+                strand_min=8,
+                strand_max=40,
+                stress_lower_mpa=0.0,
+                stress_upper_mpa=100.0,
+            )
+        ),
+        weights=ObjectiveWeights(stress_violation=1.0),
+    )
+    result = LinearTensionOptimizer(CableDesignEvaluator(problem)).optimize([20, 20, 20, 20])
 
     assert result.feasibility_violation_mpa == pytest.approx(0.0, abs=1e-6)
-    lower, upper = problem.bounds.stress_lower_mpa, problem.bounds.stress_upper_mpa
-    for sigma in result.evaluation.cable_stress_mpa.values():
-        # 1e-3 MPa 余量覆盖 LP/SLSQP 收敛容差
-        assert lower - 1e-3 <= sigma <= upper + 1e-3
+    assert result.evaluation.metrics.stress_max_mpa > problem.bounds.stress_upper_mpa + 1.0
+    assert result.evaluation.metrics.stress_violation_max_mpa > 1.0
+    assert result.evaluation.components.stress_violation > 0.0
 
 
-def test_linear_optimizer_attains_lp_violation_bound():
+def test_stress_violation_weight_reduces_soft_target_band_departure():
     pytest.importorskip("scipy")
-    # 窄带 [950,960] + 每索 12 股不可行(s*≈11.7 MPa)。回归:旧 SLSQP 路径在
-    # 不可行问题上因硬约束不相容而停在远高于下界的违反量;线性路径的终解
-    # 最大违反必须压到 LP 下界 s*。
-    problem = _problem(
-        bounds=CableBounds(strand_min=1, strand_max=40, stress_lower_mpa=950.0, stress_upper_mpa=960.0)
+    base = _problem(
+        bounds=CableBounds(
+            strand_min=8,
+            strand_max=40,
+            stress_lower_mpa=0.0,
+            stress_upper_mpa=100.0,
+        )
     )
-    result = LinearTensionOptimizer(CableDesignEvaluator(problem)).optimize([12, 12, 12, 12])
+    weak_problem = replace(base, weights=ObjectiveWeights(stress_violation=1.0))
+    strong_problem = replace(base, weights=ObjectiveWeights(stress_violation=100.0))
+    weak = LinearTensionOptimizer(CableDesignEvaluator(weak_problem)).optimize([20] * 4)
+    strong = LinearTensionOptimizer(CableDesignEvaluator(strong_problem)).optimize([20] * 4)
 
-    s_star = result.feasibility_violation_mpa
-    assert s_star is not None and s_star > 1.0  # 确认该配置确实不可行,测试才有意义
-    assert result.evaluation.metrics.stress_violation_max_mpa <= s_star + 1e-3
+    assert strong.evaluation.metrics.stress_violation_max_mpa < (
+        weak.evaluation.metrics.stress_violation_max_mpa
+    )
 
 
 def test_linear_optimizer_matches_exact_lsq_on_shape_only():
@@ -625,26 +643,21 @@ def test_linear_optimizer_matches_exact_lsq_on_shape_only():
     assert result.evaluation.objective <= exact * (1.0 + 1e-3) + 1e-8
 
 
-def test_hybrid_acceptance_prefers_band_feasibility():
-    # 字典序接受:s*(LP 最小可达带违反)显著降低即接受(即使目标变差);
-    # s* 持平(band_tol_mpa 内)时回退比较加权目标;s* 缺失(slsqp 路径)仅比目标。
+def test_hybrid_acceptance_uses_weighted_soft_objective_by_default():
     optimizer = CableHybridOptimizer(_problem())
 
-    assert optimizer._accepts(0.0, 50.0, 5.0, 10.0)  # s* 5→0,目标变差 → 接受
-    assert not optimizer._accepts(5.0, 1.0, 0.0, 10.0)  # s* 0→5 → 拒绝(目标更好也不行)
-    assert optimizer._accepts(0.0, 9.0, 0.0, 10.0)  # s* 持平,目标改善 → 接受
-    assert not optimizer._accepts(0.0, 11.0, 0.0, 10.0)  # s* 持平,目标变差 → 拒绝
-    assert optimizer._accepts(None, 9.0, None, 10.0)  # s* 缺失 → 仅比目标
+    assert optimizer._accepts(5.0, 1.0, 0.0, 10.0)
+    assert not optimizer._accepts(0.0, 11.0, 5.0, 10.0)
 
 
-def test_hybrid_acceptance_band_priority_can_be_disabled():
+def test_hybrid_acceptance_band_priority_can_be_enabled_explicitly():
     optimizer = CableHybridOptimizer(
         _problem(),
-        HybridOptions(integer=IntegerSearchOptions(band_priority=False)),
+        HybridOptions(integer=IntegerSearchOptions(band_priority=True)),
     )
-    # 关闭 band_priority 后退回旧行为:仅比较加权目标。
-    assert optimizer._accepts(5.0, 1.0, 0.0, 10.0)
-    assert not optimizer._accepts(0.0, 11.0, 0.0, 10.0)
+    assert optimizer._accepts(0.0, 50.0, 5.0, 10.0)
+    assert not optimizer._accepts(5.0, 1.0, 0.0, 10.0)
+    assert optimizer._accepts(0.0, 9.0, 0.0, 10.0)
 
 
 def test_hybrid_resize_candidate_jumps_by_stress_ratio():
@@ -661,19 +674,25 @@ def test_hybrid_resize_candidate_jumps_by_stress_ratio():
     assert optimizer._resize_candidate(unchanged) is None
 
 
-def test_slsqp_constraints_survive_evaluator_failure(monkeypatch):
-    # 回归:约束函数遇评估失败(如越界张力)应返回有限"严重违反"值,
-    # 而不是让 ValueError 炸掉整个优化过程。
+def test_direct_slsqp_does_not_install_stress_band_constraints(monkeypatch):
+    pytest.importorskip("scipy")
     problem = _problem()
     evaluator = CableDesignEvaluator(problem)
     optimizer = FixedStrandTensionOptimizer(evaluator)
+    captured = {}
 
-    def boom(*args, **kwargs):
-        raise ValueError("synthetic evaluator failure")
+    def fake_minimize(fun, x0, **kwargs):
+        captured.update(kwargs)
 
-    monkeypatch.setattr(evaluator, "evaluate", boom)
-    margins = optimizer._stress_margins(np.array([20, 20, 20, 20]), np.full(4, 1.0e6), {}, upper=False)
+        class Result:
+            x = np.asarray(x0, dtype=float)
+            success = True
+            message = "synthetic success"
+            nfev = 0
 
-    assert margins.shape == (4,)
-    assert np.all(np.isfinite(margins))
-    assert np.all(margins < 0.0)
+        return Result()
+
+    monkeypatch.setattr("scipy.optimize.minimize", fake_minimize)
+    optimizer.optimize([20, 20, 20, 20])
+
+    assert "constraints" not in captured

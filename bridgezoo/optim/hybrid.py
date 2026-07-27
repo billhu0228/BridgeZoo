@@ -29,9 +29,9 @@ class IntegerSearchOptions:
     # 每轮外层迭代先尝试按 σ/σ_target 比例整体改股(大步跳跃),再做 ±step 精修。
     resize: bool = True
     resize_target_stress_mpa: float | None = None  # None → 应力带中值
-    # 字典序接受:先比 LP 可行性 s*(应力带最小可达违反,linear 连续层免费给出),
-    # s* 持平(band_tol_mpa 内)再比加权目标。False 或 s* 缺失时退回仅比目标。
-    band_priority: bool = True
+    # 默认只比较完整加权目标,因为应力带是软目标范围。显式启用后可先比较 LP
+    # 诊断量 s*(目标带最小可达偏离),再在 s* 持平时比较加权目标。
+    band_priority: bool = False
     band_tol_mpa: float = 1.0e-3
 
 
@@ -45,7 +45,7 @@ class HybridOptions:
 class HybridOptimizationResult:
     best: EvaluationResult
     history: list[EvaluationResult]
-    # best 索股配置下 LP 最小可达最大违反量 s* [MPa](linear 连续层时填写)。
+    # best 索股配置下 LP 目标应力带最小可达最大偏离量 s* [MPa](linear 连续层时填写)。
     feasibility_violation_mpa: float | None = None
     # 本次 optimize 调用实际完成的搜索预算；供断点续跑累计记录。
     outer_iterations_completed: int = 0
@@ -89,11 +89,7 @@ class CableHybridOptimizer:
         best_s_star: float | None,
         best_objective: float,
     ) -> bool:
-        """字典序接受准则:s* 优先,持平(band_tol_mpa 内)再比加权目标。
-
-        动机:失速前的旧行为只比加权目标,曾把"应力带精确可达但线形项暂时
-        变差"的 resize 候选误杀;带可达性是要求而非偏好,故置于第一优先级。
-        """
+        """默认按完整软目标接受;可显式启用目标应力带可达性优先。"""
         opts = self.options.integer
         if opts.band_priority and candidate_s_star is not None and best_s_star is not None:
             if candidate_s_star < best_s_star - opts.band_tol_mpa:
@@ -284,9 +280,15 @@ class CableHybridOptimizer:
             self.problem.bounds.stress_lower_mpa - final.metrics.stress_min_mpa,
             final.metrics.stress_max_mpa - self.problem.bounds.stress_upper_mpa,
         )
-        verdict = "SATISFIED" if band_violation <= 1e-6 else f"VIOLATED by {band_violation:.3f} MPa"
+        verdict = (
+            "WITHIN TARGET"
+            if band_violation <= 1e-6
+            else f"OUTSIDE TARGET by {band_violation:.3f} MPa"
+        )
         feasibility_note = (
-            f", LP bound s*={best_feasibility:.3f} MPa" if best_feasibility is not None else ""
+            f", target-band LP s*={best_feasibility:.3f} MPa"
+            if best_feasibility is not None
+            else ""
         )
         self._emit(
             f"finished: objective={final.objective:.6g} total_strands={final.metrics.total_strands} "

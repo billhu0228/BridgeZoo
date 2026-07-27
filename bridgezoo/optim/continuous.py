@@ -28,7 +28,7 @@ class ContinuousOptimizationResult:
     success: bool
     message: str
     nfev: int | None = None
-    # LP 可行性相得到的最小可达最大违反量 s* [MPa](仅 linear 方法填写)。
+    # LP 初值相得到的目标应力带最小可达最大偏离量 s* [MPa](仅 linear 方法填写)。
     feasibility_violation_mpa: float | None = None
 
 
@@ -61,27 +61,12 @@ class FixedStrandTensionOptimizer:
         return mid_stress * 1e6 * self.problem.strand_area * strands.astype(float)
 
     def _evaluate_cached(self, strands: np.ndarray, x, cache: dict) -> EvaluationResult:
-        """同一 x 处 objective/约束/progress 共享一次 FEM(cache 生命周期 = 一次 optimize)。"""
+        """同一 x 处 objective/progress 共享一次 FEM(cache 生命周期 = 一次 optimize)。"""
         arr = np.asarray(x, dtype=float)
         key = arr.tobytes()
         if key not in cache:
             cache[key] = self.evaluator.evaluate(strands, arr)
         return cache[key]
-
-    def _stress_margins(self, strands: np.ndarray, x, cache: dict, *, upper: bool) -> np.ndarray:
-        """应力带 ineq 约束值(>=0 为满足)。
-
-        评估失败(如优化器探测到无效张力)时返回有限的"严重违反"值,而不是让异常
-        炸掉整个优化过程。
-        """
-        try:
-            ev = self._evaluate_cached(strands, x, cache)
-        except (ValueError, RuntimeError, FloatingPointError):
-            return np.full(self.layout.size, -1.0e6)
-        values = np.asarray([ev.cable_stress_mpa[cid] for cid in self.layout.cable_ids], dtype=float)
-        if upper:
-            return self.problem.bounds.stress_upper_mpa - values
-        return values - self.problem.bounds.stress_lower_mpa
 
     @staticmethod
     def _progress_metrics(ev: EvaluationResult | None) -> str:
@@ -131,12 +116,6 @@ class FixedStrandTensionOptimizer:
                 )
             return value
 
-        def stress_lower_constraint(x):
-            return self._stress_margins(strands, x, cache, upper=False)
-
-        def stress_upper_constraint(x):
-            return self._stress_margins(strands, x, cache, upper=True)
-
         options = {"maxiter": self.options.maxiter, "ftol": self.options.ftol, "disp": False}
         if self.options.finite_diff_rel_step is not None:
             options["finite_diff_rel_step"] = self.options.finite_diff_rel_step
@@ -146,10 +125,6 @@ class FixedStrandTensionOptimizer:
             x0,
             method="SLSQP",
             bounds=bounds,
-            constraints=[
-                {"type": "ineq", "fun": stress_lower_constraint},
-                {"type": "ineq", "fun": stress_upper_constraint},
-            ],
             options=options,
         )
         x = np.clip(np.asarray(res.x, dtype=float), lo, hi)

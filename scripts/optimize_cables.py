@@ -194,7 +194,7 @@ class _OptimizationProgressDisplay:
             self.strand_min = self._integer(text, "min")
             self.strand_max = self._integer(text, "max")
         elif text.startswith("linear LP"):
-            self.phase = "LP feasibility"
+            self.phase = "LP target-band warm-start"
             self.s_star_mpa = self._number(text, "s*")
         elif text.startswith(("linear QP done", "SLSQP done", "SLSQP eval")):
             self.phase = "continuous solve"
@@ -662,12 +662,12 @@ def _band_verdict_line(best, result, stress_lower: float, stress_upper: float) -
         stress_lower - best.metrics.stress_min_mpa,
         best.metrics.stress_max_mpa - stress_upper,
     )
-    verdict = "SATISFIED" if violation <= 1e-6 else "VIOLATED"
+    verdict = "WITHIN TARGET" if violation <= 1e-6 else "OUTSIDE TARGET"
     s_star = result.feasibility_violation_mpa
-    lp_note = f", LP bound s*={s_star:.3f} MPa" if s_star is not None else ""
+    lp_note = f", target-band LP s*={s_star:.3f} MPa" if s_star is not None else ""
     return (
-        f"stress band [{stress_lower:g}, {stress_upper:g}] MPa: {verdict} "
-        f"(max violation {violation:.3f} MPa{lp_note})"
+        f"target stress band [{stress_lower:g}, {stress_upper:g}] MPa: {verdict} "
+        f"(max departure {violation:.3f} MPa{lp_note})"
     )
 
 
@@ -845,7 +845,7 @@ def run(args):
             seed=args.seed,
             stress_guided=not args.no_stress_guided_strands,
             resize=not args.no_strand_resize,
-            band_priority=not args.no_band_priority,
+            band_priority=args.band_priority,
         ),
     )
     progress_display = None
@@ -1001,7 +1001,7 @@ def build_parser(bridge_defaults: dict[str, object]) -> argparse.ArgumentParser:
     p.add_argument("--strand-max", type=int, default=500)
     p.add_argument("--initial-strands", type=int, default=200)
     p.add_argument("--stress-lower", type=float, default=600.0)
-    p.add_argument("--stress-upper", type=float, default=800.0)
+    p.add_argument("--stress-upper", type=float, default=700.0)
     p.add_argument("--tension-bound-stress", type=float, default=1600.0)
 
     p.add_argument("--weight-shape", type=float, default=1.0)
@@ -1048,12 +1048,20 @@ def build_parser(bridge_defaults: dict[str, object]) -> argparse.ArgumentParser:
         action="store_true",
         help="Disable the stress-ratio strand resize jump at the start of each outer iteration.",
     )
-    p.add_argument(
-        "--no-band-priority",
+    band_priority = p.add_mutually_exclusive_group()
+    band_priority.add_argument(
+        "--band-priority",
         action="store_true",
-        help="Disable band-first (lexicographic LP s*) acceptance in the integer search; "
-        "compare candidates by weighted objective only.",
+        help="Prefer strand configurations whose target stress band is more reachable before "
+        "comparing the weighted objective (legacy opt-in behavior).",
     )
+    band_priority.add_argument(
+        "--no-band-priority",
+        dest="band_priority",
+        action="store_false",
+        help=argparse.SUPPRESS,
+    )
+    p.set_defaults(band_priority=False)
     p.add_argument("--quiet", action="store_true", help="Disable optimization progress output.")
     p.add_argument("--verify-opensees", action="store_true")
     return p

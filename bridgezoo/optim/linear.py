@@ -11,17 +11,16 @@ direct 后端(以及 OpenSees ``linear`` Truss 模式)是线性求解器,固定�
 因此连续子问题先用 m+1 次真实 FEM 构造**精确**仿射模型,再在模型上(纯 numpy,
 无 FEM 内层)分两相求解:
 
-1. **LP 可行性相**:最小化应力带最大违反量 s,得到 s*(s*≈0 即该索股配置下
-   [lower, upper] MPa 可达)与 warm-start 张力;
+1. **LP 初值相**:最小化目标应力带最大偏离量 s,得到 s*(s*≈0 即该索股配置下
+   [lower, upper] MPa 可达)与 warm-start 张力;应力带只作目标范围,不约束终解;
 2. **二次相**:SLSQP + 解析梯度最小化完整目标(线形 + 塔顶水平位移 + 塔锚
-   水平位移 RMSE + 均匀度 + hinge² 违反惩罚;索股项为常数故略去),线性带宽
-   约束按 s* 放宽,保证最大
-   违反不劣于 LP 最优。
+   水平位移 RMSE + 均匀度 + hinge² 违反惩罚;索股项为常数故略去),
+   最终应力可客观落在目标带外,越界代价仅由 hinge² 软惩罚计入。
    变量取缩放形式 x = T/hi ∈ [0,1](hi 为各索张拉上限):直接用牛顿量纲的
    T(~1e7 N)会令 SLSQP 的步长/收敛判据失效,首步即误判收敛并停在离最优
    数千倍处(回归见 tests/test_optim.py 缩放失速用例)。
 
-这修复了把 FEM 嵌进 SLSQP 时"硬约束不可行 → 原地不动"的失效模式。终点用真实
+LP 只提供目标应力带诊断和稳定初值;SLSQP 不对终态应力设硬边界。终点用真实
 求解器复评并与模型交叉校核;若后端非线性(如 corot),校核失败并提示改用
 ``method="slsqp"``。单位:张力 N,应力 MPa,线形误差及塔节点位移 m。
 """
@@ -279,18 +278,14 @@ class LinearTensionOptimizer:
         if initial_pretension is not None:
             validate_tension_vector(initial_pretension, self.layout)
         hi = self.tension_upper_bounds(strands)
-        lower = self.problem.bounds.stress_lower_mpa
-        upper = self.problem.bounds.stress_upper_mpa
 
         model = build_affine_model(self.evaluator, strands)
         t_lp, s_star = self._min_violation_lp(model, hi)
         self._emit(
             f"    linear LP: s*={s_star:.3f} MPa "
-            f"({'feasible' if s_star < 1e-6 else 'band unreachable for these strands'})"
+            f"({'target band reachable' if s_star < 1e-6 else 'minimum target-band departure'})"
         )
 
-        # 带宽按 s* 放宽(+1e-9 数值余量),保证二次相最大违反不劣于 LP 最优。
-        band = s_star + 1.0e-9
         value_and_grad = self._model_objective_and_grad(model)
 
         # 二次相在缩放变量 x = T/hi ∈ [0,1] 上求解(见模块 docstring)。
@@ -303,26 +298,12 @@ class LinearTensionOptimizer:
         def gradient(x):
             return value_and_grad(x * hi)[1] * hi
 
-        jac_sigma_scaled = model.m_mpa_per_n * hi[None, :]
-        constraints = [
-            {
-                "type": "ineq",
-                "fun": lambda x: model.stress_mpa(x * hi) - (lower - band),
-                "jac": lambda x: jac_sigma_scaled,
-            },
-            {
-                "type": "ineq",
-                "fun": lambda x: (upper + band) - model.stress_mpa(x * hi),
-                "jac": lambda x: -jac_sigma_scaled,
-            },
-        ]
         res = minimize(
             objective,
             t_lp / hi,
             jac=gradient,
             method="SLSQP",
             bounds=[(0.0, 1.0)] * self.layout.size,
-            constraints=constraints,
             options={"maxiter": max(200, self.options.maxiter), "ftol": min(self.options.ftol, 1.0e-12)},
         )
         x = np.clip(np.asarray(res.x, dtype=float), 0.0, 1.0) * hi
