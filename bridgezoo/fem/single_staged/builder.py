@@ -302,17 +302,18 @@ def build_staged_cantilever(
     """Build the current single-tower staged cable-stayed bridge plan.
 
     The right girder consists of one segment from the tower/deck root to one
-    fully fixed node at ``x=right_fix``.  When ``right_fix`` is omitted, it
-    defaults to ``right_start`` for backward compatibility.  Every right stay
+    translation-fixed, rotation-released node at ``x=right_fix``.  When
+    ``right_fix`` is omitted, it defaults to ``right_start`` for backward
+    compatibility.  Every right stay
     terminates at its own fully fixed ground
     anchor and therefore does not connect to the girder.  Ground-anchor
     positions retain the shared geometry convention
     ``right_start + (i - 1) * right_spacing``.
 
-    Construction starts with the tower and the first girder segment on each
-    side.  Cable stage 1 then activates the first left/right stays.  Every later
-    cable stage activates one new left girder segment together with its left
-    stay and the corresponding fixed-anchor right stay.
+    Construction starts by activating the tower, the first girder segment on
+    each side, and the first left/right stays together in cable stage 1.  Every
+    later cable stage activates one new left girder segment together with its
+    left stay and the corresponding fixed-anchor right stay.
 
     The ``tip_free`` step tangent-activates the final free left girder segment.
     A separate ``left_tip_uy_lock`` stage then locks that farthest-left node at
@@ -348,13 +349,12 @@ def build_staged_cantilever(
     plan = StagedPlan(name=f"single_tower_bridge_N{n_seg}")
 
     plan.init_nodes = [NewNode(_ROOT, 0.0, 0.0, role="deck")]
-    # The deck root retains the existing translation fixity/rotation release.
-    # The tower has an independent coincident fixed-base node.  The sole right
-    # girder node and every right-stay ground anchor are fully fixed.
+    # The deck root has no support.  The tower uses an independent coincident
+    # fixed-base node.  The sole right girder node fixes translations but
+    # releases rotation; every right-stay ground anchor remains fully fixed.
     plan.supports = [
-        (_ROOT, True, True, False),
         (_TOWER_BASE, True, True, True),
-        (1, True, True, True),
+        (1, True, True, False),
         *[(400 + i, True, True, True) for i in range(1, n_seg + 1)],
     ]
     anchor_heights = []
@@ -434,18 +434,18 @@ def build_staged_cantilever(
             )
             plan.steps.append(
                 BuildStep(
-                    label="seg1",
-                    new_nodes=[*tower_nodes, right_girder_node, left_segment_node],
+                    label="cable1",
+                    new_nodes=[
+                        *tower_nodes,
+                        right_girder_node,
+                        left_segment_node,
+                        right_support_node,
+                    ],
                     new_frames=[*tower_frames, right_girder, left_segment],
+                    new_cables=seg_cables,
                     record=True,
                 )
             )
-            plan.steps.append(BuildStep(
-                label="cable1",
-                new_nodes=[right_support_node],
-                new_cables=seg_cables,
-                record=True,
-            ))
         else:
             plan.steps.append(BuildStep(
                 label=f"cable{i}",

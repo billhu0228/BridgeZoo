@@ -33,13 +33,15 @@ optimization entry points all dispatch from this field.
 The current `single_staged` implementation models an asymmetric single-tower
 bridge:
 
-- the right girder has one segment ending at one fully fixed node whose x
-  coordinate is the `single`-only YAML field `right_fix`;
+- the right girder has one segment ending at node 1, whose translations are
+  fixed and rotation is released; its x coordinate is the `single`-only YAML
+  field `right_fix`;
 - each right stay terminates at an independent fully fixed ground anchor at
   `right_start + (i - 1) * right_spacing`, rather than at a girder node;
-- construction starts by activating the first girder segment on both sides;
-- cable stage 1 activates the first left/right stays, and every later cable
-  stage activates one left girder segment plus its left/right stays;
+- the deck node at the tower-girder intersection has no support constraint;
+- cable stage 1 activates the first girder segment on both sides together with
+  the first left/right stays, and every later cable stage activates one left
+  girder segment plus its left/right stays;
 - `tip_free` installs and solves the final free left segment;
 - the final `left_tip_uy_lock` stage locks node 201's vertical displacement at
   its current deformed position;
@@ -75,5 +77,4 @@ tower_axial_rigidity: 1.0e15
 `EI` is linearly interpolated between control points and held constant below
 the first and above the last point. The tower currently has no self-weight.
 The tower base and deck root are coincident but use separate nodes: the tower
-base is fixed, while the existing deck-root translation fixity and rotation
-release remain unchanged.
+base is fixed, while the deck root has no support constraint.

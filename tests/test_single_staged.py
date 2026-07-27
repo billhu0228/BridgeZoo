@@ -37,7 +37,6 @@ def test_single_staged_has_fixed_backstays_and_one_right_girder_segment():
     )
 
     assert [step.label for step in plan.steps] == [
-        "seg1",
         "cable1",
         "cable2",
         "cable3",
@@ -47,25 +46,29 @@ def test_single_staged_has_fixed_backstays_and_one_right_girder_segment():
         "phase2",
     ]
     supports = {node: (ux, uy, rz) for node, ux, uy, rz in plan.supports}
-    assert supports[1] == (True, True, True)
+    assert 0 not in supports
+    assert supports[1] == (True, True, False)
     assert all(supports[400 + i] == (True, True, True) for i in range(1, n + 1))
 
     first = plan.steps[0]
     assert {node.id for node in first.new_nodes if node.role == "deck"} == {1, 101}
+    assert {node.id for node in first.new_nodes if node.role == "cable_support"} == {401}
     assert {frame.id for frame in first.new_frames if frame.group == "deck"} == {11, 111}
     assert next(node for node in first.new_nodes if node.id == 1).x == pytest.approx(3.0)
-    assert not first.new_cables
+    assert [(cable.id, cable.i, cable.j) for cable in first.new_cables] == [
+        (1001, 301, 401),
+        (2001, 301, 101),
+    ]
 
-    cable_steps = plan.steps[1:-1]
     right_cables = [
         cable
-        for step in cable_steps
+        for step in plan.steps
         for cable in step.new_cables
         if cable.id < 2000
     ]
     left_cables = [
         cable
-        for step in cable_steps
+        for step in plan.steps
         for cable in step.new_cables
         if cable.id >= 2000
     ]
@@ -121,7 +124,9 @@ def test_single_staged_has_fixed_backstays_and_one_right_girder_segment():
     assert set(meta["deck_ids"]) == {0, 1, 101, 102, 103, 201, 202}
     assert all(400 + i not in meta["deck_ids"] for i in range(1, n + 1))
     assert completed.cables[1001].j == 401
-    assert completed.supports[1].ux and completed.supports[1].uy and completed.supports[1].rz
+    assert 0 not in completed.supports
+    assert completed.supports[1].ux and completed.supports[1].uy
+    assert not completed.supports[1].rz
     assert not completed.supports[201].ux
     assert completed.supports[201].uy
     assert not completed.supports[201].rz
@@ -143,7 +148,7 @@ def test_single_staged_right_fix_defaults_to_right_start_and_must_be_positive():
         single_staged.build_staged_cantilever(n_seg=1, left_span=0.0)
 
 
-def test_single_staged_solver_keeps_right_nodes_fixed_and_excludes_ground_anchors_from_deck():
+def test_single_staged_solver_applies_updated_deck_boundaries_and_excludes_ground_anchors():
     n = 3
     left_span = 25.0
     dw = 2.0e4
@@ -159,7 +164,6 @@ def test_single_staged_solver_keeps_right_nodes_fixed_and_excludes_ground_anchor
     )
 
     assert [record.label for record in result.records] == [
-        "seg1",
         "cable1",
         "cable2",
         "cable3",
@@ -184,11 +188,12 @@ def test_single_staged_solver_keeps_right_nodes_fixed_and_excludes_ground_anchor
     assert phase2.disp[101][1] < span_step.disp[101][1] - 1e-9
 
     for record in result.records:
-        assert record.disp[1] == pytest.approx((0.0, 0.0, 0.0), abs=1e-14)
+        assert record.disp[1][:2] == pytest.approx((0.0, 0.0), abs=1e-14)
         for i in range(1, n + 1):
             support = 400 + i
             if support in record.disp:
                 assert record.disp[support] == pytest.approx((0.0, 0.0, 0.0), abs=1e-14)
+    assert abs(result.records[0].disp[1][2]) > 1e-12
 
     rows = _stage_tip_y_errors(result, result, bridge_type="single")
     assert rows[0]["node"] == 101

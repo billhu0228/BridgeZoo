@@ -999,7 +999,7 @@ def build_parser(bridge_defaults: dict[str, object]) -> argparse.ArgumentParser:
 
     p.add_argument("--strand-min", type=int, default=50)
     p.add_argument("--strand-max", type=int, default=500)
-    p.add_argument("--initial-strands", type=int, default=200)
+    p.add_argument("--initial-strands", type=int, default=100)
     p.add_argument("--stress-lower", type=float, default=600.0)
     p.add_argument("--stress-upper", type=float, default=700.0)
     p.add_argument("--tension-bound-stress", type=float, default=1600.0)
