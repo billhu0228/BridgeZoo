@@ -13,11 +13,11 @@ no assumption that ``x = node_id * seg_len``.
 Usage::
 
     python -m scripts.staged_analysis --bridge model --n 6
-    python -m scripts.staged_analysis --bridge p4b --n 8 --scale 20 --backend opensees
+    python -m scripts.staged_analysis --bridge p4b --n 8 --scale 20 --backend direct
     python -m scripts.staged_analysis --bridge model
     python -m scripts.staged_analysis --bridge omo
     python -m scripts.staged_analysis --bridge p4b --frames-dir results/staged_frames
-    python -m scripts.staged_analysis --design results/cable_opt/best_design.json
+    python -m scripts.staged_analysis --design results/cable_opt/best_design.json --backend direct
 
 Default output: ``results/staged_deck_growth.gif`` under the project root.
 """

@@ -12,11 +12,11 @@ right_spacing: 1.0
 right_end: 1.0
 right_fix: 0.2 # single 独有参数，右侧梁端位置
 left_span: 40.0 # single 独有参数，左侧辅助跨径
-wg: 2.96712e5
+wg: 140.0e3
 dw: 2.8e4
-beam_E: 200.0e9
-beam_A: 0.9437
-beam_Iz: 1.1066
+beam_E: 206.0e9
+beam_A: 0.7437
+beam_Iz: 0.75
 
 # Tower z-EI curve: z [m], flexural rigidity EI [N*m^2].
 # E=3.3238e10 N/m^2
