@@ -104,9 +104,20 @@ def _fake_evaluation(problem, strands, stresses_mpa) -> EvaluationResult:
 
 
 @pytest.mark.parametrize("model_family", ["staged", "single_staged"])
-def test_summary_lists_final_strand_counts_from_left_to_right(tmp_path, model_family):
+def test_summary_lists_cable_results_from_left_to_right_and_matches_json(tmp_path, model_family):
     problem = _problem()
-    best = _fake_evaluation(problem, [20, 18, 22, 16], [500.0] * 4)
+    best = _fake_evaluation(
+        problem,
+        [20, 18, 22, 16],
+        [501.111, 502.222, 503.333, 504.444],
+    )
+    best = replace(
+        best,
+        design=replace(
+            best.design,
+            pretension=np.array([100.123, 200.456, 300.789, 400.012]),
+        ),
+    )
 
     optimize_cables._write_outputs(
         tmp_path,
@@ -117,7 +128,21 @@ def test_summary_lists_final_strand_counts_from_left_to_right(tmp_path, model_fa
     )
 
     summary = (tmp_path / "summary.txt").read_text(encoding="utf-8")
+    payload = json.loads((tmp_path / "best_design.json").read_text(encoding="utf-8"))
+    cables = payload["cables"]
+    left_to_right = [*reversed(cables[1::2]), *cables[0::2]]
+
     assert "final strand counts (left to right): 16, 18, 20, 22\n" in summary
+    assert (
+        "pretension_N (left to right): "
+        + ", ".join(f"{cable['pretension_N']:.2f}" for cable in left_to_right)
+        + "\n"
+    ) in summary
+    assert (
+        "final_stress_MPa (left to right): "
+        + ", ".join(f"{cable['final_stress_MPa']:.2f}" for cable in left_to_right)
+        + "\n"
+    ) in summary
 
 
 def test_resume_loader_accepts_legacy_design_without_search_metadata(tmp_path):

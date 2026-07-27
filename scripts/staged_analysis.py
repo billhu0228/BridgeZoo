@@ -428,7 +428,7 @@ def _plot_animation(result, n, scale, out, frames_dir, fps, beam_depth: float = 
         # 注意：竖向位移仍按 scale 放大后再等比绘制，几何整体不再被画框拉伸。
         ax.set_aspect("equal")
         ax.grid(True, alpha=0.25)
-        ax.legend(loc="upper right", fontsize=8, ncol=2)
+        ax.legend(loc="upper left", fontsize=8, ncol=2)
         fig.tight_layout()
         return ax.lines
 

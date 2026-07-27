@@ -671,11 +671,18 @@ def _band_verdict_line(best, result, stress_lower: float, stress_upper: float) -
     )
 
 
+def _left_to_right_values(values) -> np.ndarray:
+    """Return stage-major cable values in physical order: left tip to right tip."""
+
+    values = np.asarray(values)
+    return np.concatenate((values[1::2][::-1], values[0::2]))
+
+
 def _left_to_right_strand_counts(best) -> list[int]:
     """Return strand counts in physical deck order: left tip to right tip."""
 
     strands = np.asarray(best.design.strands, dtype=int)
-    return [int(value) for value in np.concatenate((strands[1::2][::-1], strands[0::2]))]
+    return [int(value) for value in _left_to_right_values(strands)]
 
 
 def _write_outputs(
@@ -698,6 +705,11 @@ def _write_outputs(
     (out_dir / "best_design.json").write_text(
         json.dumps(payload, indent=2, ensure_ascii=False),
         encoding="utf-8",
+    )
+
+    pretension_left_to_right = _left_to_right_values(best.design.pretension)
+    stress_left_to_right = _left_to_right_values(
+        [best.cable_stress_mpa[cid] for cid in best.cable_ids]
     )
 
     with (out_dir / "history.csv").open("w", newline="", encoding="utf-8") as f:
@@ -735,6 +747,10 @@ def _write_outputs(
         f"total strands: {best.metrics.total_strands}",
         "final strand counts (left to right): "
         + ", ".join(str(value) for value in _left_to_right_strand_counts(best)),
+        "pretension_N (left to right): "
+        + ", ".join(f"{value:.2f}" for value in pretension_left_to_right),
+        "final_stress_MPa (left to right): "
+        + ", ".join(f"{value:.2f}" for value in stress_left_to_right),
         (
             "stress MPa: "
             f"mean={best.metrics.stress_mean_mpa:.3f}, "
