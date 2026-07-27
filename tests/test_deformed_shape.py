@@ -6,11 +6,14 @@ matplotlib / openseespy。
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 
 from bridgezoo.fem.staged import StagedDirectSolver, build_staged_cantilever
 from bridgezoo.render.deformed_shape import deformed_chain_shape, hermite_frame_shape
+from scripts.staged_analysis import _farthest_deck_deformation_text
 
 ZERO = (0.0, 0.0, 0.0)
 
@@ -98,6 +101,22 @@ def test_chain_empty_and_single_node():
     xs, ys = deformed_chain_shape(coords, disp, [7], scale=2.0)
     np.testing.assert_allclose(xs, [3.0], atol=1e-12)
     np.testing.assert_allclose(ys, [-0.5], atol=1e-12)
+
+
+def test_farthest_deck_title_uses_current_true_displacement_in_mm():
+    result = SimpleNamespace(
+        deck_ids={0, 1, 101, 102},
+        coords={0: (0.0, 0.0), 1: (3.0, 0.0), 101: (-12.0, 0.0), 102: (-24.0, 0.0)},
+    )
+    # Node 102 is not installed in this frame. The title must use node 101's
+    # unscaled displacement, independent of the rendering scale factor.
+    record = SimpleNamespace(
+        disp={0: (0.0, 0.0, 0.0), 1: (0.0, 0.0, 0.0), 101: (0.0, -0.00126, 0.0)}
+    )
+
+    assert _farthest_deck_deformation_text(result, record) == (
+        "当前最远端真实竖向变形 dy=-1.3 mm"
+    )
 
 
 def test_chain_matches_nodes_on_real_staged_record():

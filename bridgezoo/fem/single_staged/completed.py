@@ -1,7 +1,7 @@
 """由施工计划派生的成桥(完成态)模型组装。
 
-:class:`bridgezoo.fem.staged.plan.StagedPlan` 在 :func:`build_staged_cantilever`
-末尾会附带一个 :class:`~bridgezoo.fem.staged.plan.CompletedState`(成桥完成态:所有梁段/
+:class:`bridgezoo.fem.single_staged.plan.StagedPlan` 在 :func:`build_staged_cantilever`
+末尾会附带一个 :class:`~bridgezoo.fem.single_staged.plan.CompletedState`(成桥完成态:所有梁段/
 拉索一次激活、用真实支座替代合龙平衡力)。本模块把该状态翻译成与求解器无关的
 :class:`StructuralModel`,即可分别交给自研直接刚度法
 :class:`~bridgezoo.fem.completed.direct.CompletedDirectSolver` 或
@@ -16,7 +16,7 @@ from __future__ import annotations
 import math
 
 from bridgezoo.fem.model import StructuralModel
-from bridgezoo.fem.staged.plan import StagedPlan
+from bridgezoo.fem.single_staged.plan import StagedPlan
 
 
 def build_completed_model(plan: StagedPlan, name: str | None = None) -> tuple[StructuralModel, dict]:
@@ -63,6 +63,8 @@ def build_completed_model(plan: StagedPlan, name: str | None = None) -> tuple[St
             tower_ids.append(nd.id)
         elif nd.role in {"tower", "tower_base"}:
             tower_ids.append(nd.id)
+        elif nd.role == "cable_support":
+            pass
         elif nd.y > 1e-9:
             anchor_ids.append(nd.id)
         else:

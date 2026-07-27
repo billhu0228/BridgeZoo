@@ -17,8 +17,10 @@ def test_first_increment_combines_segment_and_cable_only():
 
     first = plan.steps[0]
     assert first.record
-    assert len(first.new_nodes) == 2
-    assert len(first.new_frames) == 2
+    assert len([node for node in first.new_nodes if node.role == "deck"]) == 2
+    assert len([frame for frame in first.new_frames if frame.group == "deck"]) == 2
+    assert any(node.role == "tower" for node in first.new_nodes)
+    assert any(frame.group == "tower" for frame in first.new_frames)
     assert len(first.new_cables) == 2
 
     second = plan.steps[1]
@@ -147,7 +149,7 @@ def test_phase2_step_only_when_dw_nonzero():
     assert last.label == "phase2"
     assert last.record
     # 二期荷载覆盖全部主梁单元(各节段 + 合龙端段),且 wy=-dw(向下,与自重同约定)
-    girder_ids = {fr.id for step in plan.steps for fr in step.new_frames}
+    girder_ids = {fr.id for step in plan.steps for fr in step.new_frames if fr.group == "deck"}
     assert {ml.member for ml in last.member_loads} == girder_ids
     assert all(ml.wy == -dw for ml in last.member_loads)
     # phase2 不引入新构件(纯加载步)

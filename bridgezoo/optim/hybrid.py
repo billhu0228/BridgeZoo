@@ -47,6 +47,9 @@ class HybridOptimizationResult:
     history: list[EvaluationResult]
     # best 索股配置下 LP 最小可达最大违反量 s* [MPa](linear 连续层时填写)。
     feasibility_violation_mpa: float | None = None
+    # 本次 optimize 调用实际完成的搜索预算；供断点续跑累计记录。
+    outer_iterations_completed: int = 0
+    random_trials_completed: int = 0
 
 
 class CableHybridOptimizer:
@@ -176,6 +179,7 @@ class CableHybridOptimizer:
         history = [best]
         self._emit(f"initial best: objective={best.objective:.6g} total_strands={best.metrics.total_strands}")
         rng = np.random.default_rng(self.options.integer.seed)
+        random_trials_completed = 0
 
         for trial_index in range(self.options.integer.random_trials):
             trial = rng.integers(
@@ -186,6 +190,7 @@ class CableHybridOptimizer:
             )
             self._emit(f"random trial {trial_index + 1}/{self.options.integer.random_trials}")
             res = self._continuous_for(trial)
+            random_trials_completed += 1
             ev = res.evaluation
             history.append(ev)
             if self._accepts(res.feasibility_violation_mpa, ev.objective, best_feasibility, best.objective):
@@ -201,7 +206,9 @@ class CableHybridOptimizer:
                     f"{self._s_star_note(res.feasibility_violation_mpa)}"
                 )
 
+        outer_iterations_completed = 0
         for outer in range(self.options.integer.outer_iterations):
+            outer_iterations_completed += 1
             self._emit(f"outer iteration {outer + 1}/{self.options.integer.outer_iterations}")
             improved = False
             if self.options.integer.resize:
@@ -289,5 +296,9 @@ class CableHybridOptimizer:
             f"{verdict}{feasibility_note}"
         )
         return HybridOptimizationResult(
-            best=final, history=history, feasibility_violation_mpa=best_feasibility
+            best=final,
+            history=history,
+            feasibility_violation_mpa=best_feasibility,
+            outer_iterations_completed=outer_iterations_completed,
+            random_trials_completed=random_trials_completed,
         )

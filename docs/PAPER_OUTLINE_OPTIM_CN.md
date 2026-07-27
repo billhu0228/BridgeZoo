@@ -85,9 +85,10 @@
   `s* > 0` ⇒ 这套股数**无论怎么张拉都进不了带内**，差距恰为 `s*` MPa。`T_max = tension_bound × A`
   （默认 1600 MPa × 面积）。该证书还能**反哺外层**判断"该不该改股数"。
 
-- **第二相 —— 二次优化相（SLSQP + 解析梯度）**（[linear.py:152-190](../bridgezoo/optim/linear.py)）：
-  在仿射代理上最小化完整目标（线形 + 应力均匀度 + hinge² 越界惩罚；股数项与 `T` 无关，是常数略去）。
-  因代理仿射，目标对 `T` 的梯度可由 `M、D` **链式解析写出**（无有限差分，又快又稳）；应力带约束按
+- **第二相 —— 二次优化相（SLSQP + 解析梯度）**（[linear.py](../bridgezoo/optim/linear.py)）：
+  在仿射代理上最小化完整目标（线形 + 塔顶水平位移 + 应力均匀度 + hinge² 越界惩罚；
+  股数项与 `T` 无关，是常数略去）。因代理仿射，目标对 `T` 的梯度可由 `M、D、q`
+  **链式解析写出**（无有限差分，又快又稳）；应力带约束按
   第一相 `s*` 放宽（`band = s* + 1e-9`），**保证二次相最大违反不劣于 LP 最优**。
 
 - **(b)(c) 解决的失效模式与边界**：把 FEM 直接塞进 SLSQP 当硬约束，一旦初始点不可行，优化器
@@ -114,9 +115,9 @@
 
 ### 创新点 5：代理模型的"监理"——真实有限元在线校核（self-validating 设计）
 
-- **(a) 机制**：在内层最优张力处用**真实有限元复评**，与仿射代理预测交叉校核；偏差
-  `> 1 MPa`（`MODEL_MISMATCH_TOL_MPA`）即判定"后端实为非线性、代理不可信"，**fail-fast 报错**
-  并提示改用 `slsqp` 后端（[linear.py:250-257](../bridgezoo/optim/linear.py)）。
+- **(a) 机制**：在内层最优张力处用**真实有限元复评**，与仿射代理预测交叉校核；
+  应力偏差 `> 1 MPa` 或塔顶水平位移偏差 `> 1e-6 m` 即判定“后端实为非线性、
+  代理不可信”，**fail-fast 报错**并提示改用 `slsqp` 后端（[linear.py](../bridgezoo/optim/linear.py)）。
 - **(b) 论文表述**：把两个机制写成一对**互补关系**——"**仿射代理替昂贵 FEM 出力（保速度）**"
   与"**真实 FEM 反过来监理校核代理（保可信、自检适用域）**"。这是项目"一套定义、两个后端、
   结果可对照"（自研 direct vs OpenSees）一致性理念在优化层的延伸：代理给速度，监理给信任。
@@ -178,16 +179,19 @@
 - 2.5 双后端：自研直接刚度法（RL/优化内核、快）与 OpenSees（离线校核）；线性 Truss vs corotTruss。
 
 ### 第 3 章 精确仿射代理模型
-- 3.1 仿射性推导：`T` 仅入 RHS、`K` 与 `T` 无关 ⇒ `σ(T)=σ0+M·T`、`err(T)=err0+D·T`（含路径相关证明段）。
+- 3.1 仿射性推导：`T` 仅入 RHS、`K` 与 `T` 无关 ⇒ `σ(T)=σ0+M·T`、
+  `err(T)=err0+D·T`、`ux(T)=ux0+q·T`（含路径相关证明段）。
 - 3.2 `m+1` 标定与精度：差商即精确斜率；与 FEM 逐项一致（引测试数字）。
 - 3.3 批量"同结构多右端"构造与提速：去冗余分解原理、数据布局、24.4× 实测与逐位一致性。
 - 3.4 代理—FEM 交叉校核（监理）与适用域：`MODEL_MISMATCH_TOL_MPA`、fail-fast 回退。
 
 ### 第 4 章 两层优化框架
 - 4.1 问题形式化：MINLP；设计变量（整数股数 + 连续张力，阶段优先排序）；
-  目标 = 线形 RMSE² + 用料（线性）+ 应力均匀度（var）+ 越界 hinge² 惩罚（各项先除尺度再平方，
-  权重默认 shape=1.0 / strands=0.02 / uniform=0.2 / violation=100，尺度 shape=1e-3 m、stress=100 MPa、
-  strand=20）；约束 = 应力带 [800,1200] MPa（软约束）、张拉上限 1600 MPa、整数股数 [1,60]。
+  目标 = 线形 RMSE² + 塔顶水平位移²（目标 0）+ 用料（线性）+ 应力均匀度（var）
+  + 越界 hinge² 惩罚（各项先除尺度再平方，权重默认 shape=1.0 / tower=1.0 /
+  strands=0.02 / uniform=0.2 / violation=100；塔顶位移与线形共用 shape 尺度；
+  API 默认尺度 shape=1e-3 m、stress=100 MPa、strand=20）；约束 = 应力带 [800,1200] MPa
+  （软约束）、张拉上限 1600 MPa、整数股数 [1,60]。
 - 4.2 内层两相：LP 可行性相（`s*` 证书 + warm-start）→ 解析梯度 SLSQP 二次相（约束按 `s*` 放宽）。
 - 4.3 外层离散搜索：resize 大步跳跃、应力引导坐标搜索、随机重启、跨层 warm-start、收敛判据。
 - 4.4 **算法 1**：两层调索优化整体流程伪代码（外层调度 + 内层两相 + 监理校核）。
@@ -281,7 +285,7 @@
 - 算法全貌、默认参数、流程图、命令：[docs/索力优化算法说明.md](索力优化算法说明.md)。
 - 仿射模型 / 两相 / 监理校核：[bridgezoo/optim/linear.py](../bridgezoo/optim/linear.py)
   （`AffineCableModel`、`build_affine_model`、`_min_violation_lp`、`_model_objective_and_grad`、
-  `MODEL_MISMATCH_TOL_MPA = 1.0`）。
+  `MODEL_MISMATCH_TOL_MPA = 1.0`、`MODEL_DISPLACEMENT_MISMATCH_TOL_M = 1e-6`）。
 - 外层搜索 / resize / 应力引导 / warm-start：[bridgezoo/optim/hybrid.py](../bridgezoo/optim/hybrid.py)
   （默认 `outer_iterations=4`、`coordinate_step=1`、`random_trials=0`、`resize=True`）。
 - 目标函数分解：[bridgezoo/optim/objectives.py](../bridgezoo/optim/objectives.py)；

@@ -1,7 +1,7 @@
 """自研二维直接刚度法的逐阶段(增量、变刚度)求解器 —— RL 训练内核。
 
-消费 :class:`bridgezoo.fem.staged.plan.StagedPlan`,返回 :class:`StagedResult`。纯 numpy,
-**线性、小位移**假设(求快,RL 内核);与 :mod:`bridgezoo.fem.staged.opensees` 后端
+消费 :class:`bridgezoo.fem.single_staged.plan.StagedPlan`,返回 :class:`StagedResult`。纯 numpy,
+**线性、小位移**假设(求快,RL 内核);与 :mod:`bridgezoo.fem.single_staged.opensees` 后端
 执行同一计划、返回同一结果类型,逐项可比。
 
 小位移下与 OpenSees ``linear`` 模式逐项吻合到机器精度;在刻意放大的大挠度算例下,
@@ -19,7 +19,7 @@ from bridgezoo.fem.kernels import (
     _frame_transform,
     _gravity_feq_global,
 )
-from bridgezoo.fem.staged.plan import (
+from bridgezoo.fem.single_staged.plan import (
     BalanceDof,
     BuildStep,
     NewNode,

@@ -12,10 +12,12 @@ no assumption that ``x = node_id * seg_len``.
 
 Usage::
 
-    py -3.12 -m scripts.staged_analysis --n 6
-    py -3.12 -m scripts.staged_analysis --n 8 --scale 20 --backend opensees
-    py -3.12 -m scripts.staged_analysis --frames-dir results/staged_frames
-    py -3.12 -m scripts.staged_analysis --design results/cable_opt/best_design.json
+    python -m scripts.staged_analysis --bridge model --n 6
+    python -m scripts.staged_analysis --bridge p4b --n 8 --scale 20 --backend opensees
+    python -m scripts.staged_analysis --bridge model
+    python -m scripts.staged_analysis --bridge omo
+    python -m scripts.staged_analysis --bridge p4b --frames-dir results/staged_frames
+    python -m scripts.staged_analysis --design results/cable_opt/best_design.json
 
 Default output: ``results/staged_deck_growth.gif`` under the project root.
 """
@@ -33,47 +35,7 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 PROJECT_ROOT = Path(ROOT)
 
-from bridgezoo.fem.staged import (
-    StagedDirectSolver,
-    StagedOpenSeesSolver,
-    build_staged_cantilever,
-)
-
-MODEL_DEFAULTS = {
-    "n": 6,
-    "anchor_base": 32.0,
-    "anchor_spacing": 2.0,
-    "anchor_free": 10.0,
-    "left_start": 12.0,
-    "left_spacing": 8.0,
-    "left_end": 4.0,
-    "right_start": 12.0,
-    "right_spacing": 12.0,
-    "right_end": 4.0,
-    "wg": 1.0e5,
-    "dw": 0.0,             # 二期均布荷载 [N/m]（向下）
-    "beam_E": 20e9,        # 主梁弹性模量 [Pa]
-    "beam_A": 10.0,        # 主梁截面积 [m^2]
-    "beam_Iz": 10.0 / 12.0,  # 主梁截面惯性矩 [m^4]
-}
-
-P4B_DEFAULTS = {
-    "n": 19,
-    "anchor_base": 60.0,
-    "anchor_spacing": 2.5,
-    "anchor_free": 5.0,
-    "left_start": 18.5,
-    "left_spacing": 12.0,
-    "left_end": 5.0,
-    "right_start": 18.5,
-    "right_spacing": 12.0,
-    "right_end": 8.0,
-    "wg": 3.2e5,
-    "dw": 4.0e5,             # 二期均布荷载 [N/m]（向下）
-    "beam_E": 200e9,        # 主梁弹性模量 [Pa]
-    "beam_A": 2.3,        # 主梁截面积 [m^2]
-    "beam_Iz": 2.0,  # 主梁截面惯性矩 [m^4]
-}
+from scripts.bridge_config import load_bridge_config, staged_api_for_bridge_type
 
 
 
@@ -99,28 +61,37 @@ def default_pretension(
     return out
 
 
-def _load_design(path: Path) -> tuple[dict[int, int], dict[int, float]]:
-    """读优化器输出的 ``best_design.json``,返回 {cable_id: 股数} / {cable_id: 张力 N}。"""
+def _load_design(path: Path) -> tuple[dict[int, int], dict[int, float], str]:
+    """读优化器输出，返回索股、张力和对应的桥梁 YAML。"""
     import json
 
     data = json.loads(path.read_text(encoding="utf-8"))
+    bridge_yaml = data.get("bridge_yaml")
+    if not isinstance(bridge_yaml, str) or not bridge_yaml.strip():
+        raise ValueError(
+            f"design file has no explicit 'bridge_yaml': {path}; "
+            "rerun scripts.optimize_cables with --bridge"
+        )
     cables = data.get("cables")
     if not cables:
         raise ValueError(f"design file has no 'cables' entries: {path}")
     strand_input = {int(c["cable_id"]): int(c["strands"]) for c in cables}
     force_input = {int(c["cable_id"]): float(c["pretension_N"]) for c in cables}
-    return strand_input, force_input
+    return strand_input, force_input, bridge_yaml
 
 
 def run(args) -> None:
+    build_staged_cantilever, StagedDirectSolver, StagedOpenSeesSolver = staged_api_for_bridge_type(
+        args.bridge_defaults["bridge_type"]
+    )
     if args.design:
         design_path = _resolve_project_path(args.design)
-        strand_input, force_input = _load_design(design_path)
+        strand_input, force_input, _ = _load_design(design_path)
         # 设计文件按 1000+i/2000+i 各 n 根索;--n 缺省时由文件推断。
         n = args.n if args.n is not None else len(strand_input) // 2
         print(f"使用优化设计:{design_path}（n={n}，总索股 {sum(strand_input.values())}）")
     else:
-        n = args.n if args.n is not None else P4B_DEFAULTS["n"]
+        n = args.n if args.n is not None else args.bridge_defaults["n"]
         pretension = default_pretension(
             n,
             args.anchor_base,
@@ -153,8 +124,19 @@ def run(args) -> None:
         beam_E=args.beam_E,
         beam_A=args.beam_A,
         beam_Iz=args.beam_Iz,
+        tower_stiffness=args.bridge_defaults["tower_stiffness"],
+        tower_element_size=args.bridge_defaults["tower_element_size"],
+        tower_axial_rigidity=args.bridge_defaults["tower_axial_rigidity"],
         strands=strand_input,
         pretension=force_input,
+        **(
+            {
+                "right_fix": args.bridge_defaults["right_fix"],
+                "left_span": args.bridge_defaults["left_span"],
+            }
+            if args.bridge_defaults["bridge_type"] == "single"
+            else {}
+        ),
     )
     solver = StagedOpenSeesSolver() if args.backend == "opensees" else StagedDirectSolver()
     result = solver.run(plan)
@@ -181,6 +163,17 @@ def _present_deck(result, record) -> list[int]:
     """本阶段已安装的主梁节点，按 x 升序（左端→右端）。"""
     ids = [nid for nid in result.deck_ids if nid in record.disp]
     return sorted(ids, key=lambda nid: result.coords[nid][0])
+
+
+def _farthest_deck_deformation_text(result, record) -> str:
+    """Return the farthest installed deck node's true vertical displacement."""
+
+    deck = _present_deck(result, record)
+    if not deck:
+        return "当前最远端真实竖向变形 dy=--"
+    farthest = max(deck, key=lambda nid: abs(result.coords[nid][0]))
+    true_dy_mm = record.disp[farthest][1] * 1000.0
+    return f"当前最远端真实竖向变形 dy={true_dy_mm:.1f} mm"
 
 
 def _force_label(fx: float, fy: float, mz: float) -> str:
@@ -338,9 +331,14 @@ def _plot_animation(result, n, scale, out, frames_dir, fps, beam_depth: float = 
         for stale in frames_path.glob("stage_*.png"):
             stale.unlink()
 
-    # 画幅范围（含塔、所有梁节点、放大后的变形）
-    xs_all = [coords[nid][0] for nid in result.deck_ids]
-    tower_top = max((coords[a][1] for a in result.anchor_ids), default=10.0)
+    # 画幅范围：single 模型的右索固定地锚不是主梁节点，也必须纳入横向范围。
+    cable_endpoint_ids = {
+        nid
+        for endpoints in result.cable_nodes.values()
+        for nid in endpoints
+    }
+    xs_all = [coords[nid][0] for nid in {*result.deck_ids, *cable_endpoint_ids}]
+    tower_top = max((coords[a][1] for a in result.tower_ids), default=10.0)
     all_y = [coords[nid][1] + rec.disp[nid][1] * scale
              for rec in records for nid in result.deck_ids if nid in rec.disp]
     span = (max(xs_all) - min(xs_all)) or 1.0
@@ -366,11 +364,15 @@ def _plot_animation(result, n, scale, out, frames_dir, fps, beam_depth: float = 
         xc, yc = deformed_chain_shape(coords, rec.disp, deck, scale=scale)
         xn = [coords[nid][0] + rec.disp[nid][0] * scale for nid in deck]
 
-        # 设计轴线 + 塔 + 锚点
+        # 设计轴线 + 可变形索塔 + 锚点
         ax.plot([min(xs_all), max(xs_all)], [0, 0], color="0.82", lw=1.0, ls="--", label="设计主梁轴线")
-        ax.plot([0, 0], [0, tower_top], color="0.35", lw=3.0, label="索塔")
-        ax.plot([coords[a][0] for a in result.anchor_ids],
-                [coords[a][1] for a in result.anchor_ids],
+        tower = sorted((nid for nid in result.tower_ids if nid in rec.disp), key=lambda nid: coords[nid][1])
+        ax.plot([0, 0], [0, tower_top], color="0.75", lw=1.0, ls="--", label="索塔设计轴线")
+        ax.plot([coords[nid][0] + rec.disp[nid][0] * scale for nid in tower],
+                [coords[nid][1] + rec.disp[nid][1] * scale for nid in tower],
+                color="0.35", lw=3.0, label="变形索塔")
+        ax.plot([coords[a][0] + rec.disp[a][0] * scale for a in result.anchor_ids],
+                [coords[a][1] + rec.disp[a][1] * scale for a in result.anchor_ids],
                 ls="none", marker="_", ms=10, color="0.35")
 
         # 活动拉索（扇面）
@@ -378,8 +380,10 @@ def _plot_animation(result, n, scale, out, frames_dir, fps, beam_depth: float = 
         for cid, force in rec.cable_force.items():
             i, j = result.cable_nodes[cid]
             anc, deckn = (i, j) if i in result.anchor_ids else (j, i)
-            ax.plot([coords[anc][0], coords[deckn][0] + rec.disp[deckn][0] * scale],
-                    [coords[anc][1], rec.disp[deckn][1] * scale],
+            ax.plot([coords[anc][0] + rec.disp[anc][0] * scale,
+                     coords[deckn][0] + rec.disp[deckn][0] * scale],
+                    [coords[anc][1] + rec.disp[anc][1] * scale,
+                     coords[deckn][1] + rec.disp[deckn][1] * scale],
                     color="#4f8fba", lw=1.1, alpha=0.75,
                     label="拉索" if first_cable else None)
             first_cable = False
@@ -406,11 +410,16 @@ def _plot_animation(result, n, scale, out, frames_dir, fps, beam_depth: float = 
                             rec.disp[deck[nb]], rec.disp[nid], scale=scale)
                         ax.plot(hx, hy, color="#b2182b", lw=4.0, alpha=0.9)
 
-        tips = [nid for nid in (200, 201) if nid in rec.disp]
+        left_tip_id = 202 if 202 in result.deck_ids else 201
+        tips = [nid for nid in (200, left_tip_id) if nid in rec.disp]
         tiptxt = "  ".join(f"{'右' if t == 200 else '左'}端 dy={rec.disp[t][1] * 1000:.1f}mm" for t in tips)
+        farthest_deformation = _farthest_deck_deformation_text(result, rec)
         if k == len(records) - 1:
             _draw_applied_loads(ax, result, rec, scale, span)
-        ax.set_title(f"正向逐阶段半桥施工：{rec.label}   {tiptxt}")
+        title_parts = [f"正向逐阶段半桥施工：{rec.label}", farthest_deformation]
+        if tiptxt:
+            title_parts.append(tiptxt)
+        ax.set_title("   ".join(title_parts))
         ax.set_xlabel("x [m]")
         ax.set_ylabel(f"y [m]  (位移放大 {scale:g} 倍)")
         ax.set_xlim(xmin, xmax)
@@ -437,32 +446,41 @@ def _plot_animation(result, n, scale, out, frames_dir, fps, beam_depth: float = 
     plt.close(fig)
 
 
-def main() -> None:
-    USE_MODEL=P4B_DEFAULTS
+def build_parser(
+    bridge_defaults: dict[str, object],
+    *,
+    bridge_default: str,
+) -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="绘制逐阶段双悬臂主梁增长与变形过程（扇面索）")
+    p.set_defaults(bridge_defaults=dict(bridge_defaults))
+    p.add_argument(
+        "--bridge",
+        default=bridge_default,
+        help="桥梁 YAML 配置；未给 --design 时必须显式指定，给设计文件时从 bridge_yaml 恢复",
+    )
     p.add_argument("--n", type=int, default=None,
-                   help=f"每侧索数（缺省 {USE_MODEL['n']}；给 --design 时由设计文件推断）")
+                   help=f"每侧索数（缺省 {bridge_defaults['n']}；给 --design 时由设计文件推断）")
     p.add_argument("--design", type=str, default=None,
                    help="优化器输出的 best_design.json 路径（scripts.optimize_cables 生成），"
                         "用其索股与张力替代内置缺省；几何参数仍来自命令行，须与优化时一致")
     p.add_argument("--backend", choices=["direct", "opensees"], default="opensees")
     # 扇面锚点
-    p.add_argument("--anchor-base", type=float, default=USE_MODEL["anchor_base"], help="参数a：最低锚点高度")
-    p.add_argument("--anchor-spacing", type=float, default=USE_MODEL["anchor_spacing"], help="参数b：锚点间距")
-    p.add_argument("--anchor-free", type=float, default=USE_MODEL["anchor_free"], help="参数c：顶部自由高度")
+    p.add_argument("--anchor-base", type=float, default=bridge_defaults["anchor_base"], help="参数a：最低锚点高度")
+    p.add_argument("--anchor-spacing", type=float, default=bridge_defaults["anchor_spacing"], help="参数b：锚点间距")
+    p.add_argument("--anchor-free", type=float, default=bridge_defaults["anchor_free"], help="参数c：顶部自由高度")
     # 双悬臂（左右）
-    p.add_argument("--left-start", type=float, default=USE_MODEL["left_start"])
-    p.add_argument("--left-spacing", type=float, default=USE_MODEL["left_spacing"])
-    p.add_argument("--left-end", type=float, default=USE_MODEL["left_end"])
-    p.add_argument("--right-start", type=float, default=USE_MODEL["right_start"])
-    p.add_argument("--right-spacing", type=float, default=USE_MODEL["right_spacing"])
-    p.add_argument("--right-end", type=float, default=USE_MODEL["right_end"])
-    p.add_argument("--wg", type=float, default=USE_MODEL["wg"], help="主梁自重线荷载 [N/m]")
-    p.add_argument("--dw", type=float, default=USE_MODEL["dw"],
+    p.add_argument("--left-start", type=float, default=bridge_defaults["left_start"])
+    p.add_argument("--left-spacing", type=float, default=bridge_defaults["left_spacing"])
+    p.add_argument("--left-end", type=float, default=bridge_defaults["left_end"])
+    p.add_argument("--right-start", type=float, default=bridge_defaults["right_start"])
+    p.add_argument("--right-spacing", type=float, default=bridge_defaults["right_spacing"])
+    p.add_argument("--right-end", type=float, default=bridge_defaults["right_end"])
+    p.add_argument("--wg", type=float, default=bridge_defaults["wg"], help="主梁自重线荷载 [N/m]")
+    p.add_argument("--dw", type=float, default=bridge_defaults["dw"],
                    help="二期均布荷载 [N/m]（向下；>0 时成桥后追加一个 phase2 阶段施加于全主梁）")
-    p.add_argument("--beam-E", type=float, default=USE_MODEL["beam_E"], help="主梁弹性模量 E [Pa]")
-    p.add_argument("--beam-A", type=float, default=USE_MODEL["beam_A"], help="主梁截面积 A [m^2]")
-    p.add_argument("--beam-Iz", type=float, default=USE_MODEL["beam_Iz"], help="主梁截面惯性矩 I [m^4]")
+    p.add_argument("--beam-E", type=float, default=bridge_defaults["beam_E"], help="主梁弹性模量 E [Pa]")
+    p.add_argument("--beam-A", type=float, default=bridge_defaults["beam_A"], help="主梁截面积 A [m^2]")
+    p.add_argument("--beam-Iz", type=float, default=bridge_defaults["beam_Iz"], help="主梁截面惯性矩 I [m^4]")
     p.add_argument("--scale", type=float, default=10.0, help="竖向位移绘图放大倍数")
     p.add_argument("--beam-depth", type=float, default=1.0,
                    help="主梁绘制梁高 [m]（真实尺度，不随位移放大；0=仅画中轴线；"
@@ -474,7 +492,53 @@ def main() -> None:
                    help="结果渲染模式：plot=动画(默认)，text=文本汇总，both=两者")
     p.add_argument("--text-out", type=str, default="results/text_results.txt",
                    help="text 模式下额外落盘的文本文件路径（默认仅打印到 stdout）")
-    args = p.parse_args()
+    return p
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    bootstrap = argparse.ArgumentParser(add_help=False)
+    bootstrap.add_argument("--bridge")
+    bootstrap.add_argument("--design")
+    known, _ = bootstrap.parse_known_args(argv)
+
+    design_bridge = None
+    if known.design is not None:
+        design_path = _resolve_project_path(known.design)
+        _, _, design_bridge = _load_design(design_path)
+
+    bridge_source = design_bridge or known.bridge
+    if bridge_source is None:
+        bootstrap.error("--bridge is required unless --design supplies an explicit bridge_yaml")
+
+    bridge_path = _resolve_bridge_yaml(bridge_source)
+    defaults = load_bridge_config(bridge_path)
+    parser = build_parser(defaults, bridge_default=bridge_source)
+    args = parser.parse_args(argv)
+
+    if design_bridge is not None and known.bridge is not None:
+        cli_path = _resolve_bridge_yaml(known.bridge).resolve()
+        if cli_path != bridge_path.resolve():
+            parser.error(
+                f"--bridge resolves to {cli_path}, but --design declares {bridge_path}"
+            )
+    return args
+
+
+def _resolve_bridge_yaml(source: str) -> Path:
+    """Resolve project-relative persisted paths as well as aliases/absolute paths."""
+
+    path = Path(source)
+    if not path.is_absolute():
+        project_path = PROJECT_ROOT / path
+        if project_path.is_file():
+            return project_path.resolve()
+    from scripts.bridge_config import resolve_bridge_config
+
+    return resolve_bridge_config(source).resolve()
+
+
+def main() -> None:
+    args = parse_args()
     run(args)
 
 

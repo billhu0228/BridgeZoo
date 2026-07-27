@@ -6,12 +6,6 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from bridgezoo.fem.staged import (
-    StagedDirectBatchSolver,
-    StagedDirectSolver,
-    StagedOpenSeesSolver,
-    build_staged_cantilever,
-)
 from bridgezoo.fem.staged.plan import StagedResult
 from bridgezoo.optim.objectives import ObjectiveBreakdown, objective_breakdown, stress_violation_mpa
 from bridgezoo.optim.problem import CableOptimizationProblem
@@ -35,6 +29,7 @@ class DesignMetrics:
     stress_max_mpa: float
     stress_violation_rms_mpa: float
     stress_violation_max_mpa: float
+    tower_top_dx_m: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -53,6 +48,9 @@ class CableDesignEvaluator:
     def __init__(self, problem: CableOptimizationProblem):
         self.problem = problem
         self.layout = CableLayout(problem.n_seg)
+        self._builder, self._direct_solver, self._batch_solver, self._opensees_solver = _model_api(
+            problem.model_family
+        )
 
     def build_plan(self, strands, pretension):
         strands = validate_strand_vector(
@@ -65,20 +63,23 @@ class CableDesignEvaluator:
         kwargs = self.problem.builder_kwargs()
         kwargs["strands"] = self.layout.as_int_mapping(strands)
         kwargs["pretension"] = self.layout.as_mapping(pretension)
-        return build_staged_cantilever(**kwargs)
+        return self._builder(**kwargs)
 
     def run_solver(self, plan) -> StagedResult:
         if self.problem.backend == "direct":
-            return StagedDirectSolver().run(plan)
+            return self._direct_solver().run(plan)
         if self.problem.backend == "opensees":
-            return StagedOpenSeesSolver().run(plan)
+            return self._opensees_solver().run(plan)
         raise ValueError(f"unknown optimization backend: {self.problem.backend!r}")
 
-    def _extract_case(self, result: StagedResult) -> tuple[dict[int, float], dict[int, float]]:
-        """从一次 staged 结果末态提取 ``(deck_errors_m, cable_stress_mpa)``。
+    def _extract_case(
+        self, result: StagedResult
+    ) -> tuple[dict[int, float], dict[int, float], float]:
+        """从一次 staged 结果末态提取线形误差、索应力和塔顶水平位移。
 
         单解与批量(:meth:`evaluate_batch`)共用,保证两条路径的后处理逐位一致。
-        deck 节点按 x 升序;线形误差 = 末态 uy − 目标线形;索应力换算到 MPa。
+        deck 节点按 x 升序;线形误差 = 末态 uy − 目标线形;索应力换算到 MPa;
+        塔顶取 ``tower_ids`` 中设计高程最高的节点,目标水平位移为 0。
         """
         if not result.records:
             raise RuntimeError("staged solver produced no records")
@@ -92,19 +93,19 @@ class CableDesignEvaluator:
         cable_stress_mpa = {
             cid: float(final.cable_stress[cid] / 1e6) for cid in self.layout.cable_ids
         }
-        return deck_errors, cable_stress_mpa
+        tower_nodes = [
+            nid for nid in result.tower_ids if nid in result.coords and nid in final.disp
+        ]
+        if not tower_nodes:
+            raise RuntimeError("staged solver produced no displaced tower nodes")
+        tower_top = max(tower_nodes, key=lambda nid: result.coords[nid][1])
+        tower_top_dx_m = float(final.disp[tower_top][0])
+        return deck_errors, cable_stress_mpa, tower_top_dx_m
 
-    def evaluate_batch(
+    def evaluate_affine_batch(
         self, strands, tension_matrix
-    ) -> list[tuple[dict[int, float], dict[int, float]]]:
-        """同一 strands、多预张力工况的批量前向评估。
-
-        ``tension_matrix`` 形状 ``(m, K)``,每列一个预张力工况;返回每列的
-        ``(deck_errors_m, cable_stress_mpa)``。``direct`` 后端走
-        :class:`StagedDirectBatchSolver`(每施工阶段刚度只分解一次,多右端共享),
-        与逐列 :meth:`evaluate` 机器精度一致;其他后端回退为按列循环 :meth:`evaluate`。
-        服务 :func:`bridgezoo.optim.linear.build_affine_model`。
-        """
+    ) -> list[tuple[dict[int, float], dict[int, float], float]]:
+        """批量提取仿射模型所需的线形、索应力和塔顶水平位移。"""
         strands = validate_strand_vector(
             strands,
             self.layout,
@@ -119,9 +120,23 @@ class CableDesignEvaluator:
         ncase = tension_matrix.shape[1]
         plans = [self.build_plan(strands, tension_matrix[:, k]) for k in range(ncase)]
         if self.problem.backend == "direct":
-            results = StagedDirectBatchSolver().run_batch(plans)
-            return [self._extract_case(r) for r in results]
+            results = self._batch_solver().run_batch(plans)
+            return [self._extract_case(result) for result in results]
         return [self._extract_case(self.run_solver(plan)) for plan in plans]
+
+    def evaluate_batch(
+        self, strands, tension_matrix
+    ) -> list[tuple[dict[int, float], dict[int, float]]]:
+        """同一 strands、多预张力工况的批量前向评估。
+
+        ``tension_matrix`` 形状 ``(m, K)``,每列一个预张力工况;返回每列的
+        ``(deck_errors_m, cable_stress_mpa)``。``direct`` 后端走
+        :class:`StagedDirectBatchSolver`(每施工阶段刚度只分解一次,多右端共享),
+        与逐列 :meth:`evaluate` 机器精度一致;其他后端回退为按列循环 :meth:`evaluate`。
+        服务 :func:`bridgezoo.optim.linear.build_affine_model`。
+        """
+        cases = self.evaluate_affine_batch(strands, tension_matrix)
+        return [(deck_errors, cable_stress) for deck_errors, cable_stress, _ in cases]
 
     def evaluate(self, strands, pretension, *, keep_result: bool = False) -> EvaluationResult:
         strands = validate_strand_vector(
@@ -133,7 +148,7 @@ class CableDesignEvaluator:
         pretension = validate_tension_vector(pretension, self.layout)
         plan = self.build_plan(strands, pretension)
         result = self.run_solver(plan)
-        deck_errors, cable_stress_mpa = self._extract_case(result)
+        deck_errors, cable_stress_mpa, tower_top_dx_m = self._extract_case(result)
 
         err = np.asarray(list(deck_errors.values()), dtype=float)
         shape_rmse = float(np.sqrt(np.mean(err * err))) if err.size else 0.0
@@ -152,6 +167,7 @@ class CableDesignEvaluator:
             stress_max_mpa=float(np.max(stress)),
             stress_violation_rms_mpa=float(np.sqrt(np.mean(violations * violations))),
             stress_violation_max_mpa=float(np.max(violations)),
+            tower_top_dx_m=tower_top_dx_m,
         )
         components = objective_breakdown(
             shape_rmse_m=metrics.shape_rmse_m,
@@ -159,6 +175,7 @@ class CableDesignEvaluator:
             stress_std_mpa=metrics.stress_std_mpa,
             stress_violation_rms_mpa=metrics.stress_violation_rms_mpa,
             weights=self.problem.weights,
+            tower_top_dx_m=metrics.tower_top_dx_m,
         )
         return EvaluationResult(
             design=CableDesign(strands=strands.copy(), pretension=pretension.copy()),
@@ -176,3 +193,27 @@ class CableDesignEvaluator:
             return self.evaluate(strands, pretension).objective
         except (ValueError, RuntimeError, FloatingPointError):
             return 1.0e30
+
+
+def _model_api(model_family: str):
+    """Resolve the staged model family without coupling their implementations."""
+
+    if model_family == "staged":
+        from bridgezoo.fem.staged import (
+            StagedDirectBatchSolver,
+            StagedDirectSolver,
+            StagedOpenSeesSolver,
+            build_staged_cantilever,
+        )
+
+        return build_staged_cantilever, StagedDirectSolver, StagedDirectBatchSolver, StagedOpenSeesSolver
+    if model_family == "single_staged":
+        from bridgezoo.fem.single_staged import (
+            StagedDirectBatchSolver,
+            StagedDirectSolver,
+            StagedOpenSeesSolver,
+            build_staged_cantilever,
+        )
+
+        return build_staged_cantilever, StagedDirectSolver, StagedDirectBatchSolver, StagedOpenSeesSolver
+    raise ValueError(f"unknown optimization model family: {model_family!r}")

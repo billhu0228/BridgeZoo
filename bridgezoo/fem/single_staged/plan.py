@@ -6,8 +6,8 @@
   一次"激活构件 + 施加增量荷载 + 求解增量"的施工动作(装节段 / 张索)。
 - :class:`StagedResult` / :class:`StagedStepRecord` —— 两种后端统一返回的结果容器,逐项可比。
 
-两个后端(:mod:`bridgezoo.fem.staged.direct` 自研增量直接刚度法、
-:mod:`bridgezoo.fem.staged.opensees` OpenSees 校核)都消费**同一个** StagedPlan,
+两个后端(:mod:`bridgezoo.fem.single_staged.direct` 自研增量直接刚度法、
+:mod:`bridgezoo.fem.single_staged.opensees` OpenSees 校核)都消费**同一个** StagedPlan,
 返回**同一种** StagedResult。
 
 切线激活(零应力诞生)
@@ -33,7 +33,7 @@ class NewNode:
     x: float
     y: float
     attach: int | None = None  # 切线附着节点;None 表示按零位移就位(如根部/锚点)
-    role: str | None = None  # deck / anchor / tower / tower_base;None 时保留坐标分类兼容逻辑
+    role: str | None = None  # deck / anchor / tower / tower_base / cable_support
 
 
 @dataclass
@@ -177,6 +177,8 @@ def _attach_geometry(result: StagedResult, plan: StagedPlan) -> None:
             result.tower_ids.append(nd.id)
         elif nd.role in {"tower", "tower_base"}:
             result.tower_ids.append(nd.id)
+        elif nd.role == "cable_support":
+            pass
         elif nd.y > 1e-9:
             result.anchor_ids.append(nd.id)   # 旧计划无 role 时按坐标兼容分类
         else:
