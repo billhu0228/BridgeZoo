@@ -59,6 +59,7 @@
 - [x] `direct3d` / `opensees3d`：同模型线弹性空间梁/杆双后端及交叉测试
 - [x] `scripts.single_staged_3d`：最小 CLI 输入、终端摘要及 JSON 输出
 - [x] 完整 OMO 3D YAML 输入 + OpenSees 结果的阶段 PNG/GIF 空间渲染
+- [x] 几何施工完成后追加独立二期荷载阶段：两根主梁线荷载 + 桥面板均布压强
 - [x] `optim.single_staged3d` + `scripts.optimize_cables_3d`：背索/主跨索对称分组的独立
   3D 优化入口，复用仿射 LP+SLSQP、股数搜索、随机试探和断点续跑，支持自研/OpenSees
   双后端并输出组到实体索的映射

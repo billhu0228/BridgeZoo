@@ -60,7 +60,9 @@ class SingleStaged3DConfig(SingleTowerGeometry3D):
     """
 
     gravity: float = 9.806
-    superimposed_dead_load: float = 0.0  # deck area load, N/m²
+    secondary_main_girder_line_load: float = 0.0  # per main girder, N/m
+    secondary_deck_pressure: float = 0.0  # full deck surface, N/m²
+    superimposed_dead_load: float | None = None  # legacy alias for deck pressure
 
     strand_area: float = 1.4e-4
     strands_per_cable: int | tuple[int, ...] | tuple[tuple[int, int], ...] = 55
@@ -101,6 +103,12 @@ class SingleStaged3DConfig(SingleTowerGeometry3D):
             self.tower_wall_thickness,
         )
 
+    @property
+    def resolved_secondary_deck_pressure(self) -> float:
+        if self.superimposed_dead_load is not None:
+            return float(self.superimposed_dead_load)
+        return float(self.secondary_deck_pressure)
+
     def __post_init__(self) -> None:
         super().__post_init__()
         positive = {"gravity": self.gravity, "strand_area": self.strand_area}
@@ -109,8 +117,25 @@ class SingleStaged3DConfig(SingleTowerGeometry3D):
         ]
         if invalid:
             raise ValueError(f"positive finite values required for: {', '.join(invalid)}")
-        if self.superimposed_dead_load < 0.0:
-            raise ValueError("superimposed_dead_load must be nonnegative")
+        secondary = {
+            "secondary_main_girder_line_load": self.secondary_main_girder_line_load,
+            "secondary_deck_pressure": self.secondary_deck_pressure,
+        }
+        if self.superimposed_dead_load is not None:
+            secondary["superimposed_dead_load"] = self.superimposed_dead_load
+            if self.secondary_deck_pressure != 0.0:
+                raise ValueError(
+                    "use secondary_deck_pressure or legacy superimposed_dead_load, not both"
+                )
+        invalid_secondary = [
+            name
+            for name, value in secondary.items()
+            if not math.isfinite(value) or value < 0.0
+        ]
+        if invalid_secondary:
+            raise ValueError(
+                f"finite nonnegative values required for: {', '.join(invalid_secondary)}"
+            )
         _stage_pair_values(
             self.strands_per_cable,
             self.n_seg,
@@ -340,6 +365,7 @@ def build_single_staged_3d(
         config.deck_thickness,
     )
     slab_longitudinal_ids: list[int] = []
+    main_girder_ids: list[int] = []
     for interval, (left, right) in enumerate(zip(stations, stations[1:])):
         activation = max(left.activation_stage, right.activation_stage)
         for side in range(2):
@@ -356,6 +382,7 @@ def build_single_staged_3d(
                     activation_stage=activation,
                 )
             )
+            main_girder_ids.append(main_id)
             model.add_frame(
                 FrameElement3D(
                     slab_id,
@@ -532,16 +559,29 @@ def build_single_staged_3d(
                 activation_stage=frame.activation_stage,
             )
         )
-    if config.superimposed_dead_load:
-        final_stage_index = config.n_seg + 2 if config.left_span is not None else config.n_seg + 1
-        line_load = -config.superimposed_dead_load * config.deck_width / 2.0
+    geometry_final_stage = config.n_seg + 2 if config.left_span is not None else config.n_seg + 1
+    deck_pressure = config.resolved_secondary_deck_pressure
+    has_secondary_load = bool(config.secondary_main_girder_line_load or deck_pressure)
+    secondary_stage_index = geometry_final_stage + 1
+    if config.secondary_main_girder_line_load:
+        for member_id in main_girder_ids:
+            model.add_frame_load(
+                FrameLoad3D(
+                    member_id,
+                    qz=-config.secondary_main_girder_line_load,
+                    load_case="secondary_main_girder_line",
+                    activation_stage=secondary_stage_index,
+                )
+            )
+    if deck_pressure:
+        line_load = -deck_pressure * config.deck_width / 2.0
         for member_id in slab_longitudinal_ids:
             model.add_frame_load(
                 FrameLoad3D(
                     member_id,
                     qz=line_load,
-                    load_case="superimposed_dead",
-                    activation_stage=final_stage_index,
+                    load_case="secondary_deck_pressure",
+                    activation_stage=secondary_stage_index,
                 )
             )
 
@@ -564,6 +604,14 @@ def build_single_staged_3d(
                 "activate the auxiliary span and its end bearings",
             )
         )
+    if has_secondary_load:
+        stages.append(
+            ConstructionStage3D(
+                secondary_stage_index,
+                "secondary_load",
+                "apply main-girder line loads and deck-surface pressure",
+            )
+        )
 
     metadata = {
         "coordinate_system": "x longitudinal, y transverse, z vertical",
@@ -578,6 +626,7 @@ def build_single_staged_3d(
         "girder_spacing": config.girder_spacing,
         "deck_width": config.deck_width,
         "deck_offset": config.deck_offset,
+        "secondary_load_stage": secondary_stage_index if has_secondary_load else None,
         "config": config,
     }
     return SingleStagedPlan3D(model=model, stages=stages, metadata=metadata)

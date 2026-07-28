@@ -120,19 +120,27 @@ YAML 同名长度向左切线激活辅助跨并把新端节点 202 的竖向位�
   细分主梁但不会破坏横梁等间距。桥面板纵横梁格位于主梁轴线上方的独立参考面，通过
   6 自由度刚臂表达偏心。纵横板条都参与刚度，板自重仅分配给纵向板条，避免重复计重。
 - 单塔位于桥轴线，双索面分别连接两根主梁；每阶段同步激活一对主跨索和一对背索。
+- 梁格、桥面板及可选辅助跨全部激活后，若配置了二期荷载则追加独立的
+  `secondary_load` 最终阶段。`secondary_main_girder_line_load` 作为每根主梁的全局竖向
+  线荷载施加到两条钢主梁，`secondary_deck_pressure` 按半桥宽转换为两条桥面纵向板条
+  的线荷载；前者用于护栏等沿桥设施，后者用于沥青铺装等面荷载。
 - `direct3d` 为自研线弹性 Euler-Bernoulli 空间梁 + 线性杆求解器，刚臂通过精确自由度
   凝聚实现；`SingleStagedDirectBatchSolver3D` 在固定索股时只组装、凝聚并分解一次刚度
   矩阵，以多右端同时求解全部预张力扰动工况，并完整恢复梁端力、索力和支座反力；
   `opensees3d` 使用同一 IR 建立 `elasticBeamColumn`、`Truss +
   InitStressMaterial` 和 `rigidLink beam`，用于离线对照。
 
-第一轮的阶段语义是“累计激活后逐阶段线性重分析”，尚不包含路径相关的零应力诞生、
+第一轮的阶段语义是“累计激活后逐阶段线性重分析”，二期荷载阶段因此表示在完整结构上
+重新进行累计线性分析，尚不包含路径相关的零应力诞生、
 安装构形锁定、索垂度或几何非线性。`scripts/bridges/omo_bridge_3d.yaml` 是完整的 OMO
 3D 物理输入，计算入口为 `python -m scripts.single_staged_3d --bridge omo3d`。
 
 `render.staged3d` 消费同一份 `SingleStagedPlan3D/StagedResult3D`，因此自研和 OpenSees
 后端共享渲染语义。它仿照 2D 逐阶段输出：未变形参考网格、位移放大后的空间梁格与箱塔
 轴线、半透明桥面板、双索面、刚臂、支座和新增构件高亮，并可同时保存阶段 PNG 与 GIF。
+`plot`/`both` 模式还通过 `ezdxf` 输出最终状态的 3D DXF：节点、主梁、横梁、板条、塔、
+拉索、刚臂和桥面板分别置于命名图层。DXF 坐标采用模型真实未变形坐标，单位为米，不使用
+绘图位移放大比例，便于 CAD 内直接检查几何尺寸；`text`/`none` 模式不生成 DXF。
 渲染只做后处理，不进入求解器或改变任何力学结果。
 
 3D 索优化使用独立入口 `scripts.optimize_cables_3d` 和适配层

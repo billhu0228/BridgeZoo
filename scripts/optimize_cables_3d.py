@@ -3,11 +3,7 @@
 Example
 -------
 ``python -m scripts.optimize_cables_3d --bridge omo3d --backend opensees``
-  python -m scripts.optimize_cables_3d \
-    --bridge omo3d \
-    --backend direct \
-    --progress-refresh 2 \
-    --out results/cable_opt_3d
+  python -m scripts.optimize_cables_3d --bridge omo3d --out results/cable_opt_3d
 
 The design vector is stage-major ``(backstay, main_stay)``.  Each variable
 controls the two physical cables in the transverse cable planes.
@@ -555,7 +551,7 @@ def build_parser(config) -> argparse.ArgumentParser:
         help="3D bridge YAML alias (for example omo3d) or YAML path",
     )
     parser.add_argument("--n", type=int, default=config.n_seg)
-    parser.add_argument("--backend", choices=("opensees", "direct"), default="opensees")
+    parser.add_argument("--backend", choices=("opensees", "direct"), default="direct")
     parser.add_argument("--out", default="results/cable_opt_3d")
     resume = parser.add_mutually_exclusive_group()
     resume.add_argument("--resume", action="store_true")

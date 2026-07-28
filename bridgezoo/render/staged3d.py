@@ -24,6 +24,20 @@ _GROUP_STYLE = {
     "tower": ("#404040", 4.0),
 }
 
+_DXF_LAYERS = {
+    "main_girder": ("BZ_MAIN_GIRDER", 1),
+    "cross_girder": ("BZ_CROSS_GIRDER", 30),
+    "deck_longitudinal": ("BZ_DECK_LONGITUDINAL", 3),
+    "deck_transverse": ("BZ_DECK_TRANSVERSE", 3),
+    "tower": ("BZ_TOWER", 8),
+    "main_stay": ("BZ_MAIN_STAY", 5),
+    "backstay": ("BZ_BACKSTAY", 3),
+    "rigid_link": ("BZ_RIGID_LINK", 6),
+    "deck_panel": ("BZ_DECK_PANEL", 121),
+    "node": ("BZ_NODE", 7),
+    "other": ("BZ_FRAME_OTHER", 9),
+}
+
 
 def _deformed_point(model, record, node_id: int, scale: float) -> np.ndarray:
     node = model.nodes[node_id]
@@ -70,6 +84,91 @@ def _axis_limits(plan: SingleStagedPlan3D, result: StagedResult3D, scale: float)
     return low - margin, high + margin
 
 
+def export_final_3d_dxf(
+    plan: SingleStagedPlan3D,
+    result: StagedResult3D,
+    out: str | Path,
+) -> Path:
+    """Export the final active 3D topology as a meter-unit DXF.
+
+    Coordinates are the true, undeformed solver-neutral model coordinates.
+    The plot displacement scale is deliberately not applied, so CAD distance
+    measurements remain physical.  Only objects active in the final result
+    record are emitted.
+    """
+
+    if not result.records:
+        raise ValueError("cannot export DXF from an empty 3D staged result")
+
+    import ezdxf
+    from ezdxf import units
+
+    output_path = Path(out)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    document = ezdxf.new("R2010")
+    document.units = units.M
+    document.header["$MEASUREMENT"] = 1
+    modelspace = document.modelspace()
+    for layer_name, color in _DXF_LAYERS.values():
+        if layer_name not in document.layers:
+            document.layers.add(layer_name, color=color)
+
+    model = plan.model
+    final = result.final
+    active_node_ids = set(final.displacement)
+    for node_id in sorted(active_node_ids):
+        node = model.nodes[node_id]
+        modelspace.add_point(
+            node.xyz,
+            dxfattribs={"layer": _DXF_LAYERS["node"][0]},
+        )
+
+    for frame in model.frames.values():
+        if (
+            frame.activation_stage > final.stage_index
+            or frame.i not in active_node_ids
+            or frame.j not in active_node_ids
+        ):
+            continue
+        layer = _DXF_LAYERS.get(frame.group, _DXF_LAYERS["other"])[0]
+        modelspace.add_line(
+            model.nodes[frame.i].xyz,
+            model.nodes[frame.j].xyz,
+            dxfattribs={"layer": layer},
+        )
+
+    for cable_id in final.cable_force:
+        cable = model.cables[cable_id]
+        layer = _DXF_LAYERS.get(cable.group, _DXF_LAYERS["other"])[0]
+        modelspace.add_line(
+            model.nodes[cable.i].xyz,
+            model.nodes[cable.j].xyz,
+            dxfattribs={"layer": layer},
+        )
+
+    for link in model.rigid_links.values():
+        if (
+            link.activation_stage > final.stage_index
+            or link.master not in active_node_ids
+            or link.slave not in active_node_ids
+        ):
+            continue
+        modelspace.add_line(
+            model.nodes[link.master].xyz,
+            model.nodes[link.slave].xyz,
+            dxfattribs={"layer": _DXF_LAYERS["rigid_link"][0]},
+        )
+
+    for panel in _deck_panel_vertices(model, final, scale=0.0):
+        modelspace.add_3dface(
+            [tuple(float(value) for value in vertex) for vertex in panel],
+            dxfattribs={"layer": _DXF_LAYERS["deck_panel"][0]},
+        )
+
+    document.saveas(output_path)
+    return output_path
+
+
 def render_staged_3d(
     plan: SingleStagedPlan3D,
     result: StagedResult3D,
@@ -80,8 +179,9 @@ def render_staged_3d(
     fps: int = 1,
     elevation: float = 22.0,
     azimuth: float = -62.0,
+    dxf_out: str | Path | None = None,
 ) -> dict[str, object]:
-    """Render staged 3D construction to PNG frames and/or GIF/final image."""
+    """Render staged graphics and export the final active topology to DXF."""
 
     if not result.records:
         raise ValueError("cannot render an empty 3D staged result")
@@ -105,6 +205,11 @@ def render_staged_3d(
     model = plan.model
     output_path = Path(out) if out is not None else None
     frame_path = Path(frames_dir) if frames_dir is not None else None
+    dxf_path = (
+        Path(dxf_out)
+        if dxf_out is not None
+        else output_path.with_suffix(".dxf") if output_path is not None else None
+    )
     if output_path is not None:
         output_path.parent.mkdir(parents=True, exist_ok=True)
     if frame_path is not None:
@@ -270,7 +375,16 @@ def render_staged_3d(
             figure.savefig(output_path, dpi=150)
 
     plt.close(figure)
-    return {"output": output_path, "frames": tuple(written_frames)}
+    written_dxf = (
+        export_final_3d_dxf(plan, result, dxf_path)
+        if dxf_path is not None
+        else None
+    )
+    return {
+        "output": output_path,
+        "frames": tuple(written_frames),
+        "dxf": written_dxf,
+    }
 
 
-__all__ = ["render_staged_3d"]
+__all__ = ["export_final_3d_dxf", "render_staged_3d"]

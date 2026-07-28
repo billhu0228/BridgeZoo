@@ -17,29 +17,29 @@ right_fix: 0.2
 left_span: 40.0
 
 # Transverse grillage and eccentric deck-slab reference plane.
-girder_spacing: 12.5
+girder_spacing: 11.4
 cross_girder_spacing: 4.0
-deck_width: 16.0
+deck_width: 13.4
 deck_thickness: 0.30
-deck_offset: 1.90
+deck_offset: 1.4
 tower_element_size: 2.0
 
 # Main-girder welded H section: depth, flange width, web and flange thickness.
-main_girder_depth: 3.50
-main_girder_flange_width: 1.40
-main_girder_web_thickness: 0.040
-main_girder_flange_thickness: 0.080
+main_girder_depth: 2.5
+main_girder_flange_width: 1.20
+main_girder_web_thickness: 0.020
+main_girder_flange_thickness: 0.040
 
 # Cross-girder welded H section.
-cross_girder_depth: 1.80
-cross_girder_flange_width: 0.80
-cross_girder_web_thickness: 0.030
-cross_girder_flange_thickness: 0.050
+cross_girder_depth: 1.50
+cross_girder_flange_width: 0.65
+cross_girder_web_thickness: 0.016
+cross_girder_flange_thickness: 0.028
 
 # Constant hollow tower box used in the first-round 3D architecture.
-tower_outer_width: 7.50
-tower_outer_depth: 6.50
-tower_wall_thickness: 0.60
+tower_outer_width: 6.00
+tower_outer_depth: 6.00
+tower_wall_thickness: 1.20
 
 # Physical materials: E, Poisson ratio and mass density.
 steel_name: "Q345 structural steel"
@@ -60,5 +60,8 @@ strand_area: 1.4e-4
 strands_per_cable: 91
 pretension_per_cable: 6.0e6
 gravity: 9.806
-# Original OMO dw=28 kN/m distributed over the 16 m deck width.
-superimposed_dead_load: 1750.0
+# Final-stage secondary loads. The railing/edge-facility value was not supplied,
+# so it remains explicit zero rather than silently changing the OMO load total.
+secondary_main_girder_line_load: 0.0
+# Existing first-round OMO deck pressure retained without changing its magnitude.
+secondary_deck_pressure: 1750.0

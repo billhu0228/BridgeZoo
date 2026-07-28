@@ -20,7 +20,7 @@ from bridgezoo.optim import (
     CableOptimizationProblem,
     build_affine_model,
 )
-from bridgezoo.render.staged3d import render_staged_3d
+from bridgezoo.render.staged3d import export_final_3d_dxf, render_staged_3d
 from scripts.bridge_config import load_single_staged_3d_config, resolve_bridge_config
 from scripts.optimize_cables_3d import main as optimize_3d_cli
 from scripts.single_staged_3d import main as run_cli
@@ -51,16 +51,18 @@ def test_bundled_omo_3d_yaml_supplies_complete_physical_input():
     assert config.n_seg == 24
     assert config.anchor_base_height == pytest.approx(48.75)
     assert config.left_span == pytest.approx(40.0)
-    assert config.girder_spacing == pytest.approx(12.5)
+    assert config.girder_spacing == pytest.approx(11.4)
     assert config.cross_girder_spacing == pytest.approx(4.0)
-    assert config.deck_offset == pytest.approx(1.90)
+    assert config.deck_offset == pytest.approx(1.4)
     assert config.main_girder_section.shape == "H"
     assert config.cross_girder_section.shape == "H"
     assert config.tower_section.shape == "hollow_box"
     assert config.steel.E == pytest.approx(206.0e9)
     assert config.concrete.E == pytest.approx(3.3238e10)
     assert config.cable_material.E == pytest.approx(1.95e11)
-    assert config.superimposed_dead_load == pytest.approx(1750.0)
+    assert config.secondary_main_girder_line_load == pytest.approx(0.0)
+    assert config.secondary_deck_pressure == pytest.approx(1750.0)
+    assert config.superimposed_dead_load is None
 
     # The full 24-cable OMO grid has more than 100 longitudinal stations;
     # node/element namespaces must remain disjoint at production scale.
@@ -68,6 +70,27 @@ def test_bundled_omo_3d_yaml_supplies_complete_physical_input():
     assert len(plan.metadata["station_x"]) > 100
     assert len(plan.model.nodes) > 500
     assert not (set(plan.model.frames) & set(plan.model.cables))
+    assert plan.final_stage.label == "secondary_load"
+    assert len(plan.stages) == config.n_seg + 3
+
+
+def test_legacy_3d_yaml_deck_load_is_migrated_without_inventing_line_load(tmp_path):
+    source = resolve_bridge_config("omo3d")
+    lines = [
+        line
+        for line in source.read_text(encoding="utf-8").splitlines()
+        if not line.startswith(("secondary_main_girder_line_load:", "secondary_deck_pressure:"))
+    ]
+    lines.append("superimposed_dead_load: 1750.0")
+    legacy_path = tmp_path / "legacy_omo3d.yaml"
+    legacy_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    config = load_single_staged_3d_config(legacy_path)
+
+    assert config.secondary_main_girder_line_load == 0.0
+    assert config.secondary_deck_pressure == 0.0
+    assert config.superimposed_dead_load == pytest.approx(1750.0)
+    assert config.resolved_secondary_deck_pressure == pytest.approx(1750.0)
 
 
 def test_3d_builder_creates_twin_girder_grid_eccentric_slab_and_box_tower():
@@ -233,6 +256,80 @@ def test_direct_3d_solver_runs_all_stages_and_balances_physical_dead_load():
     )
 
 
+def test_3d_secondary_line_load_and_deck_pressure_activate_in_separate_final_stage():
+    line_load = 4.0e3
+    deck_pressure = 2.5e3
+    plan = build_single_staged_3d(
+        n_seg=1,
+        left_span=5.0,
+        cross_girder_spacing=10.0,
+        tower_element_size=10.0,
+        pretension_per_cable=0.0,
+        secondary_main_girder_line_load=line_load,
+        secondary_deck_pressure=deck_pressure,
+    )
+    model = plan.model
+
+    assert [stage.label for stage in plan.stages] == [
+        "cable1",
+        "tip",
+        "left_span",
+        "secondary_load",
+    ]
+    secondary_stage = plan.final_stage.index
+    assert plan.metadata["secondary_load_stage"] == secondary_stage
+    main_loads = [
+        load
+        for load in model.frame_loads
+        if load.load_case == "secondary_main_girder_line"
+    ]
+    pressure_loads = [
+        load
+        for load in model.frame_loads
+        if load.load_case == "secondary_deck_pressure"
+    ]
+    main_frames = [frame for frame in model.frames.values() if frame.group == "main_girder"]
+    deck_frames = [
+        frame for frame in model.frames.values() if frame.group == "deck_longitudinal"
+    ]
+    assert {load.member for load in main_loads} == {frame.id for frame in main_frames}
+    assert {load.member for load in pressure_loads} == {frame.id for frame in deck_frames}
+    assert {load.qz for load in main_loads} == {-line_load}
+    assert {load.qz for load in pressure_loads} == {
+        -deck_pressure * plan.metadata["deck_width"] / 2.0
+    }
+    assert all(load.activation_stage == secondary_stage for load in main_loads + pressure_loads)
+
+    solver = SingleStagedDirectSolver3D()
+    before = solver.solve_stage(plan, secondary_stage - 1)
+    final = solver.solve_stage(plan, secondary_stage)
+
+    def loaded_length(load):
+        frame = model.frames[load.member]
+        start = np.asarray(model.nodes[frame.i].xyz)
+        end = np.asarray(model.nodes[frame.j].xyz)
+        return np.linalg.norm(end - start)
+
+    expected_increment = sum(
+        load.qz * loaded_length(load) for load in main_loads + pressure_loads
+    )
+    assert final.applied_load[2] - before.applied_load[2] == pytest.approx(
+        expected_increment,
+        rel=1.0e-12,
+        abs=1.0e-6,
+    )
+    assert final.displacement != before.displacement
+
+    legacy = build_single_staged_3d(n_seg=1, superimposed_dead_load=deck_pressure)
+    assert legacy.final_stage.label == "secondary_load"
+    with pytest.raises(ValueError, match="not both"):
+        build_single_staged_3d(
+            n_seg=1,
+            secondary_deck_pressure=deck_pressure,
+            superimposed_dead_load=deck_pressure,
+        )
+
+
 def test_direct_3d_batch_solver_matches_scalar_and_uses_one_multi_rhs_solve(monkeypatch):
     common = {
         "n_seg": 1,
@@ -356,6 +453,8 @@ def test_3d_opensees_backend_matches_direct_linear_model():
         n_seg=1,
         left_span=5.0,
         pretension_per_cable=0.0,
+        secondary_main_girder_line_load=4.0e3,
+        secondary_deck_pressure=2.5e3,
     )
     direct = SingleStagedDirectSolver3D().run(plan).final
     reference = SingleStagedOpenSeesSolver3D().run(plan).final
@@ -396,11 +495,93 @@ def test_opensees_3d_result_renders_stage_frames_and_gif(tmp_path):
     assert output.stat().st_size > 1000
     assert len(artifacts["frames"]) == len(result.records)
     assert all(path.stat().st_size > 1000 for path in artifacts["frames"])
+    assert artifacts["dxf"] == output.with_suffix(".dxf")
+    assert artifacts["dxf"].stat().st_size > 1000
+
+
+def test_final_3d_dxf_uses_true_model_coordinates_and_named_layers(tmp_path):
+    import ezdxf
+    from ezdxf import units
+
+    plan = build_single_staged_3d(
+        n_seg=1,
+        left_span=5.0,
+        cross_girder_spacing=10.0,
+        tower_element_size=10.0,
+        pretension_per_cable=0.0,
+    )
+    result = SingleStagedDirectSolver3D().run(plan)
+    output = tmp_path / "final_geometry.dxf"
+
+    assert export_final_3d_dxf(plan, result, output) == output
+    document = ezdxf.readfile(output)
+    assert document.units == units.M
+    entities = list(document.modelspace())
+    final = result.final
+    model = plan.model
+    active_nodes = set(final.displacement)
+    active_frames = [
+        frame
+        for frame in model.frames.values()
+        if frame.activation_stage <= final.stage_index
+        and frame.i in active_nodes
+        and frame.j in active_nodes
+    ]
+    active_links = [
+        link
+        for link in model.rigid_links.values()
+        if link.activation_stage <= final.stage_index
+        and link.master in active_nodes
+        and link.slave in active_nodes
+    ]
+
+    points = [entity for entity in entities if entity.dxftype() == "POINT"]
+    lines = [entity for entity in entities if entity.dxftype() == "LINE"]
+    faces = [entity for entity in entities if entity.dxftype() == "3DFACE"]
+    assert len(points) == len(active_nodes)
+    assert len(lines) == len(active_frames) + len(final.cable_force) + len(active_links)
+    assert faces
+    assert {
+        "BZ_MAIN_GIRDER",
+        "BZ_CROSS_GIRDER",
+        "BZ_DECK_PANEL",
+        "BZ_TOWER",
+        "BZ_MAIN_STAY",
+        "BZ_BACKSTAY",
+        "BZ_RIGID_LINK",
+        "BZ_NODE",
+    }.issubset({entity.dxf.layer for entity in entities})
+
+    frame = next(item for item in active_frames if item.group == "main_girder")
+    start = model.nodes[frame.i].xyz
+    end = model.nodes[frame.j].xyz
+    main_lines = [entity for entity in lines if entity.dxf.layer == "BZ_MAIN_GIRDER"]
+    assert any(
+        tuple(entity.dxf.start) == pytest.approx(start)
+        and tuple(entity.dxf.end) == pytest.approx(end)
+        for entity in main_lines
+    )
 
 
 def test_minimum_3d_cli_writes_machine_readable_json(tmp_path):
     output = tmp_path / "single_staged_3d.json"
-    assert run_cli(["--bridge", "omo3d", "--n", "1", "--output", str(output)]) == 0
+    forbidden_dxf = tmp_path / "text_mode_must_not_write.dxf"
+    assert run_cli(
+        [
+            "--bridge",
+            "omo3d",
+            "--n",
+            "1",
+            "--backend",
+            "direct",
+            "--render",
+            "text",
+            "--dxf-out",
+            str(forbidden_dxf),
+            "--output",
+            str(output),
+        ]
+    ) == 0
     payload = json.loads(output.read_text(encoding="utf-8"))
 
     assert payload["schema"] == "bridgezoo.single_staged_3d.result.v1"
@@ -408,8 +589,9 @@ def test_minimum_3d_cli_writes_machine_readable_json(tmp_path):
     assert payload["model"]["coordinate_system"] == "x longitudinal, y transverse, z vertical"
     assert payload["final"]["converged"] is True
     assert payload["input"]["n_seg"] == 1
-    assert payload["input"]["deck_width"] == pytest.approx(16.0)
+    assert payload["input"]["deck_width"] == pytest.approx(13.4)
     assert "3D rendering" not in payload["todo"]
+    assert not forbidden_dxf.exists()
 
 
 def test_independent_3d_optimization_cli_writes_outputs_resumes_and_solves_design(

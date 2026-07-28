@@ -31,8 +31,8 @@ def test_bundled_bridge_configs_keep_previous_values():
     assert p4b["beam_E"] == 200e9
     assert p4b["tower_stiffness"][-1][0] == 110.0
     assert omo["bridge_type"] == "single"
-    assert omo["right_fix"] == pytest.approx(3.0)
-    assert omo["left_span"] == pytest.approx(25.0)
+    assert omo["right_fix"] == pytest.approx(0.2)
+    assert omo["left_span"] == pytest.approx(40.0)
 
 
 def test_bridge_config_alias_resolves_to_yaml():

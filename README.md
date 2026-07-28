@@ -67,8 +67,12 @@ python -m scripts.single_staged_3d --bridge omo3d --design results/cable_opt_3d/
 ```
 
 `single_staged_3d` 是单塔双主梁 3D 梁格第一轮入口：使用真实材料与 H/空心箱形截面，
-同时提供自研和 OpenSees 线弹性后端；`omo3d` 加载完整 OMO 3D YAML，`--render both`
-输出逐阶段 PNG 和 GIF。
+同时提供自研和 OpenSees 线弹性后端；`omo3d` 加载完整 OMO 3D YAML，`--render plot/both`
+输出逐阶段 PNG、GIF，并将最终状态的真实未变形几何输出为同名 DXF（单位 m、按构件分层，
+不采用位移放大比例）。可用 `--dxf-out` 指定路径；`--render text/none` 不生成 DXF。
+3D YAML 可分别设置每根主梁的
+`secondary_main_girder_line_load`（N/m）与桥面 `secondary_deck_pressure`（N/m²）；
+两者只在几何施工完成后的独立 `secondary_load` 最终阶段生效。
 
 `optimize_cables_3d` 是独立的 3D 索优化入口。每阶段分别优化背索组和主跨索组，每组
 同步控制横桥向两根对称实体索；算法保留 2D 版本的仿射 LP+SLSQP 连续优化、整数股数

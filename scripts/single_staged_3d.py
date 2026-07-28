@@ -6,15 +6,8 @@ Examples
 
 ``python -m scripts.single_staged_3d --bridge omo3d --backend opensees --render both``
 
-``python -m scripts.single_staged_3d --bridge omo3d --design results/cable_opt_3d/best_design.json``
+  python -m scripts.single_staged_3d --bridge omo3d --design results/cable_opt_3d/best_design.json
 
-``python -m scripts.single_staged_3d \
-  --bridge omo3d \
-  --design results/cable_opt_3d_direct/best_design.json \
-  --backend opensees \
-  --output results/optimized_analysis.json \
-  --render both
-``
 """
 
 from __future__ import annotations
@@ -64,17 +57,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--backend",
         choices=("direct", "opensees"),
-        default="direct",
+        default="opensees",
         help="solver backend (default: direct)",
     )
     parser.add_argument("--output", type=Path, help="optional JSON result path")
     parser.add_argument(
         "--render",
         choices=("none", "plot", "text", "both"),
-        default="text",
+        default="both",
         help="plot writes staged 3D images, text prints the summary, both does both",
     )
     parser.add_argument("--out", type=Path, default=Path("results/single_staged_3d.gif"))
+    parser.add_argument(
+        "--dxf-out",
+        type=Path,
+        help="final-state DXF path (default: --out with a .dxf suffix)",
+    )
     parser.add_argument(
         "--frames-dir",
         type=Path,
@@ -373,6 +371,7 @@ def main(argv: list[str] | None = None) -> int:
 
         render_output = _project_output_path(args.out)
         render_frames = _project_output_path(args.frames_dir)
+        render_dxf = _project_output_path(args.dxf_out)
         artifacts = render_staged_3d(
             plan,
             result,
@@ -382,9 +381,11 @@ def main(argv: list[str] | None = None) -> int:
             fps=args.fps,
             elevation=args.elev,
             azimuth=args.azim,
+            dxf_out=render_dxf,
         )
         print(f"render={artifacts['output']}")
         print(f"frames={len(artifacts['frames'])} in {render_frames}")
+        print(f"dxf={artifacts['dxf']}")
     return 0 if all(record.converged for record in result.records) else 2
 
 

@@ -83,8 +83,10 @@ _3D_CONFIG_KEYS = {
     "strands_per_cable",
     "pretension_per_cable",
     "gravity",
-    "superimposed_dead_load",
+    "secondary_main_girder_line_load",
+    "secondary_deck_pressure",
 }
+_OPTIONAL_3D_CONFIG_KEYS = {"superimposed_dead_load"}
 _3D_MATERIAL_KEYS = {
     "steel_name",
     "steel_E",
@@ -227,8 +229,14 @@ def load_single_staged_3d_config(source: str | Path):
 
     path = resolve_bridge_config(source)
     values = _parse_flat_yaml(path)
+    if "superimposed_dead_load" in values:
+        # Backward compatibility for first-round 3D YAML files.  The legacy
+        # value is interpreted as deck pressure; no main-girder line load is
+        # invented during migration.
+        values.setdefault("secondary_main_girder_line_load", 0.0)
+        values.setdefault("secondary_deck_pressure", 0.0)
     missing = sorted(_REQUIRED_3D_KEYS - values.keys())
-    unknown = sorted(values.keys() - _REQUIRED_3D_KEYS)
+    unknown = sorted(values.keys() - _REQUIRED_3D_KEYS - _OPTIONAL_3D_CONFIG_KEYS)
     if missing:
         raise ValueError(f"{path}: missing 3D bridge config keys: {missing}")
     if unknown:
@@ -248,7 +256,9 @@ def load_single_staged_3d_config(source: str | Path):
 
     scalar_keys = (
         _3D_CONFIG_KEYS - {"n_seg", "strands_per_cable", "pretension_per_cable"}
-    ) | (_3D_MATERIAL_KEYS - {"steel_name", "concrete_name", "cable_material_name"})
+    ) | (_3D_MATERIAL_KEYS - {"steel_name", "concrete_name", "cable_material_name"}) | (
+        _OPTIONAL_3D_CONFIG_KEYS & values.keys()
+    )
     for key in scalar_keys:
         value = values[key]
         if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -273,6 +283,9 @@ def load_single_staged_3d_config(source: str | Path):
         float(values["cable_material_density"]),
     )
     config_values = {key: values[key] for key in _3D_CONFIG_KEYS}
+    config_values.update(
+        {key: values[key] for key in _OPTIONAL_3D_CONFIG_KEYS if key in values}
+    )
     return SingleStaged3DConfig(
         **config_values,
         steel=steel,

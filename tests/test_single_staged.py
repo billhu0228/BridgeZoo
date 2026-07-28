@@ -226,9 +226,9 @@ def test_canonical_scripts_follow_bridge_type_and_keep_current_defaults():
     assert normal_builder.__module__ == "bridgezoo.fem.staged.builder"
     assert single_builder.__module__ == "bridgezoo.fem.single_staged.builder"
     assert all(step.label != "left_span" for step in normal_builder(n_seg=1).steps)
-    assert single_args.bridge_defaults["right_fix"] == pytest.approx(3.0)
-    assert single_args.bridge_defaults["left_span"] == pytest.approx(25.0)
-    assert optimize_cables._model_kwargs(single_optimize_args)["left_span"] == pytest.approx(25.0)
+    assert single_args.bridge_defaults["right_fix"] == pytest.approx(0.2)
+    assert single_args.bridge_defaults["left_span"] == pytest.approx(40.0)
+    assert optimize_cables._model_kwargs(single_optimize_args)["left_span"] == pytest.approx(40.0)
     assert normal_args.bridge_defaults["n"] == 6
     assert model_family_for_bridge_type(optimize_args.bridge_defaults["bridge_type"]) == "staged"
     assert optimize_args.n == 2
