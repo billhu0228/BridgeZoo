@@ -101,11 +101,19 @@ def test_3d_builder_creates_twin_girder_grid_eccentric_slab_and_box_tower():
 
     main_girders = [frame for frame in model.frames.values() if frame.group == "main_girder"]
     cross_girders = [frame for frame in model.frames.values() if frame.group == "cross_girder"]
-    slab_frames = [frame for frame in model.frames.values() if frame.group.startswith("deck_")]
+    slab_longitudinal = [
+        frame for frame in model.frames.values() if frame.group == "deck_longitudinal"
+    ]
+    slab_transverse = [
+        frame for frame in model.frames.values() if frame.group == "deck_transverse"
+    ]
+    slab_frames = slab_longitudinal + slab_transverse
     tower_frames = [frame for frame in model.frames.values() if frame.group == "tower"]
 
     assert len(main_girders) == 2 * (station_count - 1)
     assert len(cross_girders) == len(cross_girder_x)
+    assert len(slab_longitudinal) == 4 * (station_count - 1)
+    assert len(slab_transverse) == 3 * len(cross_girder_x)
     assert len(model.rigid_links) == 2 * station_count
     assert len(model.cables) == 4 * 2  # paired main stays + backstays in two cable planes
     assert all(isinstance(frame.section, HSection3D) for frame in main_girders + cross_girders)
@@ -120,6 +128,27 @@ def test_3d_builder_creates_twin_girder_grid_eccentric_slab_and_box_tower():
 
     main_node_ids = {frame.i for frame in main_girders} | {frame.j for frame in main_girders}
     assert all(frame.i in main_node_ids and frame.j in main_node_ids for frame in cross_girders)
+    assert plan.metadata["deck_grid_y"] == pytest.approx(
+        (-6.25, -5.25, 5.25, 6.25)
+    )
+    assert sum(plan.metadata["deck_tributary_widths"]) == pytest.approx(12.5)
+    assert sorted(plan.metadata["deck_tributary_widths"]) == pytest.approx(
+        [0.5, 0.5, 5.75, 5.75]
+    )
+    for station_x in cross_girder_x:
+        station_members = [
+            frame
+            for frame in slab_transverse
+            if model.nodes[frame.i].x == pytest.approx(station_x)
+        ]
+        transverse_y = {
+            model.nodes[node_id].y
+            for frame in station_members
+            for node_id in (frame.i, frame.j)
+        }
+        assert len(station_members) == 3
+        assert min(transverse_y) == pytest.approx(-6.25)
+        assert max(transverse_y) == pytest.approx(6.25)
     assert np.diff(cross_girder_x) == pytest.approx(
         np.full(len(cross_girder_x) - 1, plan.metadata["actual_cross_girder_spacing"]),
         abs=1.0e-12,
@@ -295,9 +324,14 @@ def test_3d_secondary_line_load_and_deck_pressure_activate_in_separate_final_sta
     assert {load.member for load in main_loads} == {frame.id for frame in main_frames}
     assert {load.member for load in pressure_loads} == {frame.id for frame in deck_frames}
     assert {load.qz for load in main_loads} == {-line_load}
-    assert {load.qz for load in pressure_loads} == {
-        -deck_pressure * plan.metadata["deck_width"] / 2.0
-    }
+    assert all(
+        load.qz
+        == pytest.approx(-deck_pressure * model.frames[load.member].section.width_y)
+        for load in pressure_loads
+    )
+    assert sum(plan.metadata["deck_tributary_widths"]) == pytest.approx(
+        plan.metadata["deck_width"]
+    )
     assert all(load.activation_stage == secondary_stage for load in main_loads + pressure_loads)
 
     solver = SingleStagedDirectSolver3D()
@@ -351,22 +385,31 @@ def test_direct_3d_batch_solver_matches_scalar_and_uses_one_multi_rhs_solve(monk
         for plan in plans
     ]
 
-    solve_calls = []
-    original_solve = np.linalg.solve
+    from scipy.linalg import cho_factor as original_factor
+    from scipy.linalg import cho_solve as original_solve
 
-    def counted_solve(matrix, right_hand_side):
-        solve_calls.append((matrix.shape, right_hand_side.shape))
-        return original_solve(matrix, right_hand_side)
+    factor_calls = []
+    solve_rhs_shapes = []
 
-    monkeypatch.setattr(np.linalg, "solve", counted_solve)
+    def counted_factor(matrix, *args, **kwargs):
+        factor_calls.append(matrix.shape)
+        return original_factor(matrix, *args, **kwargs)
+
+    def counted_solve(factor, right_hand_side, *args, **kwargs):
+        solve_rhs_shapes.append(right_hand_side.shape)
+        return original_solve(factor, right_hand_side, *args, **kwargs)
+
+    monkeypatch.setattr("scipy.linalg.cho_factor", counted_factor)
+    monkeypatch.setattr("scipy.linalg.cho_solve", counted_solve)
     batch = SingleStagedDirectBatchSolver3D().solve_stage_batch(
         plans,
         stage.index,
         stage.label,
     )
 
-    assert len(solve_calls) == 1
-    assert solve_calls[0][1][1] == len(plans)
+    assert len(factor_calls) == 1
+    assert len(solve_rhs_shapes) == 1
+    assert all(shape[1] == len(plans) for shape in solve_rhs_shapes)
     for batched, separate in zip(batch, scalar):
         assert batched.converged == separate.converged
         assert batched.applied_load == pytest.approx(separate.applied_load, abs=1.0e-10)
@@ -380,11 +423,21 @@ def test_direct_3d_batch_solver_matches_scalar_and_uses_one_multi_rhs_solve(monk
             batched_values = getattr(batched, field)
             separate_values = getattr(separate, field)
             assert set(batched_values) == set(separate_values)
+            # Multi-RHS BLAS changes the summation order relative to a
+            # single-column solve.  Only recovered frame end forces amplify
+            # that machine-level displacement difference; 2e-7 N/Nm remains
+            # negligible, while displacement/cable/reaction guards stay at
+            # their original tighter threshold (far below millimetre scale).
+            rel_tol, abs_tol = (
+                (1.0e-9, 2.0e-7)
+                if field == "frame_force"
+                else (1.0e-11, 1.0e-8)
+            )
             for object_id in batched_values:
                 assert batched_values[object_id] == pytest.approx(
                     separate_values[object_id],
-                    rel=1.0e-11,
-                    abs=1.0e-8,
+                    rel=rel_tol,
+                    abs=abs_tol,
                 )
 
     different_area = build_single_staged_3d(
@@ -416,20 +469,32 @@ def test_direct_3d_affine_model_uses_batch_kernel_and_matches_real_solve(monkeyp
     evaluator = CableDesignEvaluator3D(problem, config)
     strands = np.asarray([55, 65])
 
-    solve_rhs_counts = []
-    original_solve = np.linalg.solve
+    from scipy.linalg import cho_factor as original_factor
+    from scipy.linalg import cho_solve as original_solve
 
-    def counted_solve(matrix, right_hand_side):
-        solve_rhs_counts.append(right_hand_side.shape[1])
-        return original_solve(matrix, right_hand_side)
+    factor_calls = []
+    solve_calls = []
 
-    monkeypatch.setattr(np.linalg, "solve", counted_solve)
+    def counted_factor(matrix, *args, **kwargs):
+        factor_calls.append(matrix.shape)
+        return original_factor(matrix, *args, **kwargs)
+
+    def counted_solve(factor, right_hand_side, *args, **kwargs):
+        solve_calls.append(right_hand_side.shape)
+        return original_solve(factor, right_hand_side, *args, **kwargs)
+
+    monkeypatch.setattr("scipy.linalg.cho_factor", counted_factor)
+    monkeypatch.setattr("scipy.linalg.cho_solve", counted_solve)
     affine = build_affine_model(evaluator, strands)
 
-    assert solve_rhs_counts == [evaluator.layout.size + 1]
+    assert len(factor_calls) == 1
+    assert len(solve_calls) == 1
+    assert all(shape[1] == evaluator.layout.size + 1 for shape in solve_calls)
     tension = np.asarray([2.2e6, 3.4e6])
     actual = evaluator.evaluate(strands, tension)
-    assert solve_rhs_counts == [evaluator.layout.size + 1, 1]
+    assert len(factor_calls) == 2
+    assert len(solve_calls) == 2
+    assert solve_calls[1][1] == 1
     assert affine.stress_mpa(tension) == pytest.approx(
         [actual.cable_stress_mpa[cable_id] for cable_id in actual.cable_ids],
         rel=1.0e-10,
@@ -469,7 +534,7 @@ def test_3d_opensees_backend_matches_direct_linear_model():
         )
 
 
-def test_opensees_3d_result_renders_stage_frames_and_gif(tmp_path):
+def test_opensees_3d_result_renders_stage_frames_and_gif_without_implicit_dxf(tmp_path):
     pytest.importorskip("openseespy.opensees")
     plan = build_single_staged_3d(
         n_seg=1,
@@ -495,8 +560,8 @@ def test_opensees_3d_result_renders_stage_frames_and_gif(tmp_path):
     assert output.stat().st_size > 1000
     assert len(artifacts["frames"]) == len(result.records)
     assert all(path.stat().st_size > 1000 for path in artifacts["frames"])
-    assert artifacts["dxf"] == output.with_suffix(".dxf")
-    assert artifacts["dxf"].stat().st_size > 1000
+    assert artifacts["dxf"] is None
+    assert not output.with_suffix(".dxf").exists()
 
 
 def test_final_3d_dxf_uses_true_model_coordinates_and_named_layers(tmp_path):
@@ -541,6 +606,13 @@ def test_final_3d_dxf_uses_true_model_coordinates_and_named_layers(tmp_path):
     assert len(points) == len(active_nodes)
     assert len(lines) == len(active_frames) + len(final.cable_force) + len(active_links)
     assert faces
+    face_y = [
+        float(getattr(face.dxf, f"vtx{vertex}").y)
+        for face in faces
+        for vertex in range(4)
+    ]
+    assert min(face_y) == pytest.approx(-plan.metadata["deck_width"] / 2.0)
+    assert max(face_y) == pytest.approx(plan.metadata["deck_width"] / 2.0)
     assert {
         "BZ_MAIN_GIRDER",
         "BZ_CROSS_GIRDER",
@@ -565,7 +637,8 @@ def test_final_3d_dxf_uses_true_model_coordinates_and_named_layers(tmp_path):
 
 def test_minimum_3d_cli_writes_machine_readable_json(tmp_path):
     output = tmp_path / "single_staged_3d.json"
-    forbidden_dxf = tmp_path / "text_mode_must_not_write.dxf"
+    render_output = tmp_path / "text_mode_must_not_write.gif"
+    forbidden_dxf = render_output.with_suffix(".dxf")
     assert run_cli(
         [
             "--bridge",
@@ -576,8 +649,8 @@ def test_minimum_3d_cli_writes_machine_readable_json(tmp_path):
             "direct",
             "--render",
             "text",
-            "--dxf-out",
-            str(forbidden_dxf),
+            "--out",
+            str(render_output),
             "--output",
             str(output),
         ]
@@ -592,6 +665,32 @@ def test_minimum_3d_cli_writes_machine_readable_json(tmp_path):
     assert payload["input"]["deck_width"] == pytest.approx(13.4)
     assert "3D rendering" not in payload["todo"]
     assert not forbidden_dxf.exists()
+
+
+def test_3d_cli_exports_dxf_independently_without_plot_rendering(tmp_path):
+    output = tmp_path / "standalone_geometry.dxf"
+
+    assert run_cli(
+        [
+            "--bridge",
+            "omo3d",
+            "--n",
+            "1",
+            "--backend",
+            "direct",
+            "--render",
+            "none",
+            "--dxf",
+            "--dxf-out",
+            str(output),
+        ]
+    ) == 0
+    assert output.stat().st_size > 1000
+
+
+def test_3d_cli_rejects_dxf_path_without_dxf_switch(tmp_path):
+    with pytest.raises(ValueError, match="--dxf-out requires --dxf"):
+        run_cli(["--dxf-out", str(tmp_path / "unused.dxf")])
 
 
 def test_independent_3d_optimization_cli_writes_outputs_resumes_and_solves_design(

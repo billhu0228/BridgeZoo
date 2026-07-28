@@ -2,9 +2,10 @@
 
 The scalar and batched paths share one implementation.  For fixed geometry and
 cable areas, cable pretension changes only the load vector.  The batch solver
-therefore assembles and condenses the 3D stiffness once per stage, then solves
-all pretension cases as one multiple-right-hand-side linear system.  This is
-the accelerated kernel used to construct the exact affine optimization model.
+therefore assembles, condenses and factorizes the 3D stiffness once per stage,
+then solves every pretension case in one multiple-right-hand-side
+back-substitution.  This is the accelerated kernel used to construct the exact
+affine optimization model.
 
 Path-dependent stress-free birth and displacement lock-in are intentionally a
 later milestone; see ``TODO.md``.
@@ -74,8 +75,9 @@ class SingleStagedDirectBatchSolver3D:
     ``solve_stage_batch`` accepts plans with identical geometry, sections,
     cable areas, loads and restraints.  Only ``CableElement3D.pretension`` may
     differ.  The reduced free-DOF system is solved once with a ``(nf, ncase)``
-    right-hand-side matrix, after which every case receives complete frame,
-    cable and reaction recovery.
+    right-hand-side matrix.  The stiffness is factorized once and all columns
+    are back-substituted together through that shared factorization, after
+    which every case receives complete frame, cable and reaction recovery.
     """
 
     name = "direct3d"
@@ -279,14 +281,36 @@ class SingleStagedDirectBatchSolver3D:
         reduced_displacement = np.zeros((len(independent_full_dofs), ncase), dtype=float)
         converged = True
         if free.size:
+            from scipy.linalg import cho_factor, cho_solve
+
             free_stiffness = reduced_stiffness[np.ix_(free, free)]
             free_load = reduced_load[free, :]
             try:
-                # LAPACK gesv factors free_stiffness once and applies that
-                # factorization to every right-hand side in free_load.
-                reduced_displacement[free, :] = np.linalg.solve(
-                    free_stiffness,
-                    free_load,
+                # Symmetric diagonal equilibration keeps the mixed
+                # translation/rotation DOFs well scaled.  This is especially
+                # important once the deck-edge cantilever grid introduces
+                # relatively short transverse slab members.
+                dof_scale = 1.0 / np.sqrt(np.diag(free_stiffness))
+                equilibrated_stiffness = (
+                    dof_scale[:, None] * free_stiffness * dof_scale[None, :]
+                )
+                equilibrated_load = dof_scale[:, None] * free_load
+                # Match the 2D batch kernel: factor the stiffness once and
+                # back-substitute the complete (nf, ncase) load matrix in one
+                # LAPACK call so every affine perturbation shares the same
+                # high-cost factorization and BLAS matrix path.
+                factor = cho_factor(
+                    equilibrated_stiffness,
+                    lower=True,
+                    check_finite=False,
+                )
+                equilibrated_displacement = cho_solve(
+                    factor,
+                    equilibrated_load,
+                    check_finite=False,
+                )
+                reduced_displacement[free, :] = (
+                    dof_scale[:, None] * equilibrated_displacement
                 )
             except np.linalg.LinAlgError:
                 converged = False

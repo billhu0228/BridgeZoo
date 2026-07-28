@@ -47,24 +47,37 @@ def _deformed_point(model, record, node_id: int, scale: float) -> np.ndarray:
 
 
 def _deck_panel_vertices(model, record, scale: float) -> list[list[np.ndarray]]:
-    by_x: dict[float, dict[int, int]] = {}
+    by_x: dict[float, list[int]] = {}
     for node_id in record.displacement:
         node = model.nodes[node_id]
         if not node.role.startswith("deck_slab_"):
             continue
-        side = int(node.role.rsplit("_", 1)[1])
-        by_x.setdefault(node.x, {})[side] = node_id
-    complete = [(x, sides) for x, sides in sorted(by_x.items()) if set(sides) == {0, 1}]
+        by_x.setdefault(node.x, []).append(node_id)
+    complete = [
+        (x, sorted(node_ids, key=lambda item: model.nodes[item].y))
+        for x, node_ids in sorted(by_x.items())
+        if len(node_ids) >= 2
+    ]
     panels = []
     for (_, left), (_, right) in zip(complete, complete[1:]):
-        panels.append(
-            [
-                _deformed_point(model, record, left[0], scale),
-                _deformed_point(model, record, left[1], scale),
-                _deformed_point(model, record, right[1], scale),
-                _deformed_point(model, record, right[0], scale),
-            ]
-        )
+        left_y = [model.nodes[node_id].y for node_id in left]
+        right_y = [model.nodes[node_id].y for node_id in right]
+        if len(left) != len(right) or not np.allclose(
+            left_y,
+            right_y,
+            rtol=0.0,
+            atol=1.0e-12,
+        ):
+            continue
+        for line in range(len(left) - 1):
+            panels.append(
+                [
+                    _deformed_point(model, record, left[line], scale),
+                    _deformed_point(model, record, left[line + 1], scale),
+                    _deformed_point(model, record, right[line + 1], scale),
+                    _deformed_point(model, record, right[line], scale),
+                ]
+            )
     return panels
 
 
@@ -181,7 +194,7 @@ def render_staged_3d(
     azimuth: float = -62.0,
     dxf_out: str | Path | None = None,
 ) -> dict[str, object]:
-    """Render staged graphics and export the final active topology to DXF."""
+    """Render staged graphics, optionally exporting DXF when explicitly requested."""
 
     if not result.records:
         raise ValueError("cannot render an empty 3D staged result")
@@ -205,11 +218,7 @@ def render_staged_3d(
     model = plan.model
     output_path = Path(out) if out is not None else None
     frame_path = Path(frames_dir) if frames_dir is not None else None
-    dxf_path = (
-        Path(dxf_out)
-        if dxf_out is not None
-        else output_path.with_suffix(".dxf") if output_path is not None else None
-    )
+    dxf_path = Path(dxf_out) if dxf_out is not None else None
     if output_path is not None:
         output_path.parent.mkdir(parents=True, exist_ok=True)
     if frame_path is not None:

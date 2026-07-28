@@ -4,7 +4,7 @@ Examples
 --------
 ``python -m scripts.single_staged_3d --bridge omo3d --n 3``
 
-``python -m scripts.single_staged_3d --bridge omo3d --backend opensees --render both``
+``python -m scripts.single_staged_3d --bridge omo3d --backend opensees --render both --dxf``
 
   python -m scripts.single_staged_3d --bridge omo3d --design results/cable_opt_3d/best_design.json
 
@@ -69,9 +69,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--out", type=Path, default=Path("results/single_staged_3d.gif"))
     parser.add_argument(
+        "--dxf",
+        action="store_true",
+        help="independently export the final undeformed 3D topology to DXF",
+    )
+    parser.add_argument(
         "--dxf-out",
         type=Path,
-        help="final-state DXF path (default: --out with a .dxf suffix)",
+        help="DXF path used with --dxf (default: --out with a .dxf suffix)",
     )
     parser.add_argument(
         "--frames-dir",
@@ -329,6 +334,8 @@ def _result_payload(config, plan, result) -> dict[str, object]:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    if args.dxf_out is not None and not args.dxf:
+        raise ValueError("--dxf-out requires --dxf")
     config = _load_config(args)
     design_metadata = None
     if args.design is not None:
@@ -371,7 +378,6 @@ def main(argv: list[str] | None = None) -> int:
 
         render_output = _project_output_path(args.out)
         render_frames = _project_output_path(args.frames_dir)
-        render_dxf = _project_output_path(args.dxf_out)
         artifacts = render_staged_3d(
             plan,
             result,
@@ -381,11 +387,15 @@ def main(argv: list[str] | None = None) -> int:
             fps=args.fps,
             elevation=args.elev,
             azimuth=args.azim,
-            dxf_out=render_dxf,
         )
         print(f"render={artifacts['output']}")
         print(f"frames={len(artifacts['frames'])} in {render_frames}")
-        print(f"dxf={artifacts['dxf']}")
+    if args.dxf:
+        from bridgezoo.render.staged3d import export_final_3d_dxf
+
+        dxf_output = _project_output_path(args.dxf_out or args.out.with_suffix(".dxf"))
+        written_dxf = export_final_3d_dxf(plan, result, dxf_output)
+        print(f"dxf={written_dxf}")
     return 0 if all(record.converged for record in result.records) else 2
 
 

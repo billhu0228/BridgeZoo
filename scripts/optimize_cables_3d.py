@@ -558,11 +558,11 @@ def build_parser(config) -> argparse.ArgumentParser:
     resume.add_argument("--resume-from", metavar="PATH")
     parser.add_argument("--seed", type=int, default=0)
 
-    parser.add_argument("--strand-min", type=int, default=20)
+    parser.add_argument("--strand-min", type=int, default=5)
     parser.add_argument("--strand-max", type=int, default=500)
     parser.add_argument("--initial-strands", type=int)
-    parser.add_argument("--stress-lower", type=float, default=600.0)
-    parser.add_argument("--stress-upper", type=float, default=700.0)
+    parser.add_argument("--stress-lower", type=float, default=400.0)
+    parser.add_argument("--stress-upper", type=float, default=600.0)
     parser.add_argument("--tension-bound-stress", type=float, default=1600.0)
 
     parser.add_argument("--weight-shape", type=float, default=1.0)
@@ -589,7 +589,7 @@ def build_parser(config) -> argparse.ArgumentParser:
         default=1.0,
         help="Minimum seconds between live dashboard refreshes (default: 1.0).",
     )
-    parser.add_argument("--outer-iterations", type=int, default=4)
+    parser.add_argument("--outer-iterations", type=int, default=2)
     parser.add_argument("--coordinate-step", type=int, default=1)
     parser.add_argument("--random-trials", type=int, default=0)
     parser.add_argument("--no-stress-guided-strands", action="store_true")

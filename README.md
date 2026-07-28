@@ -61,15 +61,16 @@ pip install -e ".[ref]"
 pytest                       # 运行测试（已实现的几何测试通过，其余 skip）
 python -c "from bridgezoo.envs.geometry import BridgeGeometry; print(BridgeGeometry().summary())"
 python -m scripts.single_staged_3d --bridge omo3d --n 3 --output results/single_staged_3d.json
-python -m scripts.single_staged_3d --bridge omo3d --n 3 --backend opensees --render both
+python -m scripts.single_staged_3d --bridge omo3d --n 3 --backend opensees --render both --dxf
 python -m scripts.optimize_cables_3d --bridge omo3d --backend opensees --out results/cable_opt_3d
 python -m scripts.single_staged_3d --bridge omo3d --design results/cable_opt_3d/best_design.json --backend opensees
 ```
 
 `single_staged_3d` 是单塔双主梁 3D 梁格第一轮入口：使用真实材料与 H/空心箱形截面，
 同时提供自研和 OpenSees 线弹性后端；`omo3d` 加载完整 OMO 3D YAML，`--render plot/both`
-输出逐阶段 PNG、GIF，并将最终状态的真实未变形几何输出为同名 DXF（单位 m、按构件分层，
-不采用位移放大比例）。可用 `--dxf-out` 指定路径；`--render text/none` 不生成 DXF。
+输出逐阶段 PNG、GIF。DXF 由独立的 `--dxf` 开关控制，可与任意 `--render` 模式组合；
+它输出最终状态的真实未变形几何（单位 m、按构件分层，不采用位移放大比例），并可用
+`--dxf-out` 指定路径。未指定 `--dxf` 时不会生成 DXF。
 3D YAML 可分别设置每根主梁的
 `secondary_main_girder_line_load`（N/m）与桥面 `secondary_deck_pressure`（N/m²）；
 两者只在几何施工完成后的独立 `secondary_load` 最终阶段生效。

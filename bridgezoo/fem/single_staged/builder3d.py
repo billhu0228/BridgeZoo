@@ -2,8 +2,9 @@
 
 The model retains the legacy single-staged longitudinal dimension semantics,
 but uses physical materials and section dimensions.  Main girders and cross
-girders share a two-line beam grid.  An equivalent deck-slab grillage sits on
-an eccentric reference plane and is connected to that beam grid by rigid links.
+girders share a two-line beam grid.  An equivalent deck-slab grillage spans the
+full deck width, including the transverse cantilevers outside the main girders,
+and sits on an eccentric reference plane connected by rigid links.
 """
 
 from __future__ import annotations
@@ -319,6 +320,25 @@ def build_single_staged_3d(
     stations, actual_cross_spacing = _stations(config)
     half_spacing = 0.5 * config.girder_spacing
     girder_y = (-half_spacing, half_spacing)
+    half_deck_width = 0.5 * config.deck_width
+    if config.deck_width > config.girder_spacing:
+        deck_grid_y = (-half_deck_width, *girder_y, half_deck_width)
+        girder_deck_lines = (1, 2)
+    else:
+        deck_grid_y = girder_y
+        girder_deck_lines = (0, 1)
+    deck_tributary_widths = tuple(
+        0.5
+        * (
+            (deck_grid_y[line] - deck_grid_y[line - 1] if line > 0 else 0.0)
+            + (
+                deck_grid_y[line + 1] - deck_grid_y[line]
+                if line + 1 < len(deck_grid_y)
+                else 0.0
+            )
+        )
+        for line in range(len(deck_grid_y))
+    )
 
     # Beam-grid and eccentric slab nodes.
     beam_nodes: dict[tuple[int, int], int] = {}
@@ -326,9 +346,7 @@ def build_single_staged_3d(
     for station_index, station in enumerate(stations):
         for side in range(2):
             beam_id = _BEAM_NODE_BASE + 10 * station_index + side
-            slab_id = _SLAB_NODE_BASE + 10 * station_index + side
             beam_nodes[station_index, side] = beam_id
-            slab_nodes[station_index, side] = slab_id
             model.add_node(
                 Node3D(
                     beam_id,
@@ -339,38 +357,47 @@ def build_single_staged_3d(
                     station.activation_stage,
                 )
             )
+        for line, y in enumerate(deck_grid_y):
+            slab_id = _SLAB_NODE_BASE + 10 * station_index + line
+            slab_nodes[station_index, line] = slab_id
             model.add_node(
                 Node3D(
                     slab_id,
                     station.x,
-                    girder_y[side],
+                    y,
                     config.deck_offset,
-                    f"deck_slab_{side}",
+                    f"deck_slab_{line}",
                     station.activation_stage,
                 )
             )
+        for side, deck_line in enumerate(girder_deck_lines):
             model.add_rigid_link(
                 RigidLink3D(
                     _RIGID_LINK_BASE + 10 * station_index + side,
-                    beam_id,
-                    slab_id,
+                    beam_nodes[station_index, side],
+                    slab_nodes[station_index, deck_line],
                     station.activation_stage,
                 )
             )
 
-    # Two longitudinal H main girders and two longitudinal slab strips.
-    slab_longitudinal = RectangularSection3D(
-        "deck longitudinal strip",
-        config.deck_width / 2.0,
-        config.deck_thickness,
+    # Two longitudinal H main girders.  The slab has a longitudinal strip on
+    # every transverse grid line; its tributary widths sum to the full deck
+    # width, so adding explicit edge strips does not duplicate slab mass/load.
+    slab_longitudinal_sections = tuple(
+        RectangularSection3D(
+            f"deck longitudinal strip {line}",
+            tributary_width,
+            config.deck_thickness,
+        )
+        for line, tributary_width in enumerate(deck_tributary_widths)
     )
     slab_longitudinal_ids: list[int] = []
+    slab_longitudinal_width_by_id: dict[int, float] = {}
     main_girder_ids: list[int] = []
     for interval, (left, right) in enumerate(zip(stations, stations[1:])):
         activation = max(left.activation_stage, right.activation_stage)
         for side in range(2):
             main_id = _MAIN_FRAME_BASE + 10 * interval + side
-            slab_id = _SLAB_LONG_FRAME_BASE + 10 * interval + side
             model.add_frame(
                 FrameElement3D(
                     main_id,
@@ -383,18 +410,23 @@ def build_single_staged_3d(
                 )
             )
             main_girder_ids.append(main_id)
+        for line, (section, tributary_width) in enumerate(
+            zip(slab_longitudinal_sections, deck_tributary_widths)
+        ):
+            slab_id = _SLAB_LONG_FRAME_BASE + 10 * interval + line
             model.add_frame(
                 FrameElement3D(
                     slab_id,
-                    slab_nodes[interval, side],
-                    slab_nodes[interval + 1, side],
+                    slab_nodes[interval, line],
+                    slab_nodes[interval + 1, line],
                     config.concrete,
-                    slab_longitudinal,
+                    section,
                     group="deck_longitudinal",
                     activation_stage=activation,
                 )
             )
             slab_longitudinal_ids.append(slab_id)
+            slab_longitudinal_width_by_id[slab_id] = tributary_width
 
     # Cross H girders share the beam-grid nodes.  Transverse slab strips use
     # station tributary lengths and the raised slab nodes.
@@ -424,17 +456,18 @@ def build_single_staged_3d(
             left_tributary + right_tributary,
             config.deck_thickness,
         )
-        model.add_frame(
-            FrameElement3D(
-                _SLAB_CROSS_FRAME_BASE + cross_order,
-                slab_nodes[station_index, 0],
-                slab_nodes[station_index, 1],
-                config.concrete,
-                transverse_section,
-                group="deck_transverse",
-                activation_stage=station.activation_stage,
+        for transverse_span in range(len(deck_grid_y) - 1):
+            model.add_frame(
+                FrameElement3D(
+                    _SLAB_CROSS_FRAME_BASE + 10 * cross_order + transverse_span,
+                    slab_nodes[station_index, transverse_span],
+                    slab_nodes[station_index, transverse_span + 1],
+                    config.concrete,
+                    transverse_section,
+                    group="deck_transverse",
+                    activation_stage=station.activation_stage,
+                )
             )
-        )
 
     # Tower box members, with mesh boundaries at every cable anchor.
     elevations, anchor_elevations = _tower_elevations(config)
@@ -574,12 +607,11 @@ def build_single_staged_3d(
                 )
             )
     if deck_pressure:
-        line_load = -deck_pressure * config.deck_width / 2.0
         for member_id in slab_longitudinal_ids:
             model.add_frame_load(
                 FrameLoad3D(
                     member_id,
-                    qz=line_load,
+                    qz=-deck_pressure * slab_longitudinal_width_by_id[member_id],
                     load_case="secondary_deck_pressure",
                     activation_stage=secondary_stage_index,
                 )
@@ -621,6 +653,8 @@ def build_single_staged_3d(
         "actual_cross_girder_spacing": actual_cross_spacing,
         "beam_grid_node_ids": tuple(beam_nodes.values()),
         "slab_node_ids": tuple(slab_nodes.values()),
+        "deck_grid_y": tuple(deck_grid_y),
+        "deck_tributary_widths": deck_tributary_widths,
         "tower_node_ids": tuple(tower_nodes),
         "ground_anchor_ids": tuple(ground_anchor_ids),
         "girder_spacing": config.girder_spacing,
