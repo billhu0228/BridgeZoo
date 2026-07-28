@@ -9,6 +9,7 @@ an eccentric reference plane and is connected to that beam grid by rigid links.
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 
 from bridgezoo.envs.geometry import SingleTowerGeometry3D
@@ -62,8 +63,10 @@ class SingleStaged3DConfig(SingleTowerGeometry3D):
     superimposed_dead_load: float = 0.0  # deck area load, N/m²
 
     strand_area: float = 1.4e-4
-    strands_per_cable: int | tuple[int, ...] = 55
-    pretension_per_cable: float | tuple[float, ...] = 3.5e6
+    strands_per_cable: int | tuple[int, ...] | tuple[tuple[int, int], ...] = 55
+    pretension_per_cable: (
+        float | tuple[float, ...] | tuple[tuple[float, float], ...]
+    ) = 3.5e6
 
     steel: ElasticMaterial3D = STEEL_Q345
     concrete: ElasticMaterial3D = CONCRETE_C50
@@ -108,8 +111,17 @@ class SingleStaged3DConfig(SingleTowerGeometry3D):
             raise ValueError(f"positive finite values required for: {', '.join(invalid)}")
         if self.superimposed_dead_load < 0.0:
             raise ValueError("superimposed_dead_load must be nonnegative")
-        _stage_values(self.strands_per_cable, self.n_seg, "strands_per_cable", integer=True)
-        _stage_values(self.pretension_per_cable, self.n_seg, "pretension_per_cable")
+        _stage_pair_values(
+            self.strands_per_cable,
+            self.n_seg,
+            "strands_per_cable",
+            integer=True,
+        )
+        _stage_pair_values(
+            self.pretension_per_cable,
+            self.n_seg,
+            "pretension_per_cable",
+        )
 
 
 @dataclass(frozen=True)
@@ -121,14 +133,50 @@ class _Station:
     is_cross_grid: bool = False
 
 
-def _stage_values(value, n_seg: int, name: str, integer: bool = False) -> tuple[float, ...]:
-    values = (value,) * n_seg if isinstance(value, (int, float)) else tuple(value)
-    if len(values) != n_seg:
-        raise ValueError(f"{name} must be a scalar or contain n_seg values")
-    numbers = tuple(float(item) for item in values)
-    if any(not math.isfinite(item) or item < 0.0 for item in numbers):
+def _stage_pair_values(
+    value,
+    n_seg: int,
+    name: str,
+    integer: bool = False,
+) -> tuple[tuple[float, float], ...]:
+    """Normalize per-stage ``(backstay, main_stay)`` design values.
+
+    Scalars and ``n_seg`` scalar values retain the original behavior by using
+    the same value for both cable groups.  Optimization can additionally pass
+    ``n_seg`` explicit pairs or one flat stage-major vector of length
+    ``2 * n_seg``.
+    """
+
+    if isinstance(value, (int, float)):
+        pairs = [(value, value)] * n_seg
+    else:
+        values = tuple(value)
+        if len(values) == n_seg:
+            pairs = []
+            for item in values:
+                if isinstance(item, Sequence) and not isinstance(item, (str, bytes)):
+                    pair = tuple(item)
+                    if len(pair) != 2:
+                        raise ValueError(f"{name} stage pairs must contain two values")
+                    pairs.append((pair[0], pair[1]))
+                else:
+                    pairs.append((item, item))
+        elif len(values) == 2 * n_seg:
+            pairs = [
+                (values[2 * index], values[2 * index + 1])
+                for index in range(n_seg)
+            ]
+        else:
+            raise ValueError(
+                f"{name} must be a scalar, contain n_seg values/pairs, "
+                f"or contain 2*n_seg stage-major values"
+            )
+
+    numbers = tuple((float(back), float(main)) for back, main in pairs)
+    flat = tuple(item for pair in numbers for item in pair)
+    if any(not math.isfinite(item) or item < 0.0 for item in flat):
         raise ValueError(f"{name} values must be finite and nonnegative")
-    if integer and any(not item.is_integer() or item <= 0.0 for item in numbers):
+    if integer and any(not item.is_integer() or item <= 0.0 for item in flat):
         raise ValueError(f"{name} values must be positive integers")
     return numbers
 
@@ -388,8 +436,17 @@ def build_single_staged_3d(
         )
 
     # Two cable planes: paired main stays and paired backstays at each stage.
-    strands = _stage_values(config.strands_per_cable, config.n_seg, "strands_per_cable", integer=True)
-    pretensions = _stage_values(config.pretension_per_cable, config.n_seg, "pretension_per_cable")
+    strand_pairs = _stage_pair_values(
+        config.strands_per_cable,
+        config.n_seg,
+        "strands_per_cable",
+        integer=True,
+    )
+    pretension_pairs = _stage_pair_values(
+        config.pretension_per_cable,
+        config.n_seg,
+        "pretension_per_cable",
+    )
     station_by_key = {station.key: index for index, station in enumerate(stations)}
     ground_anchor_ids: list[int] = []
     for cable_index in range(1, config.n_seg + 1):
@@ -406,16 +463,16 @@ def build_single_staged_3d(
             model.add_support(
                 Support3D(ground_id, True, True, True, True, True, True, activation)
             )
-            area = config.strand_area * int(strands[cable_index - 1])
-            tension = pretensions[cable_index - 1]
+            back_strands, main_strands = strand_pairs[cable_index - 1]
+            back_tension, main_tension = pretension_pairs[cable_index - 1]
             model.add_cable(
                 CableElement3D(
                     _BACKSTAY_BASE + 10 * cable_index + side,
                     tower_anchor,
                     ground_id,
                     config.cable_material,
-                    area,
-                    tension,
+                    config.strand_area * int(back_strands),
+                    back_tension,
                     "backstay",
                     activation,
                 )
@@ -426,8 +483,8 @@ def build_single_staged_3d(
                     tower_anchor,
                     beam_nodes[deck_station, side],
                     config.cable_material,
-                    area,
-                    tension,
+                    config.strand_area * int(main_strands),
+                    main_tension,
                     "main_stay",
                     activation,
                 )

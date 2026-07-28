@@ -39,6 +39,7 @@ from bridgezoo.fem.single_staged.builder3d import (
     build_single_staged_3d,
 )
 from bridgezoo.fem.single_staged.direct3d import (
+    SingleStagedDirectBatchSolver3D,
     SingleStagedDirectSolver3D,
     solve_single_staged_3d,
 )
@@ -85,6 +86,7 @@ __all__ = [
     "BalanceDof",
     "SingleStaged3DConfig",
     "build_single_staged_3d",
+    "SingleStagedDirectBatchSolver3D",
     "SingleStagedDirectSolver3D",
     "SingleStagedOpenSeesSolver3D",
     "solve_single_staged_3d",

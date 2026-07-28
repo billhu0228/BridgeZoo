@@ -1,8 +1,11 @@
 """Self-written linear 3D solver for :mod:`single_staged.model3d`.
 
-This first-round backend performs a cumulative linear re-analysis for every
-activation stage.  It includes 3D Euler-Bernoulli frames, linear truss cables,
-physical distributed self-weight and exact rigid-link kinematic condensation.
+The scalar and batched paths share one implementation.  For fixed geometry and
+cable areas, cable pretension changes only the load vector.  The batch solver
+therefore assembles and condenses the 3D stiffness once per stage, then solves
+all pretension cases as one multiple-right-hand-side linear system.  This is
+the accelerated kernel used to construct the exact affine optimization model.
+
 Path-dependent stress-free birth and displacement lock-in are intentionally a
 later milestone; see ``TODO.md``.
 """
@@ -30,24 +33,87 @@ def _skew(vector: np.ndarray) -> np.ndarray:
     return np.array([[0.0, -z, y], [z, 0.0, -x], [-y, x, 0.0]])
 
 
-class SingleStagedDirectSolver3D:
-    """Dense direct-stiffness backend for the first 3D model milestone."""
+def _cable_structure(cable) -> tuple:
+    """Cable fields that affect topology or stiffness, excluding pretension."""
+
+    return (
+        cable.id,
+        cable.i,
+        cable.j,
+        cable.material,
+        cable.area,
+        cable.group,
+        cable.activation_stage,
+    )
+
+
+def _assert_same_structure_3d(reference: SingleStagedPlan3D, case: SingleStagedPlan3D) -> None:
+    """Require plans to differ only in cable pretension values."""
+
+    if reference.stages != case.stages:
+        raise ValueError("batched 3D plans differ in construction stages")
+    reference_model = reference.model
+    case_model = case.model
+    for name in ("nodes", "frames", "rigid_links", "supports"):
+        if getattr(reference_model, name) != getattr(case_model, name):
+            raise ValueError(f"batched 3D plans differ in {name}")
+    if reference_model.nodal_loads != case_model.nodal_loads:
+        raise ValueError("batched 3D plans differ in nodal loads")
+    if reference_model.frame_loads != case_model.frame_loads:
+        raise ValueError("batched 3D plans differ in frame loads")
+    if set(reference_model.cables) != set(case_model.cables):
+        raise ValueError("batched 3D plans differ in cable ids")
+    for cable_id, reference_cable in reference_model.cables.items():
+        if _cable_structure(reference_cable) != _cable_structure(case_model.cables[cable_id]):
+            raise ValueError(f"batched 3D plans differ in cable structure at {cable_id}")
+
+
+class SingleStagedDirectBatchSolver3D:
+    """Linear 3D direct solver sharing one factorization across load cases.
+
+    ``solve_stage_batch`` accepts plans with identical geometry, sections,
+    cable areas, loads and restraints.  Only ``CableElement3D.pretension`` may
+    differ.  The reduced free-DOF system is solved once with a ``(nf, ncase)``
+    right-hand-side matrix, after which every case receives complete frame,
+    cable and reaction recovery.
+    """
 
     name = "direct3d"
 
-    def run(self, plan: SingleStagedPlan3D) -> StagedResult3D:
-        result = StagedResult3D(backend=self.name)
-        for stage in plan.stages:
-            result.records.append(self.solve_stage(plan, stage.index, stage.label))
-        return result
+    def run_batch(self, plans: list[SingleStagedPlan3D]) -> list[StagedResult3D]:
+        if not plans:
+            raise ValueError("run_batch requires at least one 3D plan")
+        reference = plans[0]
+        for plan in plans[1:]:
+            _assert_same_structure_3d(reference, plan)
+        results = [StagedResult3D(backend=self.name) for _ in plans]
+        for stage in reference.stages:
+            records = self.solve_stage_batch(
+                plans,
+                stage.index,
+                stage.label,
+                _structure_checked=True,
+            )
+            for result, record in zip(results, records):
+                result.records.append(record)
+        return results
 
-    def solve_stage(
+    def solve_stage_batch(
         self,
-        plan: SingleStagedPlan3D,
+        plans: list[SingleStagedPlan3D],
         stage_index: int,
         stage_label: str | None = None,
-    ) -> SolveResult3D:
-        model = plan.model
+        *,
+        _structure_checked: bool = False,
+    ) -> list[SolveResult3D]:
+        if not plans:
+            raise ValueError("solve_stage_batch requires at least one 3D plan")
+        reference = plans[0]
+        if not _structure_checked:
+            for plan in plans[1:]:
+                _assert_same_structure_3d(reference, plan)
+        model = reference.model
+        ncase = len(plans)
         nodes = sorted(
             (node for node in model.nodes.values() if node.activation_stage <= stage_index),
             key=lambda node: node.id,
@@ -56,7 +122,7 @@ class SingleStagedDirectSolver3D:
         index = {node.id: position for position, node in enumerate(nodes)}
         ndof = 6 * len(nodes)
         stiffness = np.zeros((ndof, ndof), dtype=float)
-        load = np.zeros(ndof, dtype=float)
+        constant_load = np.zeros(ndof, dtype=float)
 
         def dofs(node_id: int) -> list[int]:
             base = 6 * index[node_id]
@@ -86,7 +152,6 @@ class SingleStagedDirectSolver3D:
 
         frame_data: dict[int, tuple[np.ndarray, np.ndarray, list[int], np.ndarray]] = {}
         total_applied = np.zeros(3, dtype=float)
-
         for element in active_frames.values():
             node_i, node_j = model.nodes[element.i], model.nodes[element.j]
             length, rotation = frame_axes_3d(node_i.xyz, node_j.xyz, element.orientation)
@@ -110,7 +175,7 @@ class SingleStagedDirectSolver3D:
                 global_q = np.asarray(item.global_vector, dtype=float)
                 local_q = rotation @ global_q
                 equivalent_local = uniform_load_local_3d(local_q, length)
-                load[element_dofs] += transform.T @ equivalent_local
+                constant_load[element_dofs] += transform.T @ equivalent_local
                 fixed_end_local += equivalent_local
                 total_applied += global_q * length
             frame_data[element.id] = (
@@ -131,19 +196,29 @@ class SingleStagedDirectSolver3D:
             )
             element_dofs = dofs(element.i)[:3] + dofs(element.j)[:3]
             stiffness[np.ix_(element_dofs, element_dofs)] += translational_stiffness
-            if element.pretension:
-                load[dofs(element.i)[:3]] += element.pretension * axis
-                load[dofs(element.j)[:3]] -= element.pretension * axis
             cable_data[element.id] = (length, axis, element_dofs)
 
         for item in model.nodal_loads:
             if item.activation_stage <= stage_index and item.node in node_ids:
-                load[dofs(item.node)] += np.asarray(item.values, dtype=float)
+                constant_load[dofs(item.node)] += np.asarray(item.values, dtype=float)
                 total_applied += np.asarray(item.values[:3], dtype=float)
 
+        # Each case shares the permanent-load column and differs only in the
+        # initial cable-force equivalent nodal loads.
+        load = np.repeat(constant_load[:, None], ncase, axis=1)
+        for element_id, (_, axis, _) in cable_data.items():
+            reference_element = active_cables[element_id]
+            node_i_dofs = dofs(reference_element.i)[:3]
+            node_j_dofs = dofs(reference_element.j)[:3]
+            tensions = np.asarray(
+                [plan.model.cables[element_id].pretension for plan in plans],
+                dtype=float,
+            )
+            load[node_i_dofs, :] += axis[:, None] * tensions[None, :]
+            load[node_j_dofs, :] -= axis[:, None] * tensions[None, :]
+
         # Exact rigid-link transformation: u_slave = u_master + theta x r,
-        # theta_slave = theta_master.  Slaves are removed from the independent
-        # coordinate set, avoiding penalty stiffness and its conditioning cost.
+        # theta_slave = theta_master.  It is constructed once for every case.
         slave_ids = {link.slave for link in active_links}
         independent_full_dofs = [
             full_dof
@@ -159,10 +234,12 @@ class SingleStagedDirectSolver3D:
             constraint_transform[full_dof, column] = 1.0
         for link in active_links:
             if link.master in slave_ids:
-                raise ValueError("chained 3D rigid links are not supported in the first-round solver")
+                raise ValueError("chained 3D rigid links are not supported")
             master_dofs = dofs(link.master)
             slave_dofs = dofs(link.slave)
-            offset = np.asarray(model.nodes[link.slave].xyz) - np.asarray(model.nodes[link.master].xyz)
+            offset = np.asarray(model.nodes[link.slave].xyz) - np.asarray(
+                model.nodes[link.master].xyz
+            )
             rotation_coupling = -_skew(offset)
             for component in range(3):
                 constraint_transform[
@@ -193,65 +270,112 @@ class SingleStagedDirectSolver3D:
                 if restrained:
                     fixed[reduced_column[dofs(support.node)[component]]] = True
 
-        # Truss-only nodes have unused rotational DOFs.  Constrain any exactly
-        # zero reduced row automatically, matching OpenSees' explicit fixities.
+        # Truss-only nodes have unused rotational DOFs.
         for reduced_dof in range(len(independent_full_dofs)):
             if not fixed[reduced_dof] and not np.any(reduced_stiffness[reduced_dof, :]):
                 fixed[reduced_dof] = True
 
         free = np.flatnonzero(~fixed)
-        reduced_displacement = np.zeros(len(independent_full_dofs), dtype=float)
+        reduced_displacement = np.zeros((len(independent_full_dofs), ncase), dtype=float)
         converged = True
         if free.size:
             free_stiffness = reduced_stiffness[np.ix_(free, free)]
-            free_load = reduced_load[free]
+            free_load = reduced_load[free, :]
             try:
-                reduced_displacement[free] = np.linalg.solve(free_stiffness, free_load)
+                # LAPACK gesv factors free_stiffness once and applies that
+                # factorization to every right-hand side in free_load.
+                reduced_displacement[free, :] = np.linalg.solve(
+                    free_stiffness,
+                    free_load,
+                )
             except np.linalg.LinAlgError:
                 converged = False
         displacement = constraint_transform @ reduced_displacement
+        reduced_reaction = reduced_stiffness @ reduced_displacement - reduced_load
 
         label = stage_label or next(
-            (stage.label for stage in plan.stages if stage.index == stage_index),
+            (stage.label for stage in reference.stages if stage.index == stage_index),
             f"stage{stage_index}",
         )
-        result = SolveResult3D(
-            backend=self.name,
-            stage_index=stage_index,
-            stage_label=label,
-            converged=converged,
-            applied_load=tuple(float(value) for value in total_applied),
-        )
-        for node in nodes:
-            result.displacement[node.id] = tuple(
-                float(value) for value in displacement[dofs(node.id)]
+        results: list[SolveResult3D] = []
+        for case_index, plan in enumerate(plans):
+            case_displacement = displacement[:, case_index]
+            result = SolveResult3D(
+                backend=self.name,
+                stage_index=stage_index,
+                stage_label=label,
+                converged=converged,
+                applied_load=tuple(float(value) for value in total_applied),
             )
+            for node in nodes:
+                result.displacement[node.id] = tuple(
+                    float(value) for value in case_displacement[dofs(node.id)]
+                )
 
-        for element_id, (local_stiffness, transform, element_dofs, fixed_end) in frame_data.items():
-            local_displacement = transform @ displacement[element_dofs]
-            local_force = local_stiffness @ local_displacement - fixed_end
-            result.frame_force[element_id] = tuple(float(value) for value in local_force)
+            for element_id, data in frame_data.items():
+                local_stiffness, transform, element_dofs, fixed_end = data
+                local_displacement = transform @ case_displacement[element_dofs]
+                local_force = local_stiffness @ local_displacement - fixed_end
+                result.frame_force[element_id] = tuple(float(value) for value in local_force)
 
-        for element_id, (length, axis, element_dofs) in cable_data.items():
-            element = active_cables[element_id]
-            translational_displacement = displacement[element_dofs]
-            elongation = float(axis @ (translational_displacement[3:] - translational_displacement[:3]))
-            force = element.pretension + element.material.E * element.area / length * elongation
-            result.cable_force[element_id] = float(force)
-            result.cable_stress[element_id] = float(force / element.area)
+            for element_id, (length, axis, element_dofs) in cable_data.items():
+                element = plan.model.cables[element_id]
+                translational_displacement = case_displacement[element_dofs]
+                elongation = float(
+                    axis
+                    @ (
+                        translational_displacement[3:]
+                        - translational_displacement[:3]
+                    )
+                )
+                force = (
+                    element.pretension
+                    + element.material.E * element.area / length * elongation
+                )
+                result.cable_force[element_id] = float(force)
+                result.cable_stress[element_id] = float(force / element.area)
 
-        reduced_reaction = reduced_stiffness @ reduced_displacement - reduced_load
-        for support in active_supports:
-            values = []
-            for component in range(6):
-                column = reduced_column[dofs(support.node)[component]]
-                values.append(float(reduced_reaction[column]) if fixed[column] else 0.0)
-            result.support_reaction[support.node] = tuple(values)
-        return result
+            for support in active_supports:
+                values = []
+                for component in range(6):
+                    column = reduced_column[dofs(support.node)[component]]
+                    values.append(
+                        float(reduced_reaction[column, case_index])
+                        if fixed[column]
+                        else 0.0
+                    )
+                result.support_reaction[support.node] = tuple(values)
+            results.append(result)
+        return results
+
+
+class SingleStagedDirectSolver3D:
+    """Scalar facade over the multiple-right-hand-side 3D direct kernel."""
+
+    name = "direct3d"
+
+    def run(self, plan: SingleStagedPlan3D) -> StagedResult3D:
+        return SingleStagedDirectBatchSolver3D().run_batch([plan])[0]
+
+    def solve_stage(
+        self,
+        plan: SingleStagedPlan3D,
+        stage_index: int,
+        stage_label: str | None = None,
+    ) -> SolveResult3D:
+        return SingleStagedDirectBatchSolver3D().solve_stage_batch(
+            [plan],
+            stage_index,
+            stage_label,
+        )[0]
 
 
 def solve_single_staged_3d(plan: SingleStagedPlan3D) -> StagedResult3D:
     return SingleStagedDirectSolver3D().run(plan)
 
 
-__all__ = ["SingleStagedDirectSolver3D", "solve_single_staged_3d"]
+__all__ = [
+    "SingleStagedDirectBatchSolver3D",
+    "SingleStagedDirectSolver3D",
+    "solve_single_staged_3d",
+]

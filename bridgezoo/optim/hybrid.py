@@ -60,10 +60,11 @@ class CableHybridOptimizer:
         problem: CableOptimizationProblem,
         options: HybridOptions | None = None,
         progress: Callable[[str], None] | None = None,
+        evaluator: CableDesignEvaluator | None = None,
     ):
         self.problem = problem
         self.options = options or HybridOptions()
-        self.evaluator = CableDesignEvaluator(problem)
+        self.evaluator = evaluator or CableDesignEvaluator(problem)
         self.layout = self.evaluator.layout
         self.progress = progress
         method = self.options.continuous.method

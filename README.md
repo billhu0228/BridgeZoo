@@ -62,11 +62,21 @@ pytest                       # 运行测试（已实现的几何测试通过，�
 python -c "from bridgezoo.envs.geometry import BridgeGeometry; print(BridgeGeometry().summary())"
 python -m scripts.single_staged_3d --bridge omo3d --n 3 --output results/single_staged_3d.json
 python -m scripts.single_staged_3d --bridge omo3d --n 3 --backend opensees --render both
+python -m scripts.optimize_cables_3d --bridge omo3d --backend opensees --out results/cable_opt_3d
+python -m scripts.single_staged_3d --bridge omo3d --design results/cable_opt_3d/best_design.json --backend opensees
 ```
 
 `single_staged_3d` 是单塔双主梁 3D 梁格第一轮入口：使用真实材料与 H/空心箱形截面，
 同时提供自研和 OpenSees 线弹性后端；`omo3d` 加载完整 OMO 3D YAML，`--render both`
 输出逐阶段 PNG 和 GIF。
+
+`optimize_cables_3d` 是独立的 3D 索优化入口。每阶段分别优化背索组和主跨索组，每组
+同步控制横桥向两根对称实体索；算法保留 2D 版本的仿射 LP+SLSQP 连续优化、整数股数
+缩放/坐标搜索、随机试探、断点续跑及 JSON/CSV/文本结果。`--backend direct` 可切换至
+自研 3D 求解器，默认 OpenSees 后端适合完整 OMO 梁格。终端输出复用 2D 的节流仪表盘，
+默认至多每秒刷新一次，可用 `--progress-refresh` 调整或用 `--quiet` 关闭。优化完成后的
+`best_design.json` 可通过 `single_staged_3d --design` 直接载入同一物理模型进行完整逐阶段
+求解、JSON 输出和 3D 渲染；载入时会校验几何、材料、阶段和索组定义。
 
 实现完成后（详见 TODO）：
 

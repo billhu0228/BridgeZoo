@@ -1,4 +1,5 @@
 import json
+from dataclasses import replace
 
 import numpy as np
 import pytest
@@ -7,12 +8,21 @@ from bridgezoo.fem.single_staged import (
     HSection3D,
     HollowBoxSection3D,
     RectangularSection3D,
+    SingleStaged3DConfig,
+    SingleStagedDirectBatchSolver3D,
     SingleStagedDirectSolver3D,
     SingleStagedOpenSeesSolver3D,
     build_single_staged_3d,
 )
+from bridgezoo.optim import (
+    CableBounds,
+    CableDesignEvaluator3D,
+    CableOptimizationProblem,
+    build_affine_model,
+)
 from bridgezoo.render.staged3d import render_staged_3d
 from scripts.bridge_config import load_single_staged_3d_config, resolve_bridge_config
+from scripts.optimize_cables_3d import main as optimize_3d_cli
 from scripts.single_staged_3d import main as run_cli
 
 
@@ -95,6 +105,104 @@ def test_3d_builder_creates_twin_girder_grid_eccentric_slab_and_box_tower():
     assert [stage.label for stage in plan.stages] == ["cable1", "cable2", "tip", "left_span"]
 
 
+def test_3d_builder_accepts_independent_backstay_and_main_stay_group_designs():
+    plan = build_single_staged_3d(
+        n_seg=2,
+        strands_per_cable=((10, 20), (30, 40)),
+        pretension_per_cable=((1.0e6, 2.0e6), (3.0e6, 4.0e6)),
+    )
+
+    for stage, expected in enumerate(((10, 20, 1.0e6, 2.0e6), (30, 40, 3.0e6, 4.0e6)), start=1):
+        back_strands, main_strands, back_tension, main_tension = expected
+        backstays = [
+            cable
+            for cable in plan.model.cables.values()
+            if cable.activation_stage == stage and cable.group == "backstay"
+        ]
+        main_stays = [
+            cable
+            for cable in plan.model.cables.values()
+            if cable.activation_stage == stage and cable.group == "main_stay"
+        ]
+        assert len(backstays) == len(main_stays) == 2
+        assert {cable.area for cable in backstays} == {back_strands * 1.4e-4}
+        assert {cable.area for cable in main_stays} == {main_strands * 1.4e-4}
+        assert {cable.pretension for cable in backstays} == {back_tension}
+        assert {cable.pretension for cable in main_stays} == {main_tension}
+
+
+def test_3d_optimization_evaluator_reports_groups_and_physical_material_quantity():
+    config = SingleStaged3DConfig(
+        n_seg=1,
+        left_span=5.0,
+        cross_girder_spacing=10.0,
+        tower_element_size=10.0,
+    )
+    problem = CableOptimizationProblem(
+        n_seg=1,
+        bounds=CableBounds(strand_min=1, strand_max=100),
+        strand_area=config.strand_area,
+        backend="direct",
+        model_family="single_staged_3d",
+    )
+
+    result = CableDesignEvaluator3D(problem, config).evaluate(
+        [10, 20],
+        [1.0e6, 2.0e6],
+        keep_result=True,
+    )
+
+    assert result.cable_ids == (1001, 2001)
+    assert result.metrics.total_strands == 2 * (10 + 20)
+    assert set(result.cable_group_members) == {1001, 2001}
+    assert all(len(members) == 2 for members in result.cable_group_members.values())
+    assert set(result.physical_cable_stress_mpa) == {
+        member
+        for members in result.cable_group_members.values()
+        for member in members
+    }
+    assert len(result.staged_result.records) == 1
+
+
+def test_3d_optimization_opensees_backend_matches_direct_group_metrics():
+    pytest.importorskip("openseespy.opensees")
+    config = SingleStaged3DConfig(
+        n_seg=1,
+        left_span=5.0,
+        cross_girder_spacing=10.0,
+        tower_element_size=10.0,
+    )
+    problem = CableOptimizationProblem(
+        n_seg=1,
+        bounds=CableBounds(strand_min=1, strand_max=100),
+        strand_area=config.strand_area,
+        backend="direct",
+        model_family="single_staged_3d",
+    )
+    design = ([55, 65], [3.0e6, 4.0e6])
+
+    direct = CableDesignEvaluator3D(problem, config).evaluate(*design)
+    reference = CableDesignEvaluator3D(replace(problem, backend="opensees"), config).evaluate(
+        *design
+    )
+
+    assert reference.metrics.shape_rmse_m == pytest.approx(
+        direct.metrics.shape_rmse_m,
+        rel=2.0e-6,
+        abs=2.0e-9,
+    )
+    assert reference.metrics.tower_top_dx_m == pytest.approx(
+        direct.metrics.tower_top_dx_m,
+        rel=2.0e-6,
+        abs=2.0e-9,
+    )
+    assert reference.cable_stress_mpa == pytest.approx(
+        direct.cable_stress_mpa,
+        rel=2.0e-6,
+        abs=2.0e-5,
+    )
+
+
 def test_direct_3d_solver_runs_all_stages_and_balances_physical_dead_load():
     plan = build_single_staged_3d(
         n_seg=2,
@@ -122,6 +230,123 @@ def test_direct_3d_solver_runs_all_stages_and_balances_physical_dead_load():
         -final.applied_load[2],
         rel=1.0e-10,
         abs=1.0e-5,
+    )
+
+
+def test_direct_3d_batch_solver_matches_scalar_and_uses_one_multi_rhs_solve(monkeypatch):
+    common = {
+        "n_seg": 1,
+        "left_span": 5.0,
+        "cross_girder_spacing": 10.0,
+        "tower_element_size": 10.0,
+        "strands_per_cable": ((55, 65),),
+    }
+    plans = [
+        build_single_staged_3d(
+            **common,
+            pretension_per_cable=(tensions,),
+        )
+        for tensions in ((0.0, 0.0), (1.0e6, 2.0e6), (3.0e6, 4.0e6))
+    ]
+    stage = plans[0].final_stage
+    scalar = [
+        SingleStagedDirectSolver3D().solve_stage(plan, stage.index, stage.label)
+        for plan in plans
+    ]
+
+    solve_calls = []
+    original_solve = np.linalg.solve
+
+    def counted_solve(matrix, right_hand_side):
+        solve_calls.append((matrix.shape, right_hand_side.shape))
+        return original_solve(matrix, right_hand_side)
+
+    monkeypatch.setattr(np.linalg, "solve", counted_solve)
+    batch = SingleStagedDirectBatchSolver3D().solve_stage_batch(
+        plans,
+        stage.index,
+        stage.label,
+    )
+
+    assert len(solve_calls) == 1
+    assert solve_calls[0][1][1] == len(plans)
+    for batched, separate in zip(batch, scalar):
+        assert batched.converged == separate.converged
+        assert batched.applied_load == pytest.approx(separate.applied_load, abs=1.0e-10)
+        for field in (
+            "displacement",
+            "frame_force",
+            "cable_force",
+            "cable_stress",
+            "support_reaction",
+        ):
+            batched_values = getattr(batched, field)
+            separate_values = getattr(separate, field)
+            assert set(batched_values) == set(separate_values)
+            for object_id in batched_values:
+                assert batched_values[object_id] == pytest.approx(
+                    separate_values[object_id],
+                    rel=1.0e-11,
+                    abs=1.0e-8,
+                )
+
+    different_area = build_single_staged_3d(
+        **{**common, "strands_per_cable": ((56, 65),)},
+        pretension_per_cable=((1.0e6, 2.0e6),),
+    )
+    with pytest.raises(ValueError, match="cable structure"):
+        SingleStagedDirectBatchSolver3D().solve_stage_batch(
+            [plans[0], different_area],
+            stage.index,
+            stage.label,
+        )
+
+
+def test_direct_3d_affine_model_uses_batch_kernel_and_matches_real_solve(monkeypatch):
+    config = SingleStaged3DConfig(
+        n_seg=1,
+        left_span=5.0,
+        cross_girder_spacing=10.0,
+        tower_element_size=10.0,
+    )
+    problem = CableOptimizationProblem(
+        n_seg=1,
+        bounds=CableBounds(strand_min=1, strand_max=100),
+        strand_area=config.strand_area,
+        backend="direct",
+        model_family="single_staged_3d",
+    )
+    evaluator = CableDesignEvaluator3D(problem, config)
+    strands = np.asarray([55, 65])
+
+    solve_rhs_counts = []
+    original_solve = np.linalg.solve
+
+    def counted_solve(matrix, right_hand_side):
+        solve_rhs_counts.append(right_hand_side.shape[1])
+        return original_solve(matrix, right_hand_side)
+
+    monkeypatch.setattr(np.linalg, "solve", counted_solve)
+    affine = build_affine_model(evaluator, strands)
+
+    assert solve_rhs_counts == [evaluator.layout.size + 1]
+    tension = np.asarray([2.2e6, 3.4e6])
+    actual = evaluator.evaluate(strands, tension)
+    assert solve_rhs_counts == [evaluator.layout.size + 1, 1]
+    assert affine.stress_mpa(tension) == pytest.approx(
+        [actual.cable_stress_mpa[cable_id] for cable_id in actual.cable_ids],
+        rel=1.0e-10,
+        abs=1.0e-8,
+    )
+    assert affine.deck_err_m(tension) == pytest.approx(
+        list(actual.deck_errors_m.values()),
+        rel=1.0e-10,
+        abs=1.0e-10,
+    )
+    assert affine.tower_dx_m(tension) == pytest.approx(
+        actual.metrics.tower_top_dx_m,
+        rel=1.0e-10,
+        abs=1.0e-10,
     )
 
 
@@ -185,3 +410,101 @@ def test_minimum_3d_cli_writes_machine_readable_json(tmp_path):
     assert payload["input"]["n_seg"] == 1
     assert payload["input"]["deck_width"] == pytest.approx(16.0)
     assert "3D rendering" not in payload["todo"]
+
+
+def test_independent_3d_optimization_cli_writes_outputs_resumes_and_solves_design(
+    tmp_path,
+    capsys,
+):
+    out_dir = tmp_path / "opt3d"
+    base_args = [
+        "--bridge",
+        "omo3d",
+        "--n",
+        "1",
+        "--backend",
+        "direct",
+        "--outer-iterations",
+        "0",
+        "--continuous-maxiter",
+        "20",
+        "--initial-strands",
+        "91",
+        "--quiet",
+        "--out",
+        str(out_dir),
+    ]
+
+    assert optimize_3d_cli(base_args) == 0
+    assert optimize_3d_cli([*base_args, "--resume"]) == 0
+    payload = json.loads((out_dir / "best_design.json").read_text(encoding="utf-8"))
+
+    assert payload["schema"] == "bridgezoo.cable_optimization_3d.v1"
+    assert payload["model_family"] == "single_staged_3d"
+    assert payload["search"]["run_index"] == 2
+    assert [item["group"] for item in payload["cable_groups"]] == [
+        "backstay",
+        "main_stay",
+    ]
+    assert all(len(item["physical_cable_ids"]) == 2 for item in payload["cable_groups"])
+    assert (out_dir / "history.csv").is_file()
+    assert (out_dir / "summary.txt").is_file()
+
+    analysis_output = tmp_path / "optimized_analysis.json"
+    assert run_cli(
+        [
+            "--bridge",
+            "omo3d",
+            "--n",
+            "1",
+            "--design",
+            str(out_dir / "best_design.json"),
+            "--backend",
+            "direct",
+            "--render",
+            "none",
+            "--output",
+            str(analysis_output),
+        ]
+    ) == 0
+    analysis = json.loads(analysis_output.read_text(encoding="utf-8"))
+    assert analysis["optimized_design"]["objective"] == pytest.approx(payload["objective"])
+    assert analysis["input"]["strands_per_cable"] == [
+        [
+            payload["cable_groups"][0]["strands_per_physical_cable"],
+            payload["cable_groups"][1]["strands_per_physical_cable"],
+        ]
+    ]
+    for group in payload["cable_groups"]:
+        for member_id, stress_mpa in group["physical_final_stress_MPa"].items():
+            assert analysis["final"]["cable_stress_Pa"][member_id] / 1.0e6 == pytest.approx(
+                stress_mpa,
+                rel=1.0e-9,
+                abs=1.0e-9,
+            )
+
+    with pytest.raises(ValueError, match="geometry/materials differ"):
+        run_cli(
+            [
+                "--bridge",
+                "omo3d",
+                "--design",
+                str(out_dir / "best_design.json"),
+                "--render",
+                "none",
+            ]
+        )
+
+    capsys.readouterr()
+    progress_out = tmp_path / "progress"
+    assert optimize_3d_cli(
+        [
+            item
+            for item in [*base_args[:-2], "--progress-refresh", "10", "--out", str(progress_out)]
+            if item != "--quiet"
+        ]
+    ) == 0
+    output_lines = capsys.readouterr().out.splitlines()
+    assert not any("optimize tensions:" in line for line in output_lines)
+    assert not any("candidate cable=" in line for line in output_lines)
+    assert len(output_lines) <= 15
