@@ -22,7 +22,7 @@ from collections.abc import Mapping, Sequence
 
 import numpy as np
 
-__all__ = ["hermite_frame_shape", "deformed_chain_shape"]
+__all__ = ["hermite_frame_shape", "deformed_chain_shape", "hermite_frame_shape_3d"]
 
 
 def hermite_frame_shape(
@@ -139,3 +139,67 @@ def deformed_chain_shape(
         xs_parts.append(exs)
         ys_parts.append(eys)
     return np.concatenate(xs_parts), np.concatenate(ys_parts)
+
+
+def hermite_frame_shape_3d(
+    pi: tuple[float, float, float],
+    pj: tuple[float, float, float],
+    di: tuple[float, float, float, float, float, float],
+    dj: tuple[float, float, float, float, float, float],
+    orientation: tuple[float, float, float] = (0.0, 0.0, 1.0),
+    scale: float = 1.0,
+    samples: int = 12,
+) -> np.ndarray:
+    """Sample a deformed 3D Euler-Bernoulli frame centreline.
+
+    The local-axis convention matches the 3D FEM/OpenSees ``vecxz`` input.
+    Local-y bending uses ``rz=dv/dx`` and local-z bending uses
+    ``ry=-dw/dx``.  The returned array has shape ``(samples, 3)``.
+    """
+
+    if samples < 2:
+        raise ValueError(f"samples must be >= 2, got {samples}")
+    point_i = np.asarray(pi, dtype=float)
+    point_j = np.asarray(pj, dtype=float)
+    delta = point_j - point_i
+    length = float(np.linalg.norm(delta))
+    if length <= 0.0:
+        raise ValueError(f"zero-length element: pi={pi}, pj={pj}")
+    local_x = delta / length
+    reference = np.asarray(orientation, dtype=float)
+    local_y = np.cross(reference, local_x)
+    norm_y = float(np.linalg.norm(local_y))
+    if norm_y <= 1.0e-12:
+        raise ValueError("orientation vector is parallel to the frame axis")
+    local_y /= norm_y
+    local_z = np.cross(local_x, local_y)
+    rotation = np.vstack((local_x, local_y, local_z))
+
+    disp_i = np.asarray(di, dtype=float)
+    disp_j = np.asarray(dj, dtype=float)
+    trans_i, trans_j = rotation @ disp_i[:3], rotation @ disp_j[:3]
+    rotation_i, rotation_j = rotation @ disp_i[3:], rotation @ disp_j[3:]
+
+    t = np.linspace(0.0, 1.0, samples)
+    n1 = 1.0 - 3.0 * t**2 + 2.0 * t**3
+    n2 = length * (t - 2.0 * t**2 + t**3)
+    n3 = 3.0 * t**2 - 2.0 * t**3
+    n4 = length * (t**3 - t**2)
+
+    local_u = (1.0 - t) * trans_i[0] + t * trans_j[0]
+    local_v = (
+        n1 * trans_i[1]
+        + n2 * rotation_i[2]
+        + n3 * trans_j[1]
+        + n4 * rotation_j[2]
+    )
+    local_w = (
+        n1 * trans_i[2]
+        - n2 * rotation_i[1]
+        + n3 * trans_j[2]
+        - n4 * rotation_j[1]
+    )
+    local_displacement = np.column_stack((local_u, local_v, local_w))
+    base = point_i + t[:, None] * delta
+    global_displacement = local_displacement @ rotation
+    return base + scale * global_displacement

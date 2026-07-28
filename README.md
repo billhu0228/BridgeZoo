@@ -31,8 +31,8 @@
 ## 仓库结构
 
 ```
-bridgezoo/   主包：fem（求解器）/ envs（环境）/ mappo（算法）/ render（可视化）
-scripts/     正式入口：validate_fem / train / evaluate / baselines
+bridgezoo/   主包：fem（2D/3D 求解器）/ envs（环境）/ mappo（算法）/ render（可视化）
+scripts/     正式入口：validate_fem / single_staged_3d / train / evaluate / baselines
 tools/       开发辅助：profile_fem / export_dxf / 参考数据
 tests/       pytest
 docs/        设计与架构文档
@@ -60,7 +60,13 @@ pip install -e ".[ref]"
 ```bash
 pytest                       # 运行测试（已实现的几何测试通过，其余 skip）
 python -c "from bridgezoo.envs.geometry import BridgeGeometry; print(BridgeGeometry().summary())"
+python -m scripts.single_staged_3d --bridge omo3d --n 3 --output results/single_staged_3d.json
+python -m scripts.single_staged_3d --bridge omo3d --n 3 --backend opensees --render both
 ```
+
+`single_staged_3d` 是单塔双主梁 3D 梁格第一轮入口：使用真实材料与 H/空心箱形截面，
+同时提供自研和 OpenSees 线弹性后端；`omo3d` 加载完整 OMO 3D YAML，`--render both`
+输出逐阶段 PNG 和 GIF。
 
 实现完成后（详见 TODO）：
 

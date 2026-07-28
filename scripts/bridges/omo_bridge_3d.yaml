@@ -1,0 +1,64 @@
+# OMO single-tower 3D grillage bridge. Units: N, m, Pa, kg/m^3.
+# Every structural input consumed by scripts.single_staged_3d is explicit.
+bridge_type: single_3d
+n_seg: 24
+
+# Longitudinal geometry inherited from the OMO 2D model.
+anchor_base_height: 48.75
+anchor_spacing: 2.5
+anchor_top_free: 6.5
+left_start: 24.0
+left_spacing: 12.0
+left_end: 6.0
+right_start: 24.0
+right_spacing: 1.0
+right_end: 1.0
+right_fix: 0.2
+left_span: 40.0
+
+# Transverse grillage and eccentric deck-slab reference plane.
+girder_spacing: 12.5
+cross_girder_spacing: 4.0
+deck_width: 16.0
+deck_thickness: 0.30
+deck_offset: 1.90
+tower_element_size: 2.0
+
+# Main-girder welded H section: depth, flange width, web and flange thickness.
+main_girder_depth: 3.50
+main_girder_flange_width: 1.40
+main_girder_web_thickness: 0.040
+main_girder_flange_thickness: 0.080
+
+# Cross-girder welded H section.
+cross_girder_depth: 1.80
+cross_girder_flange_width: 0.80
+cross_girder_web_thickness: 0.030
+cross_girder_flange_thickness: 0.050
+
+# Constant hollow tower box used in the first-round 3D architecture.
+tower_outer_width: 7.50
+tower_outer_depth: 6.50
+tower_wall_thickness: 0.60
+
+# Physical materials: E, Poisson ratio and mass density.
+steel_name: "Q345 structural steel"
+steel_E: 206.0e9
+steel_poisson: 0.30
+steel_density: 7850.0
+concrete_name: "OMO tower/deck concrete"
+concrete_E: 3.3238e10
+concrete_poisson: 0.20
+concrete_density: 2500.0
+cable_material_name: "parallel strand cable steel"
+cable_material_E: 1.95e11
+cable_material_poisson: 0.30
+cable_material_density: 7850.0
+
+# Cable and permanent-load inputs.
+strand_area: 1.4e-4
+strands_per_cable: 91
+pretension_per_cable: 6.0e6
+gravity: 9.806
+# Original OMO dw=28 kN/m distributed over the 16 m deck width.
+superimposed_dead_load: 1750.0

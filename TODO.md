@@ -51,6 +51,18 @@
 - [ ] `staged_builder.build_stages`：由全桥 `BridgeGeometry` 生成施工阶段（对称双悬臂/合龙）
 - [ ] `tools/profile_fem.py`：单 episode 耗时基准 < 1~2 ms
 
+**`single_staged` 3D 升级（第一轮）✅**
+- [x] `SingleTowerGeometry3D`：保留单塔纵向基本尺寸，新增双主梁、桥面板偏移及真实
+  H/空心箱形截面尺寸
+- [x] `single_staged.model3d`：6 自由度空间模型 IR、阶段激活、刚臂和统一结果
+- [x] 双主梁 + 等间距横梁共节点梁格、偏心桥面板梁格、单塔箱形截面和双索面
+- [x] `direct3d` / `opensees3d`：同模型线弹性空间梁/杆双后端及交叉测试
+- [x] `scripts.single_staged_3d`：最小 CLI 输入、终端摘要及 JSON 输出
+- [x] 完整 OMO 3D YAML 输入 + OpenSees 结果的阶段 PNG/GIF 空间渲染
+- [ ] 第二轮：真正的增量施工状态、构件零应力诞生、安装构形/支座位移锁定
+- [ ] 第二轮：OpenSees `corotTruss`、大位移、索垂度及拉索仅受拉处理
+- [ ] 第二轮：实体 H/箱形截面外轮廓、结果云图与交互式 3D 渲染
+
 > 一次成桥（机器精度一致）与逐阶段施工（小位移 ~0.02% 一致）两条线均已闭环。
 > 自研求解器可独立支撑 RL 训练，OpenSees 仅作离线校核。
 

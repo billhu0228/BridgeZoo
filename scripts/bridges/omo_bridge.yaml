@@ -12,7 +12,7 @@ right_spacing: 1.0
 right_end: 1.0
 right_fix: 0.2 # single 独有参数，右侧梁端位置
 left_span: 40.0 # single 独有参数，左侧辅助跨径
-wg: 140.0e3
+wg: 170.0e3
 dw: 2.8e4
 beam_E: 206.0e9
 beam_A: 0.7437

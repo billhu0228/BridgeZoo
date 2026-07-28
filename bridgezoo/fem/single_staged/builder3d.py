@@ -1,0 +1,529 @@
+"""Build the first-round 3D single-tower staged bridge architecture.
+
+The model retains the legacy single-staged longitudinal dimension semantics,
+but uses physical materials and section dimensions.  Main girders and cross
+girders share a two-line beam grid.  An equivalent deck-slab grillage sits on
+an eccentric reference plane and is connected to that beam grid by rigid links.
+"""
+
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass, replace
+
+from bridgezoo.envs.geometry import SingleTowerGeometry3D
+
+from bridgezoo.fem.single_staged.model3d import (
+    BridgeModel3D,
+    CableElement3D,
+    ConstructionStage3D,
+    FrameElement3D,
+    FrameLoad3D,
+    Node3D,
+    RigidLink3D,
+    SingleStagedPlan3D,
+    Support3D,
+)
+from bridgezoo.fem.single_staged.sections3d import (
+    CABLE_STEEL,
+    CONCRETE_C50,
+    STEEL_Q345,
+    ElasticMaterial3D,
+    HSection3D,
+    HollowBoxSection3D,
+    RectangularSection3D,
+)
+
+
+_BEAM_NODE_BASE = 100_000
+_SLAB_NODE_BASE = 200_000
+_TOWER_NODE_BASE = 300_000
+_GROUND_NODE_BASE = 400_000
+_MAIN_FRAME_BASE = 1_000_000
+_CROSS_FRAME_BASE = 1_100_000
+_SLAB_LONG_FRAME_BASE = 1_200_000
+_SLAB_CROSS_FRAME_BASE = 1_300_000
+_TOWER_FRAME_BASE = 1_400_000
+_BACKSTAY_BASE = 2_000_000
+_MAIN_STAY_BASE = 2_100_000
+_RIGID_LINK_BASE = 3_000_000
+
+
+@dataclass(frozen=True)
+class SingleStaged3DConfig(SingleTowerGeometry3D):
+    """Physical inputs for the 3D single-tower bridge.
+
+    The first group mirrors the established 2D dimension names.  New transverse
+    dimensions and physical component definitions follow it.  SI units are
+    mandatory: m, N, Pa and kg/m³.
+    """
+
+    gravity: float = 9.806
+    superimposed_dead_load: float = 0.0  # deck area load, N/m²
+
+    strand_area: float = 1.4e-4
+    strands_per_cable: int | tuple[int, ...] = 55
+    pretension_per_cable: float | tuple[float, ...] = 3.5e6
+
+    steel: ElasticMaterial3D = STEEL_Q345
+    concrete: ElasticMaterial3D = CONCRETE_C50
+    cable_material: ElasticMaterial3D = CABLE_STEEL
+
+    @property
+    def main_girder_section(self) -> HSection3D:
+        return HSection3D(
+            f"main girder H-{self.main_girder_depth * 1000:.0f}",
+            self.main_girder_depth,
+            self.main_girder_flange_width,
+            self.main_girder_web_thickness,
+            self.main_girder_flange_thickness,
+        )
+
+    @property
+    def cross_girder_section(self) -> HSection3D:
+        return HSection3D(
+            f"cross girder H-{self.cross_girder_depth * 1000:.0f}",
+            self.cross_girder_depth,
+            self.cross_girder_flange_width,
+            self.cross_girder_web_thickness,
+            self.cross_girder_flange_thickness,
+        )
+
+    @property
+    def tower_section(self) -> HollowBoxSection3D:
+        return HollowBoxSection3D(
+            f"tower {self.tower_outer_width:.1f}x{self.tower_outer_depth:.1f} box",
+            self.tower_outer_width,
+            self.tower_outer_depth,
+            self.tower_wall_thickness,
+        )
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        positive = {"gravity": self.gravity, "strand_area": self.strand_area}
+        invalid = [
+            name for name, value in positive.items() if not math.isfinite(value) or value <= 0.0
+        ]
+        if invalid:
+            raise ValueError(f"positive finite values required for: {', '.join(invalid)}")
+        if self.superimposed_dead_load < 0.0:
+            raise ValueError("superimposed_dead_load must be nonnegative")
+        _stage_values(self.strands_per_cable, self.n_seg, "strands_per_cable", integer=True)
+        _stage_values(self.pretension_per_cable, self.n_seg, "pretension_per_cable")
+
+
+@dataclass(frozen=True)
+class _Station:
+    key: str
+    x: float
+    activation_stage: int
+    role: str
+    is_cross_grid: bool = False
+
+
+def _stage_values(value, n_seg: int, name: str, integer: bool = False) -> tuple[float, ...]:
+    values = (value,) * n_seg if isinstance(value, (int, float)) else tuple(value)
+    if len(values) != n_seg:
+        raise ValueError(f"{name} must be a scalar or contain n_seg values")
+    numbers = tuple(float(item) for item in values)
+    if any(not math.isfinite(item) or item < 0.0 for item in numbers):
+        raise ValueError(f"{name} values must be finite and nonnegative")
+    if integer and any(not item.is_integer() or item <= 0.0 for item in numbers):
+        raise ValueError(f"{name} values must be positive integers")
+    return numbers
+
+
+def _tower_elevations(config: SingleStaged3DConfig) -> tuple[list[float], list[float]]:
+    anchors = [
+        config.anchor_base_height + index * config.anchor_spacing
+        for index in range(config.n_seg)
+    ]
+    top = anchors[-1] + config.anchor_top_free
+    critical = sorted(set([0.0, *anchors, top]))
+    elevations = [critical[0]]
+    for lower, upper in zip(critical, critical[1:]):
+        subdivisions = max(1, math.ceil((upper - lower) / config.tower_element_size))
+        for part in range(1, subdivisions + 1):
+            elevations.append(lower + (upper - lower) * part / subdivisions)
+    return elevations, anchors
+
+
+def _key_stations(config: SingleStaged3DConfig) -> list[_Station]:
+    stations = [
+        _Station("right_bearing", config.resolved_right_fix, 1, "right_bearing"),
+        _Station("tower_axis", 0.0, 1, "root"),
+    ]
+    for index in range(1, config.n_seg + 1):
+        stations.append(
+            _Station(
+                f"cable_{index}",
+                -(config.left_start + (index - 1) * config.left_spacing),
+                index,
+                "cable_station",
+            )
+        )
+    tip_x = -(config.left_start + (config.n_seg - 1) * config.left_spacing + config.left_end)
+    stations.append(_Station("free_tip", tip_x, config.n_seg + 1, "tip"))
+    if config.left_span is not None:
+        stations.append(
+            _Station(
+                "left_bearing",
+                tip_x - config.left_span,
+                config.n_seg + 2,
+                "left_bearing",
+            )
+        )
+    stations.sort(key=lambda station: station.x)
+    if any(math.isclose(a.x, b.x, abs_tol=1.0e-12) for a, b in zip(stations, stations[1:])):
+        raise ValueError("longitudinal station coordinates must be distinct")
+    return stations
+
+
+def _activation_stage_at_x(x: float, key_stations: list[_Station]) -> int:
+    final_stage = max(station.activation_stage for station in key_stations)
+    rightmost = max(station.x for station in key_stations)
+    for stage in range(1, final_stage + 1):
+        active = [station.x for station in key_stations if station.activation_stage <= stage]
+        if active and min(active) - 1.0e-10 <= x <= rightmost + 1.0e-10:
+            return stage
+    return final_stage
+
+
+def _stations(config: SingleStaged3DConfig) -> tuple[list[_Station], float]:
+    """Merge construction/key nodes with an independent equal cross-beam grid."""
+
+    key_stations = _key_stations(config)
+    leftmost = min(station.x for station in key_stations)
+    rightmost = max(station.x for station in key_stations)
+    interval_count = max(
+        1,
+        math.ceil((rightmost - leftmost) / config.cross_girder_spacing),
+    )
+    actual_spacing = (rightmost - leftmost) / interval_count
+    stations = list(key_stations)
+    for cross_index in range(interval_count + 1):
+        x = leftmost + cross_index * actual_spacing
+        coincident_index = next(
+            (
+                index
+                for index, station in enumerate(stations)
+                if math.isclose(station.x, x, abs_tol=1.0e-10)
+            ),
+            None,
+        )
+        if coincident_index is not None:
+            stations[coincident_index] = replace(stations[coincident_index], is_cross_grid=True)
+        else:
+            stations.append(
+                _Station(
+                    f"cross_{cross_index}",
+                    x,
+                    _activation_stage_at_x(x, key_stations),
+                    "cross_grid",
+                    True,
+                )
+            )
+    stations.sort(key=lambda station: station.x)
+    return stations, actual_spacing
+
+
+def build_single_staged_3d(
+    config: SingleStaged3DConfig | None = None,
+    **overrides,
+) -> SingleStagedPlan3D:
+    """Build a solver-neutral 3D staged plan.
+
+    Keyword overrides are applied with :func:`dataclasses.replace`, allowing a
+    concise minimum input such as ``build_single_staged_3d(n_seg=3)``.
+    """
+
+    if config is None:
+        config = SingleStaged3DConfig(**overrides)
+    elif overrides:
+        config = replace(config, **overrides)
+
+    model = BridgeModel3D(name=f"single_tower_grillage_3d_N{config.n_seg}")
+    stations, actual_cross_spacing = _stations(config)
+    half_spacing = 0.5 * config.girder_spacing
+    girder_y = (-half_spacing, half_spacing)
+
+    # Beam-grid and eccentric slab nodes.
+    beam_nodes: dict[tuple[int, int], int] = {}
+    slab_nodes: dict[tuple[int, int], int] = {}
+    for station_index, station in enumerate(stations):
+        for side in range(2):
+            beam_id = _BEAM_NODE_BASE + 10 * station_index + side
+            slab_id = _SLAB_NODE_BASE + 10 * station_index + side
+            beam_nodes[station_index, side] = beam_id
+            slab_nodes[station_index, side] = slab_id
+            model.add_node(
+                Node3D(
+                    beam_id,
+                    station.x,
+                    girder_y[side],
+                    0.0,
+                    f"main_girder_{side}",
+                    station.activation_stage,
+                )
+            )
+            model.add_node(
+                Node3D(
+                    slab_id,
+                    station.x,
+                    girder_y[side],
+                    config.deck_offset,
+                    f"deck_slab_{side}",
+                    station.activation_stage,
+                )
+            )
+            model.add_rigid_link(
+                RigidLink3D(
+                    _RIGID_LINK_BASE + 10 * station_index + side,
+                    beam_id,
+                    slab_id,
+                    station.activation_stage,
+                )
+            )
+
+    # Two longitudinal H main girders and two longitudinal slab strips.
+    slab_longitudinal = RectangularSection3D(
+        "deck longitudinal strip",
+        config.deck_width / 2.0,
+        config.deck_thickness,
+    )
+    slab_longitudinal_ids: list[int] = []
+    for interval, (left, right) in enumerate(zip(stations, stations[1:])):
+        activation = max(left.activation_stage, right.activation_stage)
+        for side in range(2):
+            main_id = _MAIN_FRAME_BASE + 10 * interval + side
+            slab_id = _SLAB_LONG_FRAME_BASE + 10 * interval + side
+            model.add_frame(
+                FrameElement3D(
+                    main_id,
+                    beam_nodes[interval, side],
+                    beam_nodes[interval + 1, side],
+                    config.steel,
+                    config.main_girder_section,
+                    group="main_girder",
+                    activation_stage=activation,
+                )
+            )
+            model.add_frame(
+                FrameElement3D(
+                    slab_id,
+                    slab_nodes[interval, side],
+                    slab_nodes[interval + 1, side],
+                    config.concrete,
+                    slab_longitudinal,
+                    group="deck_longitudinal",
+                    activation_stage=activation,
+                )
+            )
+            slab_longitudinal_ids.append(slab_id)
+
+    # Cross H girders share the beam-grid nodes.  Transverse slab strips use
+    # station tributary lengths and the raised slab nodes.
+    cross_station_indices = [
+        index for index, station in enumerate(stations) if station.is_cross_grid
+    ]
+    for cross_order, station_index in enumerate(cross_station_indices):
+        station = stations[station_index]
+        cross_id = _CROSS_FRAME_BASE + cross_order
+        model.add_frame(
+            FrameElement3D(
+                cross_id,
+                beam_nodes[station_index, 0],
+                beam_nodes[station_index, 1],
+                config.steel,
+                config.cross_girder_section,
+                group="cross_girder",
+                activation_stage=station.activation_stage,
+            )
+        )
+        left_tributary = 0.0 if cross_order == 0 else 0.5 * actual_cross_spacing
+        right_tributary = (
+            0.0 if cross_order == len(cross_station_indices) - 1 else 0.5 * actual_cross_spacing
+        )
+        transverse_section = RectangularSection3D(
+            f"deck transverse strip {station.key}",
+            left_tributary + right_tributary,
+            config.deck_thickness,
+        )
+        model.add_frame(
+            FrameElement3D(
+                _SLAB_CROSS_FRAME_BASE + cross_order,
+                slab_nodes[station_index, 0],
+                slab_nodes[station_index, 1],
+                config.concrete,
+                transverse_section,
+                group="deck_transverse",
+                activation_stage=station.activation_stage,
+            )
+        )
+
+    # Tower box members, with mesh boundaries at every cable anchor.
+    elevations, anchor_elevations = _tower_elevations(config)
+    tower_nodes: list[int] = []
+    anchor_nodes: dict[float, int] = {}
+    for index, elevation in enumerate(elevations):
+        node_id = _TOWER_NODE_BASE + index
+        role = "tower_base" if index == 0 else "tower"
+        if any(math.isclose(elevation, anchor, abs_tol=1.0e-10) for anchor in anchor_elevations):
+            role = "tower_anchor"
+            anchor_nodes[next(anchor for anchor in anchor_elevations if math.isclose(elevation, anchor))] = node_id
+        model.add_node(Node3D(node_id, 0.0, 0.0, elevation, role, 0))
+        tower_nodes.append(node_id)
+    for index, (node_i, node_j) in enumerate(zip(tower_nodes, tower_nodes[1:])):
+        model.add_frame(
+            FrameElement3D(
+                _TOWER_FRAME_BASE + index,
+                node_i,
+                node_j,
+                config.concrete,
+                config.tower_section,
+                orientation=(0.0, 1.0, 0.0),
+                group="tower",
+                activation_stage=0,
+            )
+        )
+
+    # Two cable planes: paired main stays and paired backstays at each stage.
+    strands = _stage_values(config.strands_per_cable, config.n_seg, "strands_per_cable", integer=True)
+    pretensions = _stage_values(config.pretension_per_cable, config.n_seg, "pretension_per_cable")
+    station_by_key = {station.key: index for index, station in enumerate(stations)}
+    ground_anchor_ids: list[int] = []
+    for cable_index in range(1, config.n_seg + 1):
+        activation = cable_index
+        tower_anchor = anchor_nodes[anchor_elevations[cable_index - 1]]
+        deck_station = station_by_key[f"cable_{cable_index}"]
+        ground_x = config.right_start + (cable_index - 1) * config.right_spacing
+        for side in range(2):
+            ground_id = _GROUND_NODE_BASE + 10 * cable_index + side
+            ground_anchor_ids.append(ground_id)
+            model.add_node(
+                Node3D(ground_id, ground_x, girder_y[side], 0.0, "ground_anchor", activation)
+            )
+            model.add_support(
+                Support3D(ground_id, True, True, True, True, True, True, activation)
+            )
+            area = config.strand_area * int(strands[cable_index - 1])
+            tension = pretensions[cable_index - 1]
+            model.add_cable(
+                CableElement3D(
+                    _BACKSTAY_BASE + 10 * cable_index + side,
+                    tower_anchor,
+                    ground_id,
+                    config.cable_material,
+                    area,
+                    tension,
+                    "backstay",
+                    activation,
+                )
+            )
+            model.add_cable(
+                CableElement3D(
+                    _MAIN_STAY_BASE + 10 * cable_index + side,
+                    tower_anchor,
+                    beam_nodes[deck_station, side],
+                    config.cable_material,
+                    area,
+                    tension,
+                    "main_stay",
+                    activation,
+                )
+            )
+
+    # Tower base and right bearings provide global stability.  The right pair
+    # allows transverse expansion at one girder.  An optional left auxiliary
+    # span ends on vertical bearings.
+    model.add_support(Support3D(tower_nodes[0], True, True, True, True, True, True, 0))
+    right_index = station_by_key["right_bearing"]
+    model.add_support(
+        Support3D(beam_nodes[right_index, 0], True, True, True, False, False, False, 1)
+    )
+    model.add_support(
+        Support3D(beam_nodes[right_index, 1], True, False, True, False, False, False, 1)
+    )
+    if config.left_span is not None:
+        left_index = station_by_key["left_bearing"]
+        final_stage_index = config.n_seg + 2
+        for side in range(2):
+            model.add_support(
+                Support3D(
+                    beam_nodes[left_index, side],
+                    False,
+                    side == 0,
+                    True,
+                    False,
+                    False,
+                    False,
+                    final_stage_index,
+                )
+            )
+
+    # Physical self-weight.  Orthogonal deck strips both contribute stiffness,
+    # but slab mass is assigned only to longitudinal strips to avoid counting
+    # the same concrete plate twice.
+    for frame in model.frames.values():
+        if frame.group == "deck_transverse":
+            continue
+        model.add_frame_load(
+            FrameLoad3D(
+                frame.id,
+                qz=-frame.material.density * frame.section.A * config.gravity,
+                load_case="self_weight",
+                activation_stage=frame.activation_stage,
+            )
+        )
+    if config.superimposed_dead_load:
+        final_stage_index = config.n_seg + 2 if config.left_span is not None else config.n_seg + 1
+        line_load = -config.superimposed_dead_load * config.deck_width / 2.0
+        for member_id in slab_longitudinal_ids:
+            model.add_frame_load(
+                FrameLoad3D(
+                    member_id,
+                    qz=line_load,
+                    load_case="superimposed_dead",
+                    activation_stage=final_stage_index,
+                )
+            )
+
+    stages = [
+        ConstructionStage3D(
+            index,
+            f"cable{index}",
+            f"activate deck segment {index} and paired main/back stays",
+        )
+        for index in range(1, config.n_seg + 1)
+    ]
+    stages.append(
+        ConstructionStage3D(config.n_seg + 1, "tip", "activate the final cantilever tip grid")
+    )
+    if config.left_span is not None:
+        stages.append(
+            ConstructionStage3D(
+                config.n_seg + 2,
+                "left_span",
+                "activate the auxiliary span and its end bearings",
+            )
+        )
+
+    metadata = {
+        "coordinate_system": "x longitudinal, y transverse, z vertical",
+        "analysis_scope": "cumulative linear re-analysis at each activation stage",
+        "station_x": {station.key: station.x for station in stations},
+        "cross_girder_x": tuple(stations[index].x for index in cross_station_indices),
+        "actual_cross_girder_spacing": actual_cross_spacing,
+        "beam_grid_node_ids": tuple(beam_nodes.values()),
+        "slab_node_ids": tuple(slab_nodes.values()),
+        "tower_node_ids": tuple(tower_nodes),
+        "ground_anchor_ids": tuple(ground_anchor_ids),
+        "girder_spacing": config.girder_spacing,
+        "deck_width": config.deck_width,
+        "deck_offset": config.deck_offset,
+        "config": config,
+    }
+    return SingleStagedPlan3D(model=model, stages=stages, metadata=metadata)
+
+
+__all__ = ["SingleStaged3DConfig", "build_single_staged_3d"]

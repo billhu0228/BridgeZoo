@@ -12,7 +12,11 @@ import numpy as np
 import pytest
 
 from bridgezoo.fem.staged import StagedDirectSolver, build_staged_cantilever
-from bridgezoo.render.deformed_shape import deformed_chain_shape, hermite_frame_shape
+from bridgezoo.render.deformed_shape import (
+    deformed_chain_shape,
+    hermite_frame_shape,
+    hermite_frame_shape_3d,
+)
 from scripts.staged_analysis import _farthest_deck_deformation_text
 
 ZERO = (0.0, 0.0, 0.0)
@@ -36,6 +40,21 @@ def test_endpoints_match_scaled_nodal_displacements():
     assert ys[0] == pytest.approx(pi[1] + scale * di[1], abs=1e-12)
     assert xs[-1] == pytest.approx(pj[0] + scale * dj[0], abs=1e-12)
     assert ys[-1] == pytest.approx(pj[1] + scale * dj[1], abs=1e-12)
+
+
+def test_3d_frame_shape_matches_scaled_endpoints_and_zero_chord():
+    pi, pj = (1.0, -2.0, 0.5), (5.0, 3.0, 2.0)
+    zero6 = (0.0,) * 6
+    chord = hermite_frame_shape_3d(pi, pj, zero6, zero6, samples=7)
+    expected = np.linspace(np.asarray(pi), np.asarray(pj), 7)
+    np.testing.assert_allclose(chord, expected, atol=1.0e-12)
+
+    di = (0.01, -0.02, 0.03, 0.004, -0.005, 0.006)
+    dj = (-0.02, 0.04, -0.01, -0.003, 0.002, -0.007)
+    scale = 8.0
+    shape = hermite_frame_shape_3d(pi, pj, di, dj, scale=scale, samples=9)
+    np.testing.assert_allclose(shape[0], np.asarray(pi) + scale * np.asarray(di[:3]), atol=1e-12)
+    np.testing.assert_allclose(shape[-1], np.asarray(pj) + scale * np.asarray(dj[:3]), atol=1e-12)
 
 
 def test_cantilever_tip_load_matches_analytic_cubic():

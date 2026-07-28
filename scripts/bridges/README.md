@@ -28,6 +28,31 @@ The bundled `model` and `p4b` configurations are `normal`; `omo` is `single`
 and uses the single-tower construction model. Analysis, validation, and
 optimization entry points all dispatch from this field.
 
+## OMO 3D configuration
+
+`omo_bridge_3d.yaml` is the complete input for the new 3D single-tower
+grillage. It is intentionally separate from the 2D schema and declares
+`bridge_type: single_3d`. Use its bundled alias with the 3D analysis script:
+
+```bash
+python -m scripts.single_staged_3d --bridge omo3d --backend opensees --render both
+```
+
+The YAML explicitly contains:
+
+- inherited OMO longitudinal cable/tower/span dimensions;
+- twin-main-girder spacing, equal cross-girder target spacing, deck width,
+  thickness and beam-axis eccentricity;
+- H-section dimensions for main and cross girders and hollow-box dimensions
+  for the tower;
+- elastic modulus, Poisson ratio and density for structural steel, concrete
+  and cable steel;
+- strand area/count, cable pretension, gravity and superimposed deck dead load.
+
+The loader rejects missing or unknown keys. `cross_girder_spacing` is the
+maximum target spacing; the builder divides the complete deck length into an
+integer number of equal bays not exceeding that value.
+
 ### Current `single` construction topology
 
 The current `single_staged` implementation models an asymmetric single-tower

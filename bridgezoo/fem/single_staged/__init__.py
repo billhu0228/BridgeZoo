@@ -1,4 +1,9 @@
-"""逐阶段施工(变刚度 + 切线激活)子包 —— "一套计划,两种后端,结果一致"。
+"""单塔逐阶段施工模型 —— "一套定义,两种后端,结果一致"。
+
+``single_staged`` now also exposes the first-round 3D architecture.  Its names
+carry a ``3D`` suffix so the established 2D optimization API remains available
+during migration.  The 3D path uses physical sections, a twin-main-girder
+grillage, an eccentric deck-slab plane and matching direct/OpenSees backends.
 
 - :mod:`bridgezoo.fem.single_staged.plan` —— 与求解器无关的施工计划 IR + 结果容器 + 共享辅助。
 - :mod:`bridgezoo.fem.single_staged.builder` —— 由参数构建 :class:`StagedPlan`
@@ -29,6 +34,37 @@ from bridgezoo.fem.single_staged.plan import (
     StagedResult,
     StagedStepRecord,
 )
+from bridgezoo.fem.single_staged.builder3d import (
+    SingleStaged3DConfig,
+    build_single_staged_3d,
+)
+from bridgezoo.fem.single_staged.direct3d import (
+    SingleStagedDirectSolver3D,
+    solve_single_staged_3d,
+)
+from bridgezoo.fem.single_staged.model3d import (
+    BridgeModel3D,
+    CableElement3D,
+    ConstructionStage3D,
+    FrameElement3D,
+    FrameLoad3D,
+    Node3D,
+    RigidLink3D,
+    SingleStagedPlan3D,
+    SolveResult3D,
+    StagedResult3D,
+    Support3D,
+)
+from bridgezoo.fem.single_staged.opensees3d import SingleStagedOpenSeesSolver3D
+from bridgezoo.fem.single_staged.sections3d import (
+    CABLE_STEEL,
+    CONCRETE_C50,
+    STEEL_Q345,
+    ElasticMaterial3D,
+    HSection3D,
+    HollowBoxSection3D,
+    RectangularSection3D,
+)
 
 __all__ = [
     "build_staged_cantilever",
@@ -47,6 +83,29 @@ __all__ = [
     "NodalLoad",
     "MemberLoad",
     "BalanceDof",
+    "SingleStaged3DConfig",
+    "build_single_staged_3d",
+    "SingleStagedDirectSolver3D",
+    "SingleStagedOpenSeesSolver3D",
+    "solve_single_staged_3d",
+    "BridgeModel3D",
+    "SingleStagedPlan3D",
+    "ConstructionStage3D",
+    "Node3D",
+    "FrameElement3D",
+    "CableElement3D",
+    "RigidLink3D",
+    "Support3D",
+    "FrameLoad3D",
+    "SolveResult3D",
+    "StagedResult3D",
+    "ElasticMaterial3D",
+    "HSection3D",
+    "HollowBoxSection3D",
+    "RectangularSection3D",
+    "STEEL_Q345",
+    "CONCRETE_C50",
+    "CABLE_STEEL",
     "plan",
     "builder",
     "direct",

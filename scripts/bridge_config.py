@@ -22,6 +22,8 @@ _ALIASES = {
     "p4b_defaults": "p4b_defaults.yaml",
     "omo": "omo_bridge.yaml",
     "omo_bridge": "omo_bridge.yaml",
+    "omo3d": "omo_bridge_3d.yaml",
+    "omo_bridge_3d": "omo_bridge_3d.yaml",
 }
 _REQUIRED_KEYS = {
     "bridge_type",
@@ -46,6 +48,58 @@ _REQUIRED_KEYS = {
 }
 _SINGLE_ONLY_KEYS = {"right_fix", "left_span"}
 _KEY_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+_3D_CONFIG_KEYS = {
+    "n_seg",
+    "anchor_base_height",
+    "anchor_spacing",
+    "anchor_top_free",
+    "left_start",
+    "left_spacing",
+    "left_end",
+    "right_start",
+    "right_spacing",
+    "right_end",
+    "right_fix",
+    "left_span",
+    "girder_spacing",
+    "cross_girder_spacing",
+    "deck_width",
+    "deck_thickness",
+    "deck_offset",
+    "tower_element_size",
+    "main_girder_depth",
+    "main_girder_flange_width",
+    "main_girder_web_thickness",
+    "main_girder_flange_thickness",
+    "cross_girder_depth",
+    "cross_girder_flange_width",
+    "cross_girder_web_thickness",
+    "cross_girder_flange_thickness",
+    "tower_outer_width",
+    "tower_outer_depth",
+    "tower_wall_thickness",
+    "strand_area",
+    "strands_per_cable",
+    "pretension_per_cable",
+    "gravity",
+    "superimposed_dead_load",
+}
+_3D_MATERIAL_KEYS = {
+    "steel_name",
+    "steel_E",
+    "steel_poisson",
+    "steel_density",
+    "concrete_name",
+    "concrete_E",
+    "concrete_poisson",
+    "concrete_density",
+    "cable_material_name",
+    "cable_material_E",
+    "cable_material_poisson",
+    "cable_material_density",
+}
+_REQUIRED_3D_KEYS = {"bridge_type", *_3D_CONFIG_KEYS, *_3D_MATERIAL_KEYS}
 
 
 def resolve_bridge_config(source: str | Path) -> Path:
@@ -158,6 +212,73 @@ def load_bridge_config(source: str | Path) -> dict[str, object]:
         if not math.isfinite(config[key]) or config[key] <= 0.0:
             raise ValueError(f"{path}: {key!r} must be finite and positive")
     return config
+
+
+def load_single_staged_3d_config(source: str | Path):
+    """Load a complete 3D single-tower YAML into ``SingleStaged3DConfig``.
+
+    The YAML remains flat and dependency-free like the established 2D bridge
+    files.  Material scalars are converted to the solver-neutral physical
+    material objects expected by the 3D builder.
+    """
+
+    from bridgezoo.fem.single_staged.builder3d import SingleStaged3DConfig
+    from bridgezoo.fem.single_staged.sections3d import ElasticMaterial3D
+
+    path = resolve_bridge_config(source)
+    values = _parse_flat_yaml(path)
+    missing = sorted(_REQUIRED_3D_KEYS - values.keys())
+    unknown = sorted(values.keys() - _REQUIRED_3D_KEYS)
+    if missing:
+        raise ValueError(f"{path}: missing 3D bridge config keys: {missing}")
+    if unknown:
+        raise ValueError(f"{path}: unknown 3D bridge config keys: {unknown}")
+    if values["bridge_type"] != "single_3d":
+        raise ValueError(f"{path}: 'bridge_type' must be 'single_3d'")
+
+    for name_key in ("steel_name", "concrete_name", "cable_material_name"):
+        if not isinstance(values[name_key], str) or not values[name_key].strip():
+            raise ValueError(f"{path}: {name_key!r} must be a nonempty string")
+    if (
+        isinstance(values["n_seg"], bool)
+        or not isinstance(values["n_seg"], int)
+        or values["n_seg"] <= 0
+    ):
+        raise ValueError(f"{path}: 'n_seg' must be a positive integer")
+
+    scalar_keys = (
+        _3D_CONFIG_KEYS - {"n_seg", "strands_per_cable", "pretension_per_cable"}
+    ) | (_3D_MATERIAL_KEYS - {"steel_name", "concrete_name", "cable_material_name"})
+    for key in scalar_keys:
+        value = values[key]
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"{path}: {key!r} must be numeric")
+
+    steel = ElasticMaterial3D(
+        str(values["steel_name"]),
+        float(values["steel_E"]),
+        float(values["steel_poisson"]),
+        float(values["steel_density"]),
+    )
+    concrete = ElasticMaterial3D(
+        str(values["concrete_name"]),
+        float(values["concrete_E"]),
+        float(values["concrete_poisson"]),
+        float(values["concrete_density"]),
+    )
+    cable_material = ElasticMaterial3D(
+        str(values["cable_material_name"]),
+        float(values["cable_material_E"]),
+        float(values["cable_material_poisson"]),
+        float(values["cable_material_density"]),
+    )
+    config_values = {key: values[key] for key in _3D_CONFIG_KEYS}
+    return SingleStaged3DConfig(
+        **config_values,
+        steel=steel,
+        concrete=concrete,
+        cable_material=cable_material,
+    )
 
 
 def model_family_for_bridge_type(bridge_type: str) -> str:

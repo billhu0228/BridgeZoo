@@ -25,7 +25,7 @@ BridgeZoo/
 │   │   ├── kernels.py         # 共享单元数值核（刚度/变换/等效荷载）
 │   │   ├── completed/         # 一次成桥：direct.py（★自写）+ opensees.py
 │   │   ├── staged/            # 分阶段施工：plan/builder/direct/opensees/completed/sequence（★RL 内核）
-│   │   └── single_staged/     # staged 的独立复刻；预留单塔专属参数与施工过程
+│   │   └── single_staged/     # 单塔 2D 兼容层 + 全新 3D 梁格 IR/builder/双后端
 │   ├── envs/                  # 多智能体环境
 │   │   ├── geometry.py        # ★桥梁几何/截面（已实现，唯一真源）
 │   │   ├── cable_agent.py     # 索智能体状态/动作/观测（M2）
@@ -101,3 +101,34 @@ YAML 同名长度向左切线激活辅助跨并把新端节点 202 的竖向位�
 `scripts.optimize_cables` 入口。桥梁 YAML 的 `bridge_type` 负责模型分派：`normal` 使用
 `staged`，`single` 使用 `single_staged`；通用优化算法内部对应
 `CableOptimizationProblem.model_family`。
+
+## `single_staged` 3D 第一轮架构
+
+3D 模型采用后缀明确的新 API（如 `build_single_staged_3d`、
+`SingleStagedDirectSolver3D`），旧 2D 接口在迁移期间保持不变。坐标约定为
+`x` 纵桥向、`y` 横桥向、`z` 竖向，每个节点有
+`(ux, uy, uz, rx, ry, rz)` 六个自由度。
+
+- `envs.geometry.SingleTowerGeometry3D` 是纵横向尺寸及 H/箱形截面尺寸的唯一真源，
+  继承旧单塔模型的 `n_seg`、`anchor_*`、`left/right_*`、`right_fix`、`left_span`
+  语义。
+- `single_staged.sections3d` 从真实截面尺寸推导 `A/Iy/Iz/J`；默认主梁、横梁为钢制
+  H 型截面，塔身为 C50 混凝土空心箱形截面，桥面板为 C50 混凝土等效矩形板条。
+- `single_staged.model3d` 定义与后端无关的空间梁、索、支座、全局均布荷载、刚臂、
+  阶段激活和统一结果 IR。
+- 两根主梁沿横桥向对称布置，横梁使用独立的等间距网格并与主梁共节点；索锚点可额外
+  细分主梁但不会破坏横梁等间距。桥面板纵横梁格位于主梁轴线上方的独立参考面，通过
+  6 自由度刚臂表达偏心。纵横板条都参与刚度，板自重仅分配给纵向板条，避免重复计重。
+- 单塔位于桥轴线，双索面分别连接两根主梁；每阶段同步激活一对主跨索和一对背索。
+- `direct3d` 为自研线弹性 Euler-Bernoulli 空间梁 + 线性杆求解器，刚臂通过精确自由度
+  凝聚实现；`opensees3d` 使用同一 IR 建立 `elasticBeamColumn`、`Truss +
+  InitStressMaterial` 和 `rigidLink beam`，用于离线对照。
+
+第一轮的阶段语义是“累计激活后逐阶段线性重分析”，尚不包含路径相关的零应力诞生、
+安装构形锁定、索垂度或几何非线性。`scripts/bridges/omo_bridge_3d.yaml` 是完整的 OMO
+3D 物理输入，计算入口为 `python -m scripts.single_staged_3d --bridge omo3d`。
+
+`render.staged3d` 消费同一份 `SingleStagedPlan3D/StagedResult3D`，因此自研和 OpenSees
+后端共享渲染语义。它仿照 2D 逐阶段输出：未变形参考网格、位移放大后的空间梁格与箱塔
+轴线、半透明桥面板、双索面、刚臂、支座和新增构件高亮，并可同时保存阶段 PNG 与 GIF。
+渲染只做后处理，不进入求解器或改变任何力学结果。

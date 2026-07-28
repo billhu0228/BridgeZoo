@@ -144,3 +144,109 @@ class BridgeGeometry:
             f"H={self.anchor_height:.1f}m nodes={self.num_beam_nodes} "
             f"EI={self.beam_E * self.beam_Iz:.3e} wg={self.wg:.3e}N/m"
         )
+
+
+@dataclass(frozen=True)
+class SingleTowerGeometry3D:
+    """Geometry source of truth for the 3D single-tower model.
+
+    The longitudinal names intentionally match the established
+    ``single_staged`` builder.  Section dimensions are explicit here; FEM
+    builders derive area, bending inertia and torsion from them rather than
+    accepting opaque stiffness products.
+    """
+
+    n_seg: int = 6
+    anchor_base_height: float = 20.0
+    anchor_spacing: float = 3.0
+    anchor_top_free: float = 5.0
+    left_start: float = 6.0
+    left_spacing: float = 8.0
+    left_end: float = 4.0
+    right_start: float = 6.0
+    right_spacing: float = 8.0
+    right_end: float = 4.0
+    right_fix: float | None = None
+    left_span: float | None = None
+
+    girder_spacing: float = 10.5
+    cross_girder_spacing: float = 4.0
+    deck_width: float = 12.5
+    deck_thickness: float = 0.28
+    deck_offset: float = 1.54
+    tower_element_size: float = 3.0
+
+    main_girder_depth: float = 2.80
+    main_girder_flange_width: float = 1.20
+    main_girder_web_thickness: float = 0.040
+    main_girder_flange_thickness: float = 0.060
+    cross_girder_depth: float = 1.20
+    cross_girder_flange_width: float = 0.60
+    cross_girder_web_thickness: float = 0.025
+    cross_girder_flange_thickness: float = 0.035
+    tower_outer_width: float = 6.0
+    tower_outer_depth: float = 5.0
+    tower_wall_thickness: float = 0.60
+
+    @property
+    def resolved_right_fix(self) -> float:
+        return self.right_start if self.right_fix is None else self.right_fix
+
+    def __post_init__(self) -> None:
+        if isinstance(self.n_seg, bool) or not isinstance(self.n_seg, int) or self.n_seg < 1:
+            raise ValueError("n_seg must be a positive integer")
+        positive = {
+            "anchor_base_height": self.anchor_base_height,
+            "anchor_spacing": self.anchor_spacing,
+            "left_start": self.left_start,
+            "left_spacing": self.left_spacing,
+            "left_end": self.left_end,
+            "right_start": self.right_start,
+            "right_spacing": self.right_spacing,
+            "right_end": self.right_end,
+            "right_fix": self.resolved_right_fix,
+            "girder_spacing": self.girder_spacing,
+            "cross_girder_spacing": self.cross_girder_spacing,
+            "deck_width": self.deck_width,
+            "deck_thickness": self.deck_thickness,
+            "deck_offset": self.deck_offset,
+            "tower_element_size": self.tower_element_size,
+            "main_girder_depth": self.main_girder_depth,
+            "main_girder_flange_width": self.main_girder_flange_width,
+            "main_girder_web_thickness": self.main_girder_web_thickness,
+            "main_girder_flange_thickness": self.main_girder_flange_thickness,
+            "cross_girder_depth": self.cross_girder_depth,
+            "cross_girder_flange_width": self.cross_girder_flange_width,
+            "cross_girder_web_thickness": self.cross_girder_web_thickness,
+            "cross_girder_flange_thickness": self.cross_girder_flange_thickness,
+            "tower_outer_width": self.tower_outer_width,
+            "tower_outer_depth": self.tower_outer_depth,
+            "tower_wall_thickness": self.tower_wall_thickness,
+        }
+        invalid = [
+            name
+            for name, value in positive.items()
+            if not np.isfinite(value) or value <= 0.0
+        ]
+        if invalid:
+            raise ValueError(f"positive finite values required for: {', '.join(invalid)}")
+        if self.anchor_top_free < 0.0 or not np.isfinite(self.anchor_top_free):
+            raise ValueError("anchor_top_free must be finite and nonnegative")
+        if self.left_span is not None and (
+            not np.isfinite(self.left_span) or self.left_span <= 0.0
+        ):
+            raise ValueError("left_span must be finite and positive")
+        if self.deck_width < self.girder_spacing:
+            raise ValueError("deck_width must be at least the main-girder spacing")
+        if 2.0 * self.main_girder_flange_thickness >= self.main_girder_depth:
+            raise ValueError("main-girder flanges leave no web depth")
+        if self.main_girder_web_thickness >= self.main_girder_flange_width:
+            raise ValueError("main-girder web must be thinner than its flange width")
+        if 2.0 * self.cross_girder_flange_thickness >= self.cross_girder_depth:
+            raise ValueError("cross-girder flanges leave no web depth")
+        if self.cross_girder_web_thickness >= self.cross_girder_flange_width:
+            raise ValueError("cross-girder web must be thinner than its flange width")
+        if 2.0 * self.tower_wall_thickness >= min(
+            self.tower_outer_width, self.tower_outer_depth
+        ):
+            raise ValueError("tower box wall leaves no hollow core")

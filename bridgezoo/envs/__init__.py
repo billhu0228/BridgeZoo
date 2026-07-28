@@ -8,6 +8,6 @@
 参见 ``docs/DESIGN_MAPPO.md`` 第 5 节。
 """
 
-from bridgezoo.envs.geometry import BridgeGeometry
+from bridgezoo.envs.geometry import BridgeGeometry, SingleTowerGeometry3D
 
-__all__ = ["BridgeGeometry", "cable_agent", "cable_construction"]
+__all__ = ["BridgeGeometry", "SingleTowerGeometry3D", "cable_agent", "cable_construction"]
