@@ -4,9 +4,11 @@ Examples
 --------
 ``python -m scripts.single_staged_3d --bridge omo3d --n 3``
 
+``python -m scripts.single_staged_3d --bridge omo3d --backend direct --render text``
+
 ``python -m scripts.single_staged_3d --bridge omo3d --backend opensees --render both --dxf``
 
-  python -m scripts.single_staged_3d --bridge omo3d --design results/cable_opt_3d/best_design.json
+  python -m scripts.single_staged_3d --bridge omo3d --design results/cable_opt_3d_engineering/best_design.json
 
 """
 
@@ -58,7 +60,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--backend",
         choices=("direct", "opensees"),
         default="opensees",
-        help="solver backend (default: direct)",
+        help="solver backend (default: opensees)",
     )
     parser.add_argument("--output", type=Path, help="optional JSON result path")
     parser.add_argument(
@@ -142,6 +144,8 @@ def _project_output_path(path: Path | None) -> Path | None:
 def load_optimized_design_3d(
     path: str | Path,
     config: SingleStaged3DConfig,
+    *,
+    adopt_saved_n_seg: bool = False,
 ) -> tuple[SingleStaged3DConfig, dict[str, object]]:
     """Validate and apply a 3D optimization result to a physical bridge config."""
 
@@ -156,7 +160,12 @@ def load_optimized_design_3d(
         raise ValueError(f"invalid 3D optimized design JSON: {design_path}") from exc
     if not isinstance(payload, dict):
         raise ValueError("3D optimized design root must be an object")
-    if payload.get("schema") != "bridgezoo.cable_optimization_3d.v1":
+    schema = payload.get("schema")
+    if schema not in {
+        "bridgezoo.cable_optimization_3d.v1",
+        "bridgezoo.cable_optimization_3d.v2",
+        "bridgezoo.cable_optimization_3d.v3",
+    }:
         raise ValueError("unsupported 3D optimized design schema")
     if payload.get("model_family") != "single_staged_3d":
         raise ValueError("optimized design is not for the single_staged_3d model")
@@ -165,9 +174,26 @@ def load_optimized_design_3d(
     if not isinstance(problem, dict):
         raise ValueError("3D optimized design is missing problem metadata")
     saved_config = problem.get("bridge_config")
+    if adopt_saved_n_seg:
+        if not isinstance(saved_config, dict):
+            raise ValueError("3D optimized design is missing bridge configuration")
+        try:
+            saved_n_seg = int(saved_config["n_seg"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("3D optimized design n_seg is invalid") from exc
+        if saved_n_seg <= 0 or saved_n_seg != saved_config["n_seg"]:
+            raise ValueError("3D optimized design n_seg is invalid")
+        config = replace(config, n_seg=saved_n_seg)
     current_config = asdict(config)
     current_config.pop("strands_per_cable", None)
     current_config.pop("pretension_per_cable", None)
+    if schema in {
+        "bridgezoo.cable_optimization_3d.v2",
+        "bridgezoo.cable_optimization_3d.v3",
+    }:
+        # In v2/v3 the coefficient is a design variable, not immutable bridge
+        # geometry.  It is validated and applied from each cable-group entry.
+        current_config.pop("pretension_a_ratio", None)
     normalized_current = json.loads(json.dumps(current_config))
     if saved_config != normalized_current:
         raise ValueError(
@@ -220,8 +246,10 @@ def load_optimized_design_3d(
 
     strand_pairs: list[tuple[int, int]] = []
     tension_pairs: list[tuple[float, float]] = []
+    ratio_pairs: list[tuple[float, float]] = []
     stage_strands: list[int] = []
     stage_tensions: list[float] = []
+    stage_ratios: list[float] = []
     for index, group_id in enumerate(layout.cable_ids):
         item = by_id[group_id]
         expected_stage = index // 2 + 1
@@ -254,13 +282,53 @@ def load_optimized_design_3d(
         tension_limit = tension_bound_stress_mpa * 1.0e6 * config.strand_area * strands
         if not math.isfinite(tension) or tension < 0.0 or tension > tension_limit * (1.0 + 1.0e-12):
             raise ValueError(f"optimized cable group {group_id} pretension is outside saved bounds")
+        if schema in {
+            "bridgezoo.cable_optimization_3d.v2",
+            "bridgezoo.cable_optimization_3d.v3",
+        }:
+            try:
+                ratio = float(item["pretension_a_ratio"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"optimized cable group {group_id} A/B coefficient is invalid"
+                ) from exc
+            if not math.isfinite(ratio) or not 0.0 <= ratio <= 1.0:
+                raise ValueError(
+                    f"optimized cable group {group_id} A/B coefficient is outside [0, 1]"
+                )
+            try:
+                saved_a = float(item["pretension_A_per_physical_cable_N"])
+                saved_b = float(item["pretension_B_per_physical_cable_N"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"optimized cable group {group_id} A/B pretensions are invalid"
+                ) from exc
+            if not (
+                math.isclose(saved_a, tension * ratio, rel_tol=1.0e-10, abs_tol=1.0e-6)
+                and math.isclose(
+                    saved_b,
+                    tension * (1.0 - ratio),
+                    rel_tol=1.0e-10,
+                    abs_tol=1.0e-6,
+                )
+            ):
+                raise ValueError(
+                    f"optimized cable group {group_id} A/B pretensions do not match T and coefficient"
+                )
+            stage_ratios.append(ratio)
         stage_strands.append(strands)
         stage_tensions.append(tension)
         if len(stage_strands) == 2:
             strand_pairs.append((stage_strands[0], stage_strands[1]))
             tension_pairs.append((stage_tensions[0], stage_tensions[1]))
+            if schema in {
+                "bridgezoo.cable_optimization_3d.v2",
+                "bridgezoo.cable_optimization_3d.v3",
+            }:
+                ratio_pairs.append((stage_ratios[0], stage_ratios[1]))
             stage_strands.clear()
             stage_tensions.clear()
+            stage_ratios.clear()
 
     try:
         objective = float(payload["objective"])
@@ -268,16 +336,22 @@ def load_optimized_design_3d(
         raise ValueError("optimized design objective must be finite") from exc
     if not math.isfinite(objective):
         raise ValueError("optimized design objective must be finite")
-    applied = replace(
-        config,
-        strands_per_cable=tuple(strand_pairs),
-        pretension_per_cable=tuple(tension_pairs),
-    )
+    design_values = {
+        "strands_per_cable": tuple(strand_pairs),
+        "pretension_per_cable": tuple(tension_pairs),
+    }
+    if schema in {
+        "bridgezoo.cable_optimization_3d.v2",
+        "bridgezoo.cable_optimization_3d.v3",
+    }:
+        design_values["pretension_a_ratio"] = tuple(ratio_pairs)
+    applied = replace(config, **design_values)
     metadata = {
         "source": str(design_path.resolve()),
         "schema": payload["schema"],
         "objective": objective,
         "cable_group_count": layout.size,
+        "includes_optimized_pretension_a_ratio": schema.endswith((".v2", ".v3")),
     }
     return applied, metadata
 
@@ -331,6 +405,124 @@ def _result_payload(config, plan, result) -> dict[str, object]:
     }
 
 
+def _text_summary(plan, result, design_metadata=None) -> str:
+    """Build the console report for ``--render text`` and ``both``."""
+
+    model = plan.model
+    final = result.final
+    max_translation = max(
+        abs(component)
+        for values in final.displacement.values()
+        for component in values[:3]
+    )
+    lines = []
+    if design_metadata is not None:
+        lines.append(
+            f"design={design_metadata['source']} "
+            f"objective={design_metadata['objective']:.6g}"
+        )
+    lines.extend(
+        (
+            model.summary(),
+            (
+                f"backend={result.backend} stages={len(result.records)} "
+                f"converged={final.converged}"
+            ),
+            (
+                f"final_stage={final.stage_label} "
+                f"max_abs_translation={max_translation:.6e} m"
+            ),
+        )
+    )
+
+    main_stay_nodes: dict[int, set[int]] = {}
+    for cable in model.cables.values():
+        if cable.group == "main_stay":
+            main_stay_nodes.setdefault(cable.construction_stage, set()).add(
+                cable.j
+            )
+    control_points = [
+        (stage, tuple(sorted(node_ids, key=lambda node_id: model.nodes[node_id].y)))
+        for stage, node_ids in sorted(main_stay_nodes.items())
+    ]
+    recent_records = result.records[-3:]
+    lines.append(
+        "主梁控制点位移（横桥向两个主梁锚点平均，单位 mm；"
+        f"最后{len(recent_records)}个分析阶段）"
+    )
+    for record in recent_records:
+        lines.append(f"阶段 {record.stage_index}: {record.stage_label}")
+        for construction_stage, node_ids in control_points:
+            active = [
+                record.displacement[node_id]
+                for node_id in node_ids
+                if node_id in record.displacement
+            ]
+            if not active:
+                lines.append(
+                    f"  梁点 S{construction_stage:02d} nodes={node_ids}: 未激活"
+                )
+                continue
+            mean = tuple(
+                1000.0 * sum(values[index] for values in active) / len(active)
+                for index in range(3)
+            )
+            x_m = sum(model.nodes[node_id].x for node_id in node_ids) / len(
+                node_ids
+            )
+            lines.append(
+                f"  梁点 S{construction_stage:02d} nodes={node_ids} x={x_m:+.3f} m: "
+                f"ux={mean[0]:+.3f}, uy={mean[1]:+.3f}, uz={mean[2]:+.3f}"
+            )
+
+    lines.append(f"最终阶段拉索应力（{final.stage_label}，单位 MPa）")
+    group_order = {"backstay": 0, "main_stay": 1}
+    group_label = {"backstay": "背索", "main_stay": "主跨索"}
+    cables = sorted(
+        model.cables.values(),
+        key=lambda cable: (
+            cable.construction_stage,
+            group_order.get(cable.group, 99),
+            model.nodes[cable.j].y,
+            cable.id,
+        ),
+    )
+    for cable in cables:
+        stress_mpa = final.cable_stress.get(cable.id)
+        stress_text = "未激活" if stress_mpa is None else f"{stress_mpa / 1.0e6:+.3f}"
+        lines.append(
+            f"  拉索 id={cable.id} S{cable.construction_stage:02d} "
+            f"{group_label.get(cable.group, cable.group)} "
+            f"y={model.nodes[cable.j].y:+.3f} m: stress={stress_text}"
+        )
+
+    tower_nodes = [
+        model.nodes[node_id]
+        for node_id in plan.metadata.get("tower_node_ids", ())
+        if node_id in final.displacement
+    ]
+    if not tower_nodes:
+        tower_nodes = [
+            node
+            for node in model.nodes.values()
+            if node.role in {"tower", "tower_anchor"}
+            and node.id in final.displacement
+        ]
+    if tower_nodes:
+        tower_top = max(tower_nodes, key=lambda node: (node.z, node.id))
+        displacement = final.displacement[tower_top.id]
+        lines.append(
+            f"最终阶段塔顶位移（{final.stage_label}，单位 mm）: "
+            f"node={tower_top.id} z={tower_top.z:+.3f} m, "
+            f"ux={displacement[0] * 1000.0:+.3f}, "
+            f"uy={displacement[1] * 1000.0:+.3f}, "
+            f"uz={displacement[2] * 1000.0:+.3f}"
+        )
+    else:
+        lines.append(f"最终阶段塔顶位移（{final.stage_label}）: 无可用塔顶节点")
+    return "\n".join(lines)
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     if args.dxf_out is not None and not args.dxf:
@@ -338,7 +530,11 @@ def main(argv: list[str] | None = None) -> int:
     config = _load_config(args)
     design_metadata = None
     if args.design is not None:
-        config, design_metadata = load_optimized_design_3d(args.design, config)
+        config, design_metadata = load_optimized_design_3d(
+            args.design,
+            config,
+            adopt_saved_n_seg=args.n_seg is None,
+        )
     plan = build_single_staged_3d(config)
     solver = (
         SingleStagedDirectSolver3D()
@@ -349,21 +545,8 @@ def main(argv: list[str] | None = None) -> int:
     payload = _result_payload(config, plan, result)
     if design_metadata is not None:
         payload["optimized_design"] = design_metadata
-    final = result.final
-    max_translation = max(
-        abs(component)
-        for values in final.displacement.values()
-        for component in values[:3]
-    )
     if args.render in {"text", "both"}:
-        if design_metadata is not None:
-            print(
-                f"design={design_metadata['source']} "
-                f"objective={design_metadata['objective']:.6g}"
-            )
-        print(plan.model.summary())
-        print(f"backend={result.backend} stages={len(result.records)} converged={final.converged}")
-        print(f"final_stage={final.stage_label} max_abs_translation={max_translation:.6e} m")
+        print(_text_summary(plan, result, design_metadata))
     if args.output is not None:
         output_path = _project_output_path(args.output)
         output_path.parent.mkdir(parents=True, exist_ok=True)

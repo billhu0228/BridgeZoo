@@ -286,6 +286,10 @@ class SolveResult3D:
     stage_label: str
     converged: bool = True
     displacement: dict[int, Vector6] = field(default_factory=dict)
+    # Stress-free displacement assigned when nodes enter this stage.  This is
+    # diagnostic state used to measure erection movement relative to the
+    # inherited tangent, not an additional structural degree of freedom.
+    birth_displacement: dict[int, Vector6] = field(default_factory=dict)
     frame_force: dict[int, tuple[float, ...]] = field(default_factory=dict)
     cable_force: dict[int, float] = field(default_factory=dict)
     cable_stress: dict[int, float] = field(default_factory=dict)

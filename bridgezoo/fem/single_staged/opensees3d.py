@@ -94,7 +94,13 @@ class SingleStagedOpenSeesSolver3D:
 
         for stage in stages:
             stage_index = stage.index
+            existing_nodes = set(displacement)
             initialize_flexible_birth_3d(model, stage_index, displacement)
+            born_this_stage = {
+                node_id: tuple(float(value) for value in displacement[node_id])
+                for node_id in displacement
+                if node_id not in existing_nodes
+            }
 
             active_nodes = sorted(displacement)
             active_frames = {
@@ -280,6 +286,7 @@ class SingleStagedOpenSeesSolver3D:
                 converged=(ok == 0),
                 applied_load=tuple(float(value) for value in total_applied),
             )
+            record.birth_displacement = born_this_stage
             record.displacement = {
                 node_id: tuple(float(value) for value in displacement[node_id])
                 for node_id in active_nodes

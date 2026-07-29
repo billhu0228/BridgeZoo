@@ -144,6 +144,7 @@ class SingleStagedDirectBatchSolver3D:
 
         for stage in stages:
             stage_index = stage.index
+            existing_nodes = set(displacement)
 
             initialize_flexible_birth_3d(
                 model,
@@ -151,6 +152,9 @@ class SingleStagedDirectBatchSolver3D:
                 displacement,
                 ncase=ncase,
             )
+            born_this_stage = [
+                node_id for node_id in displacement if node_id not in existing_nodes
+            ]
 
             active_nodes = sorted(displacement)
             node_ids = set(active_nodes)
@@ -395,6 +399,13 @@ class SingleStagedDirectBatchSolver3D:
                     converged=converged,
                     applied_load=tuple(float(value) for value in total_applied),
                 )
+                record.birth_displacement = {
+                    node_id: tuple(
+                        float(value)
+                        for value in displacement[node_id][:, case_index]
+                    )
+                    for node_id in born_this_stage
+                }
                 for node_id in active_nodes:
                     record.displacement[node_id] = tuple(
                         float(value) for value in displacement[node_id][:, case_index]

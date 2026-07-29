@@ -24,6 +24,9 @@ _AffineCaseWithAnchors = tuple[
 class CableDesign:
     strands: np.ndarray
     pretension: np.ndarray
+    # 3D staged designs may split each group's total pretension between
+    # substage A and B.  The 2D optimizers deliberately leave this unset.
+    pretension_a_ratio: np.ndarray | None = None
 
 
 @dataclass(frozen=True)

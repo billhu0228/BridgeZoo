@@ -19,8 +19,17 @@ from bridgezoo.optim import (
     CableBounds,
     CableDesignEvaluator3D,
     CableOptimizationProblem,
+    SecondaryTensionOptions3D,
+    StageAControlOptions,
+    Staged3DOptimizationOptions,
+    StagedCableOptimizer3D,
     build_affine_model,
+    build_smooth_curve_basis,
+    build_stage_major_curve_basis,
+    project_strands_to_smooth_curve,
 )
+from bridgezoo.optim.single_staged3d import StageAControlResponse3D
+from bridgezoo.optim.variables import CableLayout
 from bridgezoo.render.staged3d import export_final_3d_dxf, render_staged_3d
 from scripts.bridge_config import load_single_staged_3d_config, resolve_bridge_config
 from scripts.optimize_cables_3d import main as optimize_3d_cli
@@ -322,7 +331,159 @@ def test_3d_optimization_evaluator_reports_groups_and_physical_material_quantity
         for members in result.cable_group_members.values()
         for member in members
     }
-    assert len(result.staged_result.records) == 1
+    assert len(result.staged_result.records) == len(
+        CableDesignEvaluator3D(problem, config).build_plan(
+            [10, 20],
+            [1.0e6, 2.0e6],
+        ).stages
+    )
+
+    ratios = np.asarray([0.25, 0.75])
+    staged = CableDesignEvaluator3D(problem, config).evaluate_stage_a(
+        [10, 20],
+        [1.0e6, 2.0e6],
+        ratios,
+        1,
+    )
+    assert staged.construction_stage == 1
+    assert staged.stage_index == 1
+    assert np.isfinite(staged.backstay_tower_dx_m)
+    assert np.isfinite(staged.main_stay_deck_uz_m)
+    plan = CableDesignEvaluator3D(problem, config).build_plan(
+        [10, 20],
+        [1.0e6, 2.0e6],
+        ratios,
+    )
+    backstay = next(cable for cable in plan.model.cables.values() if cable.group == "backstay")
+    main_stay = next(cable for cable in plan.model.cables.values() if cable.group == "main_stay")
+    assert backstay.pretension_a == pytest.approx(0.25e6)
+    assert main_stay.pretension_a == pytest.approx(1.5e6)
+
+
+def test_efficient_3d_stage_a_controller_solves_balance_directly_without_final_effects():
+    problem = CableOptimizationProblem(
+        n_seg=2,
+        bounds=CableBounds(strand_min=1, strand_max=100),
+        backend="opensees",
+        model_family="single_staged_3d",
+    )
+
+    class LocalControlEvaluator:
+        def __init__(self):
+            self.problem = problem
+            self.layout = CableLayout(problem.n_seg)
+            self.final_evaluations = 0
+
+        def default_pretension_a_ratio(self):
+            return np.full(self.layout.size, 0.5)
+
+        def evaluate_stage_a(self, strands, pretension, ratios, construction_stage):
+            offset = 2 * (construction_stage - 1)
+            targets = ((0.2, 0.8), (0.7, 0.3))[construction_stage - 1]
+            upper = (
+                problem.bounds.tension_bound_stress_mpa
+                * 1.0e6
+                * problem.strand_area
+                * np.asarray(strands, dtype=float)
+            )
+            applied_a = np.asarray(pretension) * np.asarray(ratios)
+            return StageAControlResponse3D(
+                construction_stage=construction_stage,
+                stage_index=3 * construction_stage - 2,
+                backstay_tower_dx_m=float(applied_a[offset] / upper[offset] - targets[0]),
+                main_stay_deck_uz_m=float(
+                    applied_a[offset + 1] / upper[offset + 1] - targets[1]
+                ),
+            )
+
+        def evaluate(self, *args, **kwargs):
+            self.final_evaluations += 1
+            raise AssertionError("stage-A coefficient control must not evaluate final effects")
+
+    evaluator = LocalControlEvaluator()
+    progress = []
+    optimizer = StagedCableOptimizer3D(
+        evaluator,
+        Staged3DOptimizationOptions(stage_a=StageAControlOptions()),
+        progress=progress.append,
+    )
+    strands = np.asarray([20, 20, 20, 20])
+    pretension_a, controls = optimizer.calculate_initial_tension(strands)
+    upper = optimizer.tension_upper_bounds(strands)
+
+    assert pretension_a / upper == pytest.approx([0.2, 0.8, 0.7, 0.3], abs=1.0e-10)
+    assert evaluator.final_evaluations == 0
+    assert all(item.feasible and item.stable and item.matrix_rank == 2 for item in controls)
+    assert all(abs(item.response.backstay_tower_dx_m) < 1.0e-10 for item in controls)
+    assert all(abs(item.response.main_stay_deck_uz_m) < 1.0e-10 for item in controls)
+    assert any("ETA≈" in message for message in progress)
+
+
+def test_3d_smooth_curves_are_bounded_and_strand_counts_increase_outward():
+    bernstein = build_smooth_curve_basis(24, 4, "bernstein")
+    piecewise = build_smooth_curve_basis(24, 4, "piecewise-linear")
+    stage_major = build_stage_major_curve_basis(24, 4, "bernstein")
+
+    assert bernstein.shape == (24, 4)
+    assert piecewise.shape == (24, 4)
+    assert stage_major.shape == (48, 8)
+    assert np.all(bernstein >= 0.0)
+    assert np.all(piecewise >= 0.0)
+    assert np.sum(bernstein, axis=1) == pytest.approx(np.ones(24))
+    assert np.sum(piecewise, axis=1) == pytest.approx(np.ones(24))
+    assert bernstein[0] == pytest.approx([1.0, 0.0, 0.0, 0.0])
+    assert bernstein[-1] == pytest.approx([0.0, 0.0, 0.0, 1.0])
+    assert np.all(stage_major[0::2, 4:] == 0.0)
+    assert np.all(stage_major[1::2, :4] == 0.0)
+
+    raw = np.asarray([80, 90, 70, 82, 95, 76, 88, 110, 105, 96, 100, 120])
+    curve = project_strands_to_smooth_curve(
+        raw,
+        n_seg=6,
+        control_points=4,
+        family="bernstein",
+        lower=5,
+        upper=500,
+    )
+    assert curve.interpolated_strands.dtype.kind == "i"
+    assert np.all(np.diff(curve.interpolated_strands[0::2]) >= 0)
+    assert np.all(np.diff(curve.interpolated_strands[1::2]) >= 0)
+    assert np.all((curve.interpolated_strands >= 5) & (curve.interpolated_strands <= 500))
+
+
+def test_3d_low_dimensional_curve_budget_does_not_grow_with_cable_count():
+    problem = CableOptimizationProblem(
+        n_seg=24,
+        backend="opensees",
+        model_family="single_staged_3d",
+    )
+
+    class LayoutOnlyEvaluator:
+        def __init__(self):
+            self.problem = problem
+            self.layout = CableLayout(problem.n_seg)
+
+    bernstein = StagedCableOptimizer3D(
+        LayoutOnlyEvaluator(),
+        Staged3DOptimizationOptions(
+            secondary=SecondaryTensionOptions3D(
+                curve_family="bernstein",
+                control_points_per_group=4,
+            )
+        ),
+    )
+    automatic = StagedCableOptimizer3D(
+        LayoutOnlyEvaluator(),
+        Staged3DOptimizationOptions(
+            secondary=SecondaryTensionOptions3D(
+                curve_family="auto",
+                control_points_per_group=4,
+            )
+        ),
+    )
+
+    assert bernstein.secondary_fem_cases_per_cycle() == 10
+    assert automatic.secondary_fem_cases_per_cycle() == 19
 
 
 def test_3d_optimization_opensees_backend_matches_direct_group_metrics():
@@ -430,6 +591,29 @@ def test_3d_new_steel_group_uses_actual_stiffness_for_flexible_birth_geometry():
         249.193935,
         abs=1.0e-6,
     )
+
+
+def test_3d_backends_report_tangent_birth_displacements_for_new_nodes():
+    pytest.importorskip("openseespy.opensees")
+    config = replace(
+        load_single_staged_3d_config("omo3d"),
+        n_seg=2,
+        pretension_per_cable=0.0,
+    )
+    plan = build_single_staged_3d(config)
+
+    direct = SingleStagedDirectSolver3D().solve_stage(plan, 4)
+    reference = SingleStagedOpenSeesSolver3D().solve_stage(plan, 4)
+
+    assert direct.birth_displacement
+    assert set(reference.birth_displacement) == set(direct.birth_displacement)
+    for record in (direct, reference):
+        assert set(record.birth_displacement).issubset(record.displacement)
+        assert all(
+            plan.model.nodes[node_id].activation_stage == 4
+            for node_id in record.birth_displacement
+        )
+        assert np.isfinite(np.asarray(list(record.birth_displacement.values()))).all()
 
 
 def test_3d_secondary_line_load_and_deck_pressure_activate_in_separate_final_stage():
@@ -793,7 +977,9 @@ def test_final_3d_dxf_uses_true_model_coordinates_and_named_layers(tmp_path):
     )
 
 
-def test_minimum_3d_cli_writes_machine_readable_json(tmp_path):
+def test_minimum_3d_cli_writes_machine_readable_json_and_detailed_text(
+    tmp_path, capsys
+):
     output = tmp_path / "single_staged_3d.json"
     render_output = tmp_path / "text_mode_must_not_write.gif"
     forbidden_dxf = render_output.with_suffix(".dxf")
@@ -813,6 +999,7 @@ def test_minimum_3d_cli_writes_machine_readable_json(tmp_path):
             str(output),
         ]
     ) == 0
+    rendered = capsys.readouterr().out
     payload = json.loads(output.read_text(encoding="utf-8"))
 
     assert payload["schema"] == "bridgezoo.single_staged_3d.result.v1"
@@ -823,6 +1010,16 @@ def test_minimum_3d_cli_writes_machine_readable_json(tmp_path):
     assert payload["input"]["deck_width"] == pytest.approx(13.4)
     assert "3D rendering" not in payload["todo"]
     assert not forbidden_dxf.exists()
+    lines = rendered.splitlines()
+    assert "主梁控制点位移（横桥向两个主梁锚点平均" in rendered
+    assert sum(line.startswith("阶段 ") for line in lines) == 3
+    assert sum(line.startswith("  梁点 S01 ") for line in lines) == 3
+    assert "最终阶段拉索应力" in rendered
+    assert sum(line.startswith("  拉索 id=") for line in lines) == 4
+    assert "最终阶段塔顶位移" in rendered
+    assert "ux=" in rendered
+    assert "uy=" in rendered
+    assert "uz=" in rendered
 
 
 def test_3d_cli_exports_dxf_independently_without_plot_rendering(tmp_path):
@@ -862,11 +1059,11 @@ def test_independent_3d_optimization_cli_writes_outputs_resumes_and_solves_desig
         "--n",
         "1",
         "--backend",
-        "direct",
-        "--outer-iterations",
+        "opensees",
+        "--strand-iterations",
         "0",
-        "--continuous-maxiter",
-        "20",
+        "--secondary-max-nfev",
+        "4",
         "--initial-strands",
         "91",
         "--quiet",
@@ -878,7 +1075,7 @@ def test_independent_3d_optimization_cli_writes_outputs_resumes_and_solves_desig
     assert optimize_3d_cli([*base_args, "--resume"]) == 0
     payload = json.loads((out_dir / "best_design.json").read_text(encoding="utf-8"))
 
-    assert payload["schema"] == "bridgezoo.cable_optimization_3d.v1"
+    assert payload["schema"] == "bridgezoo.cable_optimization_3d.v3"
     assert payload["model_family"] == "single_staged_3d"
     assert payload["search"]["run_index"] == 2
     assert [item["group"] for item in payload["cable_groups"]] == [
@@ -886,6 +1083,28 @@ def test_independent_3d_optimization_cli_writes_outputs_resumes_and_solves_desig
         "main_stay",
     ]
     assert all(len(item["physical_cable_ids"]) == 2 for item in payload["cable_groups"])
+    assert all(0.0 <= item["pretension_a_ratio"] <= 1.0 for item in payload["cable_groups"])
+    assert all(
+        item["pretension_A_per_physical_cable_N"]
+        + item["pretension_B_per_physical_cable_N"]
+        == pytest.approx(item["pretension_per_physical_cable_N"])
+        for item in payload["cable_groups"]
+    )
+    assert len(payload["stage_a_controls"]) == 1
+    assert payload["stage_a_controls"][0]["influence_matrix_rank"] == 2
+    assert "final_schedule_backstay_tower_dx_mm" in payload["stage_a_controls"][0]
+    assert payload["stage_b_response_model"]["validated"] is True
+    assert payload["stage_b_response_model"]["selected_curve_family"] == "bernstein"
+    assert payload["stage_b_response_model"]["control_points_per_group"] == 1
+    assert payload["smooth_curves"]["strand_count"][
+        "monotone_non_decreasing_outward"
+    ] is True
+    assert len(
+        payload["smooth_curves"]["secondary_tension_B"][
+            "interpolated_stage_major_tension_N"
+        ]
+    ) == 2
+    assert payload["search"]["OpenSees_FEM_cases_this_run"] == 8
     assert (out_dir / "history.csv").is_file()
     assert (out_dir / "summary.txt").is_file()
 
@@ -894,12 +1113,10 @@ def test_independent_3d_optimization_cli_writes_outputs_resumes_and_solves_desig
         [
             "--bridge",
             "omo3d",
-            "--n",
-            "1",
             "--design",
             str(out_dir / "best_design.json"),
             "--backend",
-            "direct",
+            "opensees",
             "--render",
             "none",
             "--output",
@@ -914,6 +1131,12 @@ def test_independent_3d_optimization_cli_writes_outputs_resumes_and_solves_desig
             payload["cable_groups"][1]["strands_per_physical_cable"],
         ]
     ]
+    assert analysis["input"]["pretension_a_ratio"] == [
+        [
+            payload["cable_groups"][0]["pretension_a_ratio"],
+            payload["cable_groups"][1]["pretension_a_ratio"],
+        ]
+    ]
     for group in payload["cable_groups"]:
         for member_id, stress_mpa in group["physical_final_stress_MPa"].items():
             assert analysis["final"]["cable_stress_Pa"][member_id] / 1.0e6 == pytest.approx(
@@ -922,11 +1145,31 @@ def test_independent_3d_optimization_cli_writes_outputs_resumes_and_solves_desig
                 abs=1.0e-9,
             )
 
+    tampered = json.loads(json.dumps(payload))
+    tampered["cable_groups"][0]["pretension_A_per_physical_cable_N"] += 10.0
+    tampered_path = tmp_path / "tampered_design.json"
+    tampered_path.write_text(json.dumps(tampered), encoding="utf-8")
+    with pytest.raises(ValueError, match="do not match T and coefficient"):
+        run_cli(
+            [
+                "--bridge",
+                "omo3d",
+                "--n",
+                "1",
+                "--design",
+                str(tampered_path),
+                "--render",
+                "none",
+            ]
+        )
+
     with pytest.raises(ValueError, match="geometry/materials differ"):
         run_cli(
             [
                 "--bridge",
                 "omo3d",
+                "--n",
+                "2",
                 "--design",
                 str(out_dir / "best_design.json"),
                 "--render",
@@ -935,15 +1178,48 @@ def test_independent_3d_optimization_cli_writes_outputs_resumes_and_solves_desig
         )
 
     capsys.readouterr()
-    progress_out = tmp_path / "progress"
+    with pytest.raises(SystemExit):
+        optimize_3d_cli(["--bridge", "omo3d", "--backend", "direct"])
+
+
+def test_3d_cli_interpolates_low_dimensional_curve_to_every_group(tmp_path):
+    pytest.importorskip("openseespy.opensees")
+    out_dir = tmp_path / "smooth_opt3d"
+
     assert optimize_3d_cli(
         [
-            item
-            for item in [*base_args[:-2], "--progress-refresh", "10", "--out", str(progress_out)]
-            if item != "--quiet"
+            "--bridge",
+            "omo3d",
+            "--n",
+            "3",
+            "--curve-family",
+            "bernstein",
+            "--curve-control-points",
+            "2",
+            "--secondary-max-nfev",
+            "4",
+            "--strand-iterations",
+            "0",
+            "--initial-strands",
+            "91",
+            "--quiet",
+            "--out",
+            str(out_dir),
         ]
     ) == 0
-    output_lines = capsys.readouterr().out.splitlines()
-    assert not any("optimize tensions:" in line for line in output_lines)
-    assert not any("candidate cable=" in line for line in output_lines)
-    assert len(output_lines) <= 15
+    payload = json.loads((out_dir / "best_design.json").read_text(encoding="utf-8"))
+
+    assert len(payload["cable_groups"]) == 6
+    assert payload["search"]["OpenSees_FEM_cases_this_run"] == 18
+    assert payload["stage_b_response_model"]["control_points_per_group"] == 2
+    assert payload["stage_b_response_model"]["validated"] is True
+    assert len(
+        payload["smooth_curves"]["secondary_tension_B"][
+            "interpolated_stage_major_tension_N"
+        ]
+    ) == 6
+    strands = np.asarray(
+        [item["strands_per_physical_cable"] for item in payload["cable_groups"]]
+    )
+    assert np.all(np.diff(strands[0::2]) >= 0)
+    assert np.all(np.diff(strands[1::2]) >= 0)

@@ -28,6 +28,7 @@ from bridgezoo.optim.objectives import objective_breakdown, stress_violation_mpa
 from bridgezoo.optim.problem import CableOptimizationProblem
 from bridgezoo.optim.variables import (
     CableLayout,
+    validate_ratio_vector,
     validate_strand_vector,
     validate_tension_vector,
 )
@@ -46,6 +47,16 @@ class EvaluationResult3D(EvaluationResult):
 
     cable_group_members: dict[int, tuple[int, ...]] = field(default_factory=dict)
     physical_cable_stress_mpa: dict[int, float] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class StageAControlResponse3D:
+    """Local displacement targets used to set one stage's A/B split."""
+
+    construction_stage: int
+    stage_index: int
+    backstay_tower_dx_m: float
+    main_stay_deck_uz_m: float
 
 
 class CableDesignEvaluator3D:
@@ -75,7 +86,32 @@ class CableDesignEvaluator3D:
         self.config = config
         self.layout = CableLayout(problem.n_seg)
 
-    def build_plan(self, strands, pretension):
+    def default_pretension_a_ratio(self) -> np.ndarray:
+        """Return the bridge-config A ratios in optimizer group order."""
+
+        value = self.config.pretension_a_ratio
+        if isinstance(value, (int, float)):
+            flat = [value, value] * self.problem.n_seg
+        else:
+            raw = list(value)
+            if len(raw) == self.problem.n_seg:
+                flat = []
+                for item in raw:
+                    if isinstance(item, (tuple, list)):
+                        if len(item) != 2:
+                            raise ValueError(
+                                "3D pretension coefficient stage pairs must contain two values"
+                            )
+                        flat.extend(item)
+                    else:
+                        flat.extend((item, item))
+            elif len(raw) == self.layout.size:
+                flat = raw
+            else:
+                raise ValueError("3D pretension coefficients do not match n_seg")
+        return validate_ratio_vector(flat, self.layout)
+
+    def build_plan(self, strands, pretension, pretension_a_ratio=None):
         strands = validate_strand_vector(
             strands,
             self.layout,
@@ -83,32 +119,120 @@ class CableDesignEvaluator3D:
             self.problem.bounds.strand_max,
         )
         pretension = validate_tension_vector(pretension, self.layout)
+        ratios = (
+            self.default_pretension_a_ratio()
+            if pretension_a_ratio is None
+            else validate_ratio_vector(pretension_a_ratio, self.layout)
+        )
         strand_pairs = tuple(
             (int(backstay), int(main_stay))
             for backstay, main_stay in self.layout.stage_pairs(strands)
         )
         tension_pairs = tuple(self.layout.stage_pairs(pretension))
+        ratio_pairs = tuple(self.layout.stage_pairs(ratios))
         config = replace(
             self.config,
             strands_per_cable=strand_pairs,
             pretension_per_cable=tension_pairs,
+            pretension_a_ratio=ratio_pairs,
         )
         return build_single_staged_3d(config)
 
-    def run_solver(self, plan) -> StagedResult3D:
+    def evaluate_stage_a(
+        self,
+        strands,
+        pretension,
+        pretension_a_ratio,
+        construction_stage: int,
+    ) -> StageAControlResponse3D:
+        """Evaluate only the two local targets at one ``steel_and_A`` substage.
+
+        The backstay coefficient controls the longitudinal displacement at its
+        tower attachment.  The main-stay coefficient controls the mean vertical
+        displacement of the two symmetric girder attachment nodes.  No B-stage
+        load, completed-bridge response, or stress term enters this response.
+        """
+
+        if not 1 <= construction_stage <= self.problem.n_seg:
+            raise ValueError(
+                f"construction_stage must be between 1 and {self.problem.n_seg}"
+            )
+        plan = self.build_plan(strands, pretension, pretension_a_ratio)
+        stage = next(
+            item
+            for item in plan.stages
+            if item.construction_stage == construction_stage
+            and item.phase == "steel_and_A"
+        )
         if self.problem.backend == "direct":
             solver = SingleStagedDirectSolver3D()
         elif self.problem.backend == "opensees":
             solver = SingleStagedOpenSeesSolver3D()
         else:
             raise ValueError(f"unknown 3D optimization backend: {self.problem.backend!r}")
-        stage = plan.final_stage
         record = solver.solve_stage(plan, stage.index, stage.label)
         if not record.converged:
             raise RuntimeError(
-                f"{solver.name} did not converge for completed 3D stage {stage.label!r}"
+                f"{solver.name} did not converge for 3D substage {stage.label!r}"
             )
-        return StagedResult3D(backend=solver.name, records=[record])
+        return self.extract_stage_a_response(plan, record, construction_stage)
+
+    def extract_stage_a_response(
+        self,
+        plan,
+        record,
+        construction_stage: int,
+    ) -> StageAControlResponse3D:
+        """Extract local A-stage targets from an already solved stage record."""
+
+        backstays = [
+            cable
+            for cable in plan.model.cables.values()
+            if cable.construction_stage == construction_stage
+            and cable.group == "backstay"
+        ]
+        main_stays = [
+            cable
+            for cable in plan.model.cables.values()
+            if cable.construction_stage == construction_stage
+            and cable.group == "main_stay"
+        ]
+        if len(backstays) != 2 or len(main_stays) != 2:
+            raise RuntimeError(
+                f"3D stage {construction_stage} must contain two backstays and two main stays"
+            )
+        tower_nodes = {cable.i for cable in backstays}
+        deck_nodes = {cable.j for cable in main_stays}
+        return StageAControlResponse3D(
+            construction_stage=construction_stage,
+            stage_index=record.stage_index,
+            backstay_tower_dx_m=float(
+                np.mean([record.displacement[node_id][0] for node_id in tower_nodes])
+            ),
+            main_stay_deck_uz_m=float(
+                np.mean([record.displacement[node_id][2] for node_id in deck_nodes])
+            ),
+        )
+
+    def run_solver(self, plan, *, record_all: bool = False) -> StagedResult3D:
+        if self.problem.backend == "direct":
+            solver = SingleStagedDirectSolver3D()
+        elif self.problem.backend == "opensees":
+            solver = SingleStagedOpenSeesSolver3D()
+        else:
+            raise ValueError(f"unknown 3D optimization backend: {self.problem.backend!r}")
+        if record_all:
+            result = solver.run(plan)
+        else:
+            stage = plan.final_stage
+            record = solver.solve_stage(plan, stage.index, stage.label)
+            result = StagedResult3D(backend=solver.name, records=[record])
+        if not result.final.converged:
+            raise RuntimeError(
+                f"{solver.name} did not converge for completed 3D stage "
+                f"{plan.final_stage.label!r}"
+            )
+        return result
 
     def _cable_group_members(self, plan) -> dict[int, tuple[int, ...]]:
         groups: dict[int, tuple[int, ...]] = {}
@@ -250,6 +374,7 @@ class CableDesignEvaluator3D:
         self,
         strands,
         pretension,
+        pretension_a_ratio=None,
         *,
         keep_result: bool = False,
     ) -> EvaluationResult3D:
@@ -260,8 +385,13 @@ class CableDesignEvaluator3D:
             self.problem.bounds.strand_max,
         )
         pretension = validate_tension_vector(pretension, self.layout)
-        plan = self.build_plan(strands, pretension)
-        result = self.run_solver(plan)
+        ratios = (
+            self.default_pretension_a_ratio()
+            if pretension_a_ratio is None
+            else validate_ratio_vector(pretension_a_ratio, self.layout)
+        )
+        plan = self.build_plan(strands, pretension, ratios)
+        result = self.run_solver(plan, record_all=keep_result)
         (
             deck_errors,
             cable_stress_mpa,
@@ -306,7 +436,11 @@ class CableDesignEvaluator3D:
             for cable_id, stress_pa in result.final.cable_stress.items()
         }
         return EvaluationResult3D(
-            design=CableDesign(strands=strands.copy(), pretension=pretension.copy()),
+            design=CableDesign(
+                strands=strands.copy(),
+                pretension=pretension.copy(),
+                pretension_a_ratio=ratios.copy(),
+            ),
             objective=components.total,
             components=components,
             metrics=metrics,
@@ -319,11 +453,15 @@ class CableDesignEvaluator3D:
             physical_cable_stress_mpa=physical_stress,
         )
 
-    def safe_objective(self, strands, pretension) -> float:
+    def safe_objective(self, strands, pretension, pretension_a_ratio=None) -> float:
         try:
-            return self.evaluate(strands, pretension).objective
+            return self.evaluate(strands, pretension, pretension_a_ratio).objective
         except (ValueError, RuntimeError, FloatingPointError):
             return 1.0e30
 
 
-__all__ = ["CableDesignEvaluator3D", "EvaluationResult3D"]
+__all__ = [
+    "CableDesignEvaluator3D",
+    "EvaluationResult3D",
+    "StageAControlResponse3D",
+]

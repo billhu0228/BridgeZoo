@@ -76,3 +76,19 @@ def validate_tension_vector(values, layout: CableLayout) -> np.ndarray:
     if np.any(arr < 0.0):
         raise ValueError("pretensions must be non-negative")
     return arr
+
+
+def validate_ratio_vector(values, layout: CableLayout) -> np.ndarray:
+    """Validate stage-major A/(A+B) pretension coefficients."""
+
+    arr = np.asarray(values)
+    if arr.size != layout.size:
+        raise ValueError(f"expected {layout.size} pretension coefficients, got {arr.size}")
+    if np.iscomplexobj(arr):
+        raise ValueError("pretension coefficients must be real")
+    arr = arr.astype(float)
+    if not np.all(np.isfinite(arr)):
+        raise ValueError("pretension coefficients must be finite")
+    if np.any(arr < 0.0) or np.any(arr > 1.0):
+        raise ValueError("pretension coefficients must be between zero and one")
+    return arr
