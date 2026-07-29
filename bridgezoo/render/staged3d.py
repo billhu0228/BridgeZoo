@@ -295,12 +295,16 @@ def render_staged_3d(
             point_i = _deformed_point(model, record, cable.i, scale)
             point_j = _deformed_point(model, record, cable.j, scale)
             color = "#6a9f58" if cable.group == "backstay" else "#4f8fba"
-            width = 2.6 if cable.activation_stage == record.stage_index else 1.2
+            tensioned_now = record.stage_index in {
+                cable.activation_stage,
+                cable.second_pretension_stage,
+            }
+            width = 2.6 if tensioned_now else 1.2
             axis.plot(
                 [point_i[0], point_j[0]],
                 [point_i[1], point_j[1]],
                 [point_i[2], point_j[2]],
-                color="#b2182b" if cable.activation_stage == record.stage_index else color,
+                color="#b2182b" if tensioned_now else color,
                 lw=width,
                 alpha=0.86,
             )

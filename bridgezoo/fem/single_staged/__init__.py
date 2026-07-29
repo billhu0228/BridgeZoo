@@ -1,9 +1,10 @@
 """单塔逐阶段施工模型 —— "一套定义,两种后端,结果一致"。
 
-``single_staged`` now also exposes the first-round 3D architecture.  Its names
+``single_staged`` also exposes the detailed 3D architecture.  Its names
 carry a ``3D`` suffix so the established 2D optimization API remains available
 during migration.  The 3D path uses physical sections, a twin-main-girder
-grillage, an eccentric deck-slab plane and matching direct/OpenSees backends.
+grillage, an eccentric deck-slab plane, three-substep incremental construction
+and matching direct/OpenSees backends.
 
 - :mod:`bridgezoo.fem.single_staged.plan` —— 与求解器无关的施工计划 IR + 结果容器 + 共享辅助。
 - :mod:`bridgezoo.fem.single_staged.builder` —— 由参数构建 :class:`StagedPlan`

@@ -82,6 +82,7 @@ _3D_CONFIG_KEYS = {
     "strand_area",
     "strands_per_cable",
     "pretension_per_cable",
+    "pretension_a_ratio",
     "gravity",
     "secondary_main_girder_line_load",
     "secondary_deck_pressure",
@@ -255,7 +256,13 @@ def load_single_staged_3d_config(source: str | Path):
         raise ValueError(f"{path}: 'n_seg' must be a positive integer")
 
     scalar_keys = (
-        _3D_CONFIG_KEYS - {"n_seg", "strands_per_cable", "pretension_per_cable"}
+        _3D_CONFIG_KEYS
+        - {
+            "n_seg",
+            "strands_per_cable",
+            "pretension_per_cable",
+            "pretension_a_ratio",
+        }
     ) | (_3D_MATERIAL_KEYS - {"steel_name", "concrete_name", "cable_material_name"}) | (
         _OPTIONAL_3D_CONFIG_KEYS & values.keys()
     )

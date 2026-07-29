@@ -24,6 +24,7 @@ class Node3D:
     z: float
     role: str
     activation_stage: int = 0
+    birth_master: int | None = None
 
     @property
     def xyz(self) -> Vector3:
@@ -56,12 +57,30 @@ class CableElement3D:
     pretension: float = 0.0
     group: str = "stay"
     activation_stage: int = 0
+    pretension_a: float | None = None
+    second_pretension_stage: int | None = None
+    construction_stage: int = 0
 
     def __post_init__(self) -> None:
         if self.area <= 0.0:
             raise ValueError("cable area must be positive")
         if self.pretension < 0.0:
             raise ValueError("cable pretension must be nonnegative")
+        if self.pretension_a is not None and not 0.0 <= self.pretension_a <= self.pretension:
+            raise ValueError("cable pretension A must be between zero and total pretension")
+        if (
+            self.second_pretension_stage is not None
+            and self.second_pretension_stage < self.activation_stage
+        ):
+            raise ValueError("cable pretension B cannot precede cable activation")
+
+    @property
+    def resolved_pretension_a(self) -> float:
+        return self.pretension if self.pretension_a is None else self.pretension_a
+
+    @property
+    def pretension_b(self) -> float:
+        return self.pretension - self.resolved_pretension_a
 
 
 @dataclass(frozen=True)
@@ -108,10 +127,16 @@ class FrameLoad3D:
     qz: float = 0.0
     load_case: str = "self_weight"
     activation_stage: int = 0
+    deactivation_stage: int | None = None
 
     @property
     def global_vector(self) -> Vector3:
         return (self.qx, self.qy, self.qz)
+
+    def is_defined_at(self, stage: int) -> bool:
+        return self.activation_stage <= stage and (
+            self.deactivation_stage is None or stage < self.deactivation_stage
+        )
 
 
 @dataclass(frozen=True)
@@ -119,6 +144,8 @@ class ConstructionStage3D:
     index: int
     label: str
     description: str = ""
+    construction_stage: int = 0
+    phase: str = ""
 
 
 class BridgeModel3D:
@@ -175,6 +202,16 @@ class BridgeModel3D:
         """Validate activation ordering and rigid-link topology."""
 
         slave_ids = set()
+        for node in self.nodes.values():
+            if node.birth_master is not None:
+                if node.birth_master not in self.nodes:
+                    raise ValueError(
+                        f"node {node.id} has unknown birth master {node.birth_master}"
+                    )
+                if self.nodes[node.birth_master].activation_stage > node.activation_stage:
+                    raise ValueError(
+                        f"node {node.id} activates before birth master {node.birth_master}"
+                    )
         for collection in (self.frames.values(), self.cables.values()):
             for element in collection:
                 for node_id in (element.i, element.j):
@@ -198,6 +235,13 @@ class BridgeModel3D:
         for load in self.frame_loads:
             if self.frames[load.member].activation_stage > load.activation_stage:
                 raise ValueError(f"load on frame {load.member} activates before the frame")
+            if (
+                load.deactivation_stage is not None
+                and load.deactivation_stage <= load.activation_stage
+            ):
+                raise ValueError(
+                    f"load on frame {load.member} must deactivate after it activates"
+                )
 
     @staticmethod
     def _add_unique(mapping: dict, key: int, value, kind: str) -> None:

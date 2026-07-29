@@ -51,10 +51,9 @@ class EvaluationResult3D(EvaluationResult):
 class CableDesignEvaluator3D:
     """Evaluate symmetric 3D cable groups with either linear 3D backend.
 
-    Only the completed cumulative stage is solved during optimization because
-    the current first-round 3D solver performs independent cumulative linear
-    re-analyses and the objective is defined on the completed bridge.  This is
-    numerically identical to taking the last record from ``solver.run(plan)``.
+    The objective is evaluated on the completed bridge, but ``solve_stage``
+    replays every preceding construction substep so wet-deck loading and
+    stress-free composite activation remain path-dependent.
     """
 
     def __init__(
@@ -122,7 +121,7 @@ class CableDesignEvaluator3D:
                     sorted(
                         cable.id
                         for cable in plan.model.cables.values()
-                        if cable.activation_stage == stage and cable.group == group_name
+                        if cable.construction_stage == stage and cable.group == group_name
                     )
                 )
                 if len(members) != 2:

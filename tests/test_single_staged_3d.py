@@ -4,6 +4,7 @@ from dataclasses import replace
 import numpy as np
 import pytest
 
+from bridgezoo.fem.single_staged.birth3d import initialize_flexible_birth_3d
 from bridgezoo.fem.single_staged import (
     HSection3D,
     HollowBoxSection3D,
@@ -62,6 +63,7 @@ def test_bundled_omo_3d_yaml_supplies_complete_physical_input():
     assert config.cable_material.E == pytest.approx(1.95e11)
     assert config.secondary_main_girder_line_load == pytest.approx(0.0)
     assert config.secondary_deck_pressure == pytest.approx(1750.0)
+    assert config.pretension_a_ratio == pytest.approx(0.5)
     assert config.superimposed_dead_load is None
 
     # The full 24-cable OMO grid has more than 100 longitudinal stations;
@@ -71,7 +73,7 @@ def test_bundled_omo_3d_yaml_supplies_complete_physical_input():
     assert len(plan.model.nodes) > 500
     assert not (set(plan.model.frames) & set(plan.model.cables))
     assert plan.final_stage.label == "secondary_load"
-    assert len(plan.stages) == config.n_seg + 3
+    assert len(plan.stages) == 3 * (config.n_seg + 2) + 1
 
 
 def test_legacy_3d_yaml_deck_load_is_migrated_without_inventing_line_load(tmp_path):
@@ -153,8 +155,25 @@ def test_3d_builder_creates_twin_girder_grid_eccentric_slab_and_box_tower():
         np.full(len(cross_girder_x) - 1, plan.metadata["actual_cross_girder_spacing"]),
         abs=1.0e-12,
     )
-    assert all(load.load_case != "self_weight" for load in model.frame_loads if model.frames[load.member].group == "deck_transverse")
-    assert [stage.label for stage in plan.stages] == ["cable1", "cable2", "tip", "left_span"]
+    assert all(
+        load.load_case != "self_weight"
+        for load in model.frame_loads
+        if model.frames[load.member].group.startswith("deck_")
+    )
+    assert [stage.label for stage in plan.stages] == [
+        "cable1_steel_A",
+        "cable1_deck_weight_B",
+        "cable1_composite",
+        "cable2_steel_A",
+        "cable2_deck_weight_B",
+        "cable2_composite",
+        "tip_steel_A",
+        "tip_deck_weight_B",
+        "tip_composite",
+        "left_span_steel_A",
+        "left_span_deck_weight_B",
+        "left_span_composite",
+    ]
 
 
 def test_3d_builder_accepts_independent_backstay_and_main_stay_group_designs():
@@ -162,6 +181,7 @@ def test_3d_builder_accepts_independent_backstay_and_main_stay_group_designs():
         n_seg=2,
         strands_per_cable=((10, 20), (30, 40)),
         pretension_per_cable=((1.0e6, 2.0e6), (3.0e6, 4.0e6)),
+        pretension_a_ratio=((0.25, 0.50), (0.75, 1.0)),
     )
 
     for stage, expected in enumerate(((10, 20, 1.0e6, 2.0e6), (30, 40, 3.0e6, 4.0e6)), start=1):
@@ -169,18 +189,107 @@ def test_3d_builder_accepts_independent_backstay_and_main_stay_group_designs():
         backstays = [
             cable
             for cable in plan.model.cables.values()
-            if cable.activation_stage == stage and cable.group == "backstay"
+            if cable.construction_stage == stage and cable.group == "backstay"
         ]
         main_stays = [
             cable
             for cable in plan.model.cables.values()
-            if cable.activation_stage == stage and cable.group == "main_stay"
+            if cable.construction_stage == stage and cable.group == "main_stay"
         ]
         assert len(backstays) == len(main_stays) == 2
         assert {cable.area for cable in backstays} == {back_strands * 1.4e-4}
         assert {cable.area for cable in main_stays} == {main_strands * 1.4e-4}
         assert {cable.pretension for cable in backstays} == {back_tension}
         assert {cable.pretension for cable in main_stays} == {main_tension}
+        expected_ratios = ((0.25, 0.50), (0.75, 1.0))[stage - 1]
+        assert {cable.pretension_a for cable in backstays} == {
+            back_tension * expected_ratios[0]
+        }
+        assert {cable.pretension_b for cable in main_stays} == {
+            main_tension * (1.0 - expected_ratios[1])
+        }
+
+
+def test_detailed_3d_stage_commits_wet_deck_load_before_composite_activation():
+    common = dict(
+        n_seg=1,
+        left_span=None,
+        cross_girder_spacing=10.0,
+        tower_element_size=10.0,
+        pretension_per_cable=((1.0e6, 2.0e6),),
+    )
+    split_plan = build_single_staged_3d(
+        **common,
+        pretension_a_ratio=((0.25, 0.75),),
+    )
+    model = split_plan.model
+
+    assert [stage.phase for stage in split_plan.stages[:3]] == [
+        "steel_and_A",
+        "deck_weight_and_B",
+        "composite",
+    ]
+    first_main = [
+        frame
+        for frame in model.frames.values()
+        if frame.group == "main_girder" and frame.activation_stage == 1
+    ]
+    first_slab = [
+        frame
+        for frame in model.frames.values()
+        if frame.group.startswith("deck_") and frame.activation_stage == 3
+    ]
+    first_temporary_loads = [
+        load
+        for load in model.frame_loads
+        if load.load_case == "temporary_deck_self_weight"
+        and load.activation_stage == 2
+    ]
+    assert first_main and first_slab
+    assert {load.member for load in first_temporary_loads} == {
+        frame.id for frame in first_main
+    }
+    assert all(load.is_defined_at(2) and not load.is_defined_at(3) for load in first_temporary_loads)
+    expected_line_load = (
+        split_plan.metadata["config"].concrete.density
+        * split_plan.metadata["deck_width"]
+        * split_plan.metadata["config"].deck_thickness
+        * split_plan.metadata["config"].gravity
+        / 2.0
+    )
+    assert {load.qz for load in first_temporary_loads} == {-expected_line_load}
+
+    split = SingleStagedDirectSolver3D().run(split_plan)
+    steel_a, deck_weight_b, composite = split.records[:3]
+    common_nodes = set(deck_weight_b.displacement) & set(composite.displacement)
+    assert composite.applied_load == pytest.approx(deck_weight_b.applied_load, abs=1.0e-9)
+    assert {
+        node_id: composite.displacement[node_id] for node_id in common_nodes
+    } == pytest.approx(
+        {node_id: deck_weight_b.displacement[node_id] for node_id in common_nodes},
+        rel=1.0e-12,
+        abs=1.0e-12,
+    )
+    assert all(
+        np.max(np.abs(composite.frame_force[frame.id])) < 1.0e-6
+        for frame in first_slab
+    )
+
+    all_a = SingleStagedDirectSolver3D().run(
+        build_single_staged_3d(**common, pretension_a_ratio=1.0)
+    )
+    cable_id = min(steel_a.cable_force)
+    assert steel_a.cable_force[cable_id] != pytest.approx(
+        all_a.records[0].cable_force[cable_id]
+    )
+    assert deck_weight_b.cable_force[cable_id] == pytest.approx(
+        all_a.records[1].cable_force[cable_id],
+        rel=1.0e-11,
+        abs=1.0e-6,
+    )
+
+    with pytest.raises(ValueError, match="between zero and one"):
+        build_single_staged_3d(n_seg=1, pretension_a_ratio=1.01)
 
 
 def test_3d_optimization_evaluator_reports_groups_and_physical_material_quantity():
@@ -264,10 +373,7 @@ def test_direct_3d_solver_runs_all_stages_and_balances_physical_dead_load():
     result = SingleStagedDirectSolver3D().run(plan)
 
     assert [record.stage_label for record in result.records] == [
-        "cable1",
-        "cable2",
-        "tip",
-        "left_span",
+        stage.label for stage in plan.stages
     ]
     assert all(record.converged for record in result.records)
     final = result.final
@@ -282,6 +388,47 @@ def test_direct_3d_solver_runs_all_stages_and_balances_physical_dead_load():
         -final.applied_load[2],
         rel=1.0e-10,
         abs=1.0e-5,
+    )
+
+
+def test_3d_new_steel_group_uses_actual_stiffness_for_flexible_birth_geometry():
+    config = replace(load_single_staged_3d_config("omo3d"), n_seg=3)
+    plan = build_single_staged_3d(config)
+    solver = SingleStagedDirectSolver3D()
+    cable1_composite = solver.solve_stage(plan, 3)
+    displacement = {
+        node_id: np.asarray(values, dtype=float)
+        for node_id, values in cable1_composite.displacement.items()
+    }
+
+    first_tip = next(
+        node
+        for node in plan.model.nodes.values()
+        if node.role == "main_girder_0" and node.x == pytest.approx(-24.0)
+    )
+    second_tip = next(
+        node
+        for node in plan.model.nodes.values()
+        if node.role == "main_girder_0" and node.x == pytest.approx(-36.0)
+    )
+    first_uz = displacement[first_tip.id][2]
+    first_ry = displacement[first_tip.id][4]
+    rigid_tip_uz = first_uz + 12.0 * first_ry
+
+    initialize_flexible_birth_3d(plan.model, 4, displacement)
+
+    assert displacement[first_tip.id][2] == pytest.approx(first_uz, abs=1.0e-14)
+    assert rigid_tip_uz * 1000.0 == pytest.approx(230.661001, abs=1.0e-6)
+    assert displacement[second_tip.id][2] * 1000.0 == pytest.approx(
+        170.598670,
+        abs=1.0e-6,
+    )
+    assert displacement[second_tip.id][2] < rigid_tip_uz
+
+    cable2_steel_a = solver.solve_stage(plan, 4)
+    assert cable2_steel_a.displacement[second_tip.id][2] * 1000.0 == pytest.approx(
+        249.193935,
+        abs=1.0e-6,
     )
 
 
@@ -300,9 +447,15 @@ def test_3d_secondary_line_load_and_deck_pressure_activate_in_separate_final_sta
     model = plan.model
 
     assert [stage.label for stage in plan.stages] == [
-        "cable1",
-        "tip",
-        "left_span",
+        "cable1_steel_A",
+        "cable1_deck_weight_B",
+        "cable1_composite",
+        "tip_steel_A",
+        "tip_deck_weight_B",
+        "tip_composite",
+        "left_span_steel_A",
+        "left_span_deck_weight_B",
+        "left_span_composite",
         "secondary_load",
     ]
     secondary_stage = plan.final_stage.index
@@ -366,18 +519,22 @@ def test_3d_secondary_line_load_and_deck_pressure_activate_in_separate_final_sta
 
 def test_direct_3d_batch_solver_matches_scalar_and_uses_one_multi_rhs_solve(monkeypatch):
     common = {
-        "n_seg": 1,
+        "n_seg": 2,
         "left_span": 5.0,
         "cross_girder_spacing": 10.0,
         "tower_element_size": 10.0,
-        "strands_per_cable": ((55, 65),),
+        "strands_per_cable": ((55, 65), (55, 65)),
     }
     plans = [
         build_single_staged_3d(
             **common,
-            pretension_per_cable=(tensions,),
+            pretension_per_cable=tensions,
         )
-        for tensions in ((0.0, 0.0), (1.0e6, 2.0e6), (3.0e6, 4.0e6))
+        for tensions in (
+            ((0.0, 0.0), (0.0, 0.0)),
+            ((1.0e6, 2.0e6), (1.5e6, 2.5e6)),
+            ((3.0e6, 4.0e6), (3.5e6, 4.5e6)),
+        )
     ]
     stage = plans[0].final_stage
     scalar = [
@@ -407,8 +564,8 @@ def test_direct_3d_batch_solver_matches_scalar_and_uses_one_multi_rhs_solve(monk
         stage.label,
     )
 
-    assert len(factor_calls) == 1
-    assert len(solve_rhs_shapes) == 1
+    assert len(factor_calls) == len(plans[0].stages)
+    assert len(solve_rhs_shapes) == len(plans[0].stages)
     assert all(shape[1] == len(plans) for shape in solve_rhs_shapes)
     for batched, separate in zip(batch, scalar):
         assert batched.converged == separate.converged
@@ -425,11 +582,11 @@ def test_direct_3d_batch_solver_matches_scalar_and_uses_one_multi_rhs_solve(monk
             assert set(batched_values) == set(separate_values)
             # Multi-RHS BLAS changes the summation order relative to a
             # single-column solve.  Only recovered frame end forces amplify
-            # that machine-level displacement difference; 2e-7 N/Nm remains
-            # negligible, while displacement/cable/reaction guards stay at
-            # their original tighter threshold (far below millimetre scale).
+            # that machine-level displacement difference across the complete
+            # construction history; 1e-5 N/Nm remains negligible, while
+            # displacement/cable/reaction guards stay much tighter.
             rel_tol, abs_tol = (
-                (1.0e-9, 2.0e-7)
+                (1.0e-9, 1.0e-5)
                 if field == "frame_force"
                 else (1.0e-11, 1.0e-8)
             )
@@ -441,8 +598,8 @@ def test_direct_3d_batch_solver_matches_scalar_and_uses_one_multi_rhs_solve(monk
                 )
 
     different_area = build_single_staged_3d(
-        **{**common, "strands_per_cable": ((56, 65),)},
-        pretension_per_cable=((1.0e6, 2.0e6),),
+        **{**common, "strands_per_cable": ((56, 65), (55, 65))},
+        pretension_per_cable=((1.0e6, 2.0e6), (1.5e6, 2.5e6)),
     )
     with pytest.raises(ValueError, match="cable structure"):
         SingleStagedDirectBatchSolver3D().solve_stage_batch(
@@ -487,14 +644,15 @@ def test_direct_3d_affine_model_uses_batch_kernel_and_matches_real_solve(monkeyp
     monkeypatch.setattr("scipy.linalg.cho_solve", counted_solve)
     affine = build_affine_model(evaluator, strands)
 
-    assert len(factor_calls) == 1
-    assert len(solve_calls) == 1
+    stage_count = len(evaluator.build_plan(strands, np.zeros(2)).stages)
+    assert len(factor_calls) == stage_count
+    assert len(solve_calls) == stage_count
     assert all(shape[1] == evaluator.layout.size + 1 for shape in solve_calls)
     tension = np.asarray([2.2e6, 3.4e6])
     actual = evaluator.evaluate(strands, tension)
-    assert len(factor_calls) == 2
-    assert len(solve_calls) == 2
-    assert solve_calls[1][1] == 1
+    assert len(factor_calls) == 2 * stage_count
+    assert len(solve_calls) == 2 * stage_count
+    assert all(shape[1] == 1 for shape in solve_calls[stage_count:])
     assert affine.stress_mpa(tension) == pytest.approx(
         [actual.cable_stress_mpa[cable_id] for cable_id in actual.cable_ids],
         rel=1.0e-10,
@@ -515,7 +673,7 @@ def test_direct_3d_affine_model_uses_batch_kernel_and_matches_real_solve(monkeyp
 def test_3d_opensees_backend_matches_direct_linear_model():
     pytest.importorskip("openseespy.opensees")
     plan = build_single_staged_3d(
-        n_seg=1,
+        n_seg=2,
         left_span=5.0,
         pretension_per_cable=0.0,
         secondary_main_girder_line_load=4.0e3,

@@ -326,7 +326,6 @@ def _result_payload(config, plan, result) -> dict[str, object]:
             },
         },
         "todo": [
-            "path-dependent stress-free activation and displacement lock-in",
             "geometric nonlinearity and cable sag",
         ],
     }

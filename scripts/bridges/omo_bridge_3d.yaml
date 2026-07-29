@@ -59,6 +59,9 @@ cable_material_density: 7850.0
 strand_area: 1.4e-4
 strands_per_cable: 91
 pretension_per_cable: 6.0e6
+# Fraction applied as pretension A in substep 1; the remainder is B in substep 2.
+# Retain the calibrated legacy total entirely in A until an A/B schedule is supplied.
+pretension_a_ratio: 0.5
 gravity: 9.806
 # Final-stage secondary loads. The railing/edge-facility value was not supplied,
 # so it remains explicit zero rather than silently changing the OMO load total.

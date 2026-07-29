@@ -51,7 +51,7 @@
 - [ ] `staged_builder.build_stages`：由全桥 `BridgeGeometry` 生成施工阶段（对称双悬臂/合龙）
 - [ ] `tools/profile_fem.py`：单 episode 耗时基准 < 1~2 ms
 
-**`single_staged` 3D 升级（第一轮）✅**
+**`single_staged` 3D 升级（详细施工阶段）✅**
 - [x] `SingleTowerGeometry3D`：保留单塔纵向基本尺寸，新增双主梁、桥面板偏移及真实
   H/空心箱形截面尺寸
 - [x] `single_staged.model3d`：6 自由度空间模型 IR、阶段激活、刚臂和统一结果
@@ -63,7 +63,8 @@
 - [x] `optim.single_staged3d` + `scripts.optimize_cables_3d`：背索/主跨索对称分组的独立
   3D 优化入口，复用仿射 LP+SLSQP、股数搜索、随机试探和断点续跑，支持自研/OpenSees
   双后端并输出组到实体索的映射
-- [ ] 第二轮：真正的增量施工状态、构件零应力诞生、安装构形/支座位移锁定
+- [x] 每个架设阶段细分为钢梁/拉索+A、湿桥面板等效线荷载+B、删除临时荷载定义并
+  激活偏心桥面板组合体系；自研/OpenSees 双后端均保存零应力诞生和既有内力状态
 - [ ] 第二轮：OpenSees `corotTruss`、大位移、索垂度及拉索仅受拉处理
 - [ ] 第二轮：实体 H/箱形截面外轮廓、结果云图与交互式 3D 渲染
 

@@ -47,11 +47,26 @@ The YAML explicitly contains:
   for the tower;
 - elastic modulus, Poisson ratio and density for structural steel, concrete
   and cable steel;
-- strand area/count, cable pretension, gravity and superimposed deck dead load.
+- strand area/count, total cable pretension, the explicit pretension-A ratio,
+  gravity and superimposed deck dead load.
 
 The loader rejects missing or unknown keys. `cross_girder_spacing` is the
 maximum target spacing; the builder divides the complete deck length into an
 integer number of equal bays not exceeding that value.
+
+Every 3D erection stage has three incremental substeps: steel girders and
+stays are activated with pretension A; wet-deck self-weight is converted to
+line loads on the newly erected main girders while pretension B is applied;
+then the temporary load definition expires and the eccentric slab grillage is
+activated through rigid links. `pretension_a_ratio` may be a scalar or use the
+same stage-major `(backstay, main_stay)` shape as `pretension_per_cable`.
+
+Before each steel/A substep, the newly erected frame-and-cable group receives
+an unloaded actual-stiffness virtual solve.  Previously active connection
+nodes retain their committed displacement, and the new nodes take the elastic
+extension compatible with the new beam/truss stiffness.  That virtual field is
+then used as the stress-free birth geometry.  A free extension with no new
+restraint naturally reduces to rigid tangent extrapolation.
 
 ### Current `single` construction topology
 

@@ -1,10 +1,12 @@
-"""Build the first-round 3D single-tower staged bridge architecture.
+"""Build the detailed 3D single-tower staged bridge architecture.
 
 The model retains the legacy single-staged longitudinal dimension semantics,
 but uses physical materials and section dimensions.  Main girders and cross
 girders share a two-line beam grid.  An equivalent deck-slab grillage spans the
 full deck width, including the transverse cantilevers outside the main girders,
 and sits on an eccentric reference plane connected by rigid links.
+Each erection stage is split into steel/cable+A, wet-deck-load+B and composite
+slab activation substeps.
 """
 
 from __future__ import annotations
@@ -70,6 +72,9 @@ class SingleStaged3DConfig(SingleTowerGeometry3D):
     pretension_per_cable: (
         float | tuple[float, ...] | tuple[tuple[float, float], ...]
     ) = 3.5e6
+    pretension_a_ratio: (
+        float | tuple[float, ...] | tuple[tuple[float, float], ...]
+    ) = 1.0
 
     steel: ElasticMaterial3D = STEEL_Q345
     concrete: ElasticMaterial3D = CONCRETE_C50
@@ -148,6 +153,13 @@ class SingleStaged3DConfig(SingleTowerGeometry3D):
             self.n_seg,
             "pretension_per_cable",
         )
+        ratios = _stage_pair_values(
+            self.pretension_a_ratio,
+            self.n_seg,
+            "pretension_a_ratio",
+        )
+        if any(ratio > 1.0 for pair in ratios for ratio in pair):
+            raise ValueError("pretension_a_ratio values must be between zero and one")
 
 
 @dataclass(frozen=True)
@@ -157,6 +169,18 @@ class _Station:
     activation_stage: int
     role: str
     is_cross_grid: bool = False
+
+
+def _steel_step(construction_stage: int) -> int:
+    return 3 * construction_stage - 2
+
+
+def _deck_weight_step(construction_stage: int) -> int:
+    return 3 * construction_stage - 1
+
+
+def _composite_step(construction_stage: int) -> int:
+    return 3 * construction_stage
 
 
 def _stage_pair_values(
@@ -340,13 +364,36 @@ def build_single_staged_3d(
         for line in range(len(deck_grid_y))
     )
 
-    # Beam-grid and eccentric slab nodes.
+    previous_station_index: dict[int, int | None] = {}
+    for station_index, station in enumerate(stations):
+        earlier = [
+            index
+            for index, candidate in enumerate(stations)
+            if candidate.activation_stage < station.activation_stage
+        ]
+        previous_station_index[station_index] = (
+            min(earlier, key=lambda index: abs(stations[index].x - station.x))
+            if earlier
+            else None
+        )
+
+    # Beam-grid nodes are born with the steelwork.  Eccentric slab nodes are
+    # introduced only in the third substep and inherit the current rigid-body
+    # displacement of the nearest main-girder node.
     beam_nodes: dict[tuple[int, int], int] = {}
     slab_nodes: dict[tuple[int, int], int] = {}
     for station_index, station in enumerate(stations):
+        steel_activation = _steel_step(station.activation_stage)
+        slab_activation = _composite_step(station.activation_stage)
         for side in range(2):
             beam_id = _BEAM_NODE_BASE + 10 * station_index + side
             beam_nodes[station_index, side] = beam_id
+            previous_index = previous_station_index[station_index]
+            birth_master = (
+                _BEAM_NODE_BASE + 10 * previous_index + side
+                if previous_index is not None
+                else None
+            )
             model.add_node(
                 Node3D(
                     beam_id,
@@ -354,12 +401,14 @@ def build_single_staged_3d(
                     girder_y[side],
                     0.0,
                     f"main_girder_{side}",
-                    station.activation_stage,
+                    steel_activation,
+                    birth_master,
                 )
             )
         for line, y in enumerate(deck_grid_y):
             slab_id = _SLAB_NODE_BASE + 10 * station_index + line
             slab_nodes[station_index, line] = slab_id
+            nearest_side = min(range(2), key=lambda side: abs(girder_y[side] - y))
             model.add_node(
                 Node3D(
                     slab_id,
@@ -367,7 +416,8 @@ def build_single_staged_3d(
                     y,
                     config.deck_offset,
                     f"deck_slab_{line}",
-                    station.activation_stage,
+                    slab_activation,
+                    beam_nodes[station_index, nearest_side],
                 )
             )
         for side, deck_line in enumerate(girder_deck_lines):
@@ -376,7 +426,7 @@ def build_single_staged_3d(
                     _RIGID_LINK_BASE + 10 * station_index + side,
                     beam_nodes[station_index, side],
                     slab_nodes[station_index, deck_line],
-                    station.activation_stage,
+                    slab_activation,
                 )
             )
 
@@ -394,8 +444,9 @@ def build_single_staged_3d(
     slab_longitudinal_ids: list[int] = []
     slab_longitudinal_width_by_id: dict[int, float] = {}
     main_girder_ids: list[int] = []
+    construction_stage_by_main_id: dict[int, int] = {}
     for interval, (left, right) in enumerate(zip(stations, stations[1:])):
-        activation = max(left.activation_stage, right.activation_stage)
+        construction_stage = max(left.activation_stage, right.activation_stage)
         for side in range(2):
             main_id = _MAIN_FRAME_BASE + 10 * interval + side
             model.add_frame(
@@ -406,10 +457,11 @@ def build_single_staged_3d(
                     config.steel,
                     config.main_girder_section,
                     group="main_girder",
-                    activation_stage=activation,
+                    activation_stage=_steel_step(construction_stage),
                 )
             )
             main_girder_ids.append(main_id)
+            construction_stage_by_main_id[main_id] = construction_stage
         for line, (section, tributary_width) in enumerate(
             zip(slab_longitudinal_sections, deck_tributary_widths)
         ):
@@ -422,7 +474,7 @@ def build_single_staged_3d(
                     config.concrete,
                     section,
                     group="deck_longitudinal",
-                    activation_stage=activation,
+                    activation_stage=_composite_step(construction_stage),
                 )
             )
             slab_longitudinal_ids.append(slab_id)
@@ -444,7 +496,7 @@ def build_single_staged_3d(
                 config.steel,
                 config.cross_girder_section,
                 group="cross_girder",
-                activation_stage=station.activation_stage,
+                activation_stage=_steel_step(station.activation_stage),
             )
         )
         left_tributary = 0.0 if cross_order == 0 else 0.5 * actual_cross_spacing
@@ -465,7 +517,7 @@ def build_single_staged_3d(
                     config.concrete,
                     transverse_section,
                     group="deck_transverse",
-                    activation_stage=station.activation_stage,
+                    activation_stage=_composite_step(station.activation_stage),
                 )
             )
 
@@ -507,10 +559,16 @@ def build_single_staged_3d(
         config.n_seg,
         "pretension_per_cable",
     )
+    pretension_a_ratios = _stage_pair_values(
+        config.pretension_a_ratio,
+        config.n_seg,
+        "pretension_a_ratio",
+    )
     station_by_key = {station.key: index for index, station in enumerate(stations)}
     ground_anchor_ids: list[int] = []
     for cable_index in range(1, config.n_seg + 1):
-        activation = cable_index
+        activation = _steel_step(cable_index)
+        second_pretension_stage = _deck_weight_step(cable_index)
         tower_anchor = anchor_nodes[anchor_elevations[cable_index - 1]]
         deck_station = station_by_key[f"cable_{cable_index}"]
         ground_x = config.right_start + (cable_index - 1) * config.right_spacing
@@ -525,28 +583,35 @@ def build_single_staged_3d(
             )
             back_strands, main_strands = strand_pairs[cable_index - 1]
             back_tension, main_tension = pretension_pairs[cable_index - 1]
+            back_a_ratio, main_a_ratio = pretension_a_ratios[cable_index - 1]
             model.add_cable(
                 CableElement3D(
-                    _BACKSTAY_BASE + 10 * cable_index + side,
-                    tower_anchor,
-                    ground_id,
-                    config.cable_material,
-                    config.strand_area * int(back_strands),
-                    back_tension,
-                    "backstay",
-                    activation,
+                    id=_BACKSTAY_BASE + 10 * cable_index + side,
+                    i=tower_anchor,
+                    j=ground_id,
+                    material=config.cable_material,
+                    area=config.strand_area * int(back_strands),
+                    pretension=back_tension,
+                    group="backstay",
+                    activation_stage=activation,
+                    pretension_a=back_tension * back_a_ratio,
+                    second_pretension_stage=second_pretension_stage,
+                    construction_stage=cable_index,
                 )
             )
             model.add_cable(
                 CableElement3D(
-                    _MAIN_STAY_BASE + 10 * cable_index + side,
-                    tower_anchor,
-                    beam_nodes[deck_station, side],
-                    config.cable_material,
-                    config.strand_area * int(main_strands),
-                    main_tension,
-                    "main_stay",
-                    activation,
+                    id=_MAIN_STAY_BASE + 10 * cable_index + side,
+                    i=tower_anchor,
+                    j=beam_nodes[deck_station, side],
+                    material=config.cable_material,
+                    area=config.strand_area * int(main_strands),
+                    pretension=main_tension,
+                    group="main_stay",
+                    activation_stage=activation,
+                    pretension_a=main_tension * main_a_ratio,
+                    second_pretension_stage=second_pretension_stage,
+                    construction_stage=cable_index,
                 )
             )
 
@@ -556,14 +621,32 @@ def build_single_staged_3d(
     model.add_support(Support3D(tower_nodes[0], True, True, True, True, True, True, 0))
     right_index = station_by_key["right_bearing"]
     model.add_support(
-        Support3D(beam_nodes[right_index, 0], True, True, True, False, False, False, 1)
+        Support3D(
+            beam_nodes[right_index, 0],
+            True,
+            True,
+            True,
+            False,
+            False,
+            False,
+            _steel_step(1),
+        )
     )
     model.add_support(
-        Support3D(beam_nodes[right_index, 1], True, False, True, False, False, False, 1)
+        Support3D(
+            beam_nodes[right_index, 1],
+            True,
+            False,
+            True,
+            False,
+            False,
+            False,
+            _steel_step(1),
+        )
     )
     if config.left_span is not None:
         left_index = station_by_key["left_bearing"]
-        final_stage_index = config.n_seg + 2
+        final_stage_index = _steel_step(config.n_seg + 2)
         for side in range(2):
             model.add_support(
                 Support3D(
@@ -578,11 +661,13 @@ def build_single_staged_3d(
                 )
             )
 
-    # Physical self-weight.  Orthogonal deck strips both contribute stiffness,
-    # but slab mass is assigned only to longitudinal strips to avoid counting
-    # the same concrete plate twice.
+    # Steel/tower self-weight is applied when each supporting member is born.
+    # The concrete slab weight is deliberately not placed on slab members:
+    # wet concrete is carried by the just-erected steel girders in substep 2,
+    # then its already-committed effect remains in the steelwork when the slab
+    # stiffness joins the composite system in substep 3.
     for frame in model.frames.values():
-        if frame.group == "deck_transverse":
+        if frame.group in {"deck_longitudinal", "deck_transverse"}:
             continue
         model.add_frame_load(
             FrameLoad3D(
@@ -592,10 +677,30 @@ def build_single_staged_3d(
                 activation_stage=frame.activation_stage,
             )
         )
+
+    temporary_slab_line_load = (
+        config.concrete.density
+        * config.deck_width
+        * config.deck_thickness
+        * config.gravity
+        / 2.0
+    )
+    for member_id in main_girder_ids:
+        construction_stage = construction_stage_by_main_id[member_id]
+        model.add_frame_load(
+            FrameLoad3D(
+                member_id,
+                qz=-temporary_slab_line_load,
+                load_case="temporary_deck_self_weight",
+                activation_stage=_deck_weight_step(construction_stage),
+                deactivation_stage=_composite_step(construction_stage),
+            )
+        )
+
     geometry_final_stage = config.n_seg + 2 if config.left_span is not None else config.n_seg + 1
     deck_pressure = config.resolved_secondary_deck_pressure
     has_secondary_load = bool(config.secondary_main_girder_line_load or deck_pressure)
-    secondary_stage_index = geometry_final_stage + 1
+    secondary_stage_index = _composite_step(geometry_final_stage) + 1
     if config.secondary_main_girder_line_load:
         for member_id in main_girder_ids:
             model.add_frame_load(
@@ -617,23 +722,44 @@ def build_single_staged_3d(
                 )
             )
 
-    stages = [
-        ConstructionStage3D(
-            index,
-            f"cable{index}",
-            f"activate deck segment {index} and paired main/back stays",
-        )
-        for index in range(1, config.n_seg + 1)
-    ]
-    stages.append(
-        ConstructionStage3D(config.n_seg + 1, "tip", "activate the final cantilever tip grid")
-    )
+    stage_bases = [f"cable{index}" for index in range(1, config.n_seg + 1)] + ["tip"]
     if config.left_span is not None:
-        stages.append(
-            ConstructionStage3D(
-                config.n_seg + 2,
-                "left_span",
-                "activate the auxiliary span and its end bearings",
+        stage_bases.append("left_span")
+    stages: list[ConstructionStage3D] = []
+    for construction_stage, base in enumerate(stage_bases, start=1):
+        has_cable = construction_stage <= config.n_seg
+        stages.extend(
+            (
+                ConstructionStage3D(
+                    _steel_step(construction_stage),
+                    f"{base}_steel_A",
+                    (
+                        "activate steel girders and stays; apply cable pretension A"
+                        if has_cable
+                        else "activate steel girders"
+                    ),
+                    construction_stage,
+                    "steel_and_A",
+                ),
+                ConstructionStage3D(
+                    _deck_weight_step(construction_stage),
+                    f"{base}_deck_weight_B",
+                    (
+                        "apply temporary deck self-weight to the new steel girders "
+                        "and cable pretension B"
+                        if has_cable
+                        else "apply temporary deck self-weight to the new steel girders"
+                    ),
+                    construction_stage,
+                    "deck_weight_and_B",
+                ),
+                ConstructionStage3D(
+                    _composite_step(construction_stage),
+                    f"{base}_composite",
+                    "retire the temporary load definition and activate the rigidly coupled deck slab",
+                    construction_stage,
+                    "composite",
+                ),
             )
         )
     if has_secondary_load:
@@ -642,12 +768,14 @@ def build_single_staged_3d(
                 secondary_stage_index,
                 "secondary_load",
                 "apply main-girder line loads and deck-surface pressure",
+                geometry_final_stage + 1,
+                "secondary_load",
             )
         )
 
     metadata = {
         "coordinate_system": "x longitudinal, y transverse, z vertical",
-        "analysis_scope": "cumulative linear re-analysis at each activation stage",
+        "analysis_scope": "path-dependent incremental linear staged analysis",
         "station_x": {station.key: station.x for station in stations},
         "cross_girder_x": tuple(stations[index].x for index in cross_station_indices),
         "actual_cross_girder_spacing": actual_cross_spacing,
@@ -660,6 +788,8 @@ def build_single_staged_3d(
         "girder_spacing": config.girder_spacing,
         "deck_width": config.deck_width,
         "deck_offset": config.deck_offset,
+        "temporary_deck_line_load_per_main_girder": temporary_slab_line_load,
+        "construction_substeps": ("steel_and_A", "deck_weight_and_B", "composite"),
         "secondary_load_stage": secondary_stage_index if has_secondary_load else None,
         "config": config,
     }

@@ -102,7 +102,7 @@ YAML 同名长度向左切线激活辅助跨并把新端节点 202 的竖向位�
 `staged`，`single` 使用 `single_staged`；通用优化算法内部对应
 `CableOptimizationProblem.model_family`。
 
-## `single_staged` 3D 第一轮架构
+## `single_staged` 3D 详细施工架构
 
 3D 模型采用后缀明确的新 API（如 `build_single_staged_3d`、
 `SingleStagedDirectSolver3D`），旧 2D 接口在迁移期间保持不变。坐标约定为
@@ -120,21 +120,28 @@ YAML 同名长度向左切线激活辅助跨并把新端节点 202 的竖向位�
   细分主梁但不会破坏横梁等间距。桥面板纵横梁格位于主梁轴线上方的独立参考面，通过
   6 自由度刚臂表达偏心。当桥面宽度大于主梁间距时，板梁格在两根主梁外侧各增加一排
   边缘节点，横向板条显式形成两侧悬臂；纵向板条按实际影响宽度分配。纵横板条都参与
-  刚度，板自重仅分配给纵向板条，避免重复计重且保持桥面板总质量不变。
-- 单塔位于桥轴线，双索面分别连接两根主梁；每阶段同步激活一对主跨索和一对背索。
+  刚度。桥面板湿重不直接加载到新生板条，而是在组合前等效到当次新架设的两根钢主梁。
+- 单塔位于桥轴线，双索面分别连接两根主梁。每个几何架设阶段细分为三步：
+  `steel_and_A` 激活钢梁和一对主跨索/背索并施加预拉力 A；`deck_weight_and_B` 将湿桥面板
+  自重换算成两根新钢主梁上的线荷载并施加预拉力 B；`composite` 删除临时荷载定义、
+  零应力激活偏心桥面板梁格和刚臂，使其与钢梁共享自由度形成组合体系。无拉索的悬臂端
+  和辅助跨仍保留相同三步节奏。`pretension_a_ratio` 显式控制总预拉力在 A/B 间的分配。
 - 梁格、桥面板及可选辅助跨全部激活后，若配置了二期荷载则追加独立的
   `secondary_load` 最终阶段。`secondary_main_girder_line_load` 作为每根主梁的全局竖向
   线荷载施加到两条钢主梁，`secondary_deck_pressure` 按实际影响宽度转换为各条桥面纵向
   板条的线荷载；前者用于护栏等沿桥设施，后者用于沥青铺装等面荷载。
-- `direct3d` 为自研线弹性 Euler-Bernoulli 空间梁 + 线性杆求解器，刚臂通过精确自由度
-  凝聚实现；`SingleStagedDirectBatchSolver3D` 在固定索股时只组装、凝聚并分解一次刚度
-  矩阵，将全部预张力扰动组成多右端矩阵并一次回代，完整恢复梁端力、索力和支座反力；
-  `opensees3d` 使用同一 IR 建立 `elasticBeamColumn`、`Truss +
-  InitStressMaterial` 和 `rigidLink beam`，用于离线对照。
+- `direct3d` 为自研线弹性 Euler-Bernoulli 空间梁 + 线性杆增量求解器，保存节点提交位移、
+  构件出生位移、既有内力和支座反力，刚臂通过精确自由度凝聚实现。新钢结构组在正式A步
+  求解前先进行一次零荷载虚拟刚度求解：既有接口节点取上一阶段提交位移，新节点通过本步
+  实际空间梁和拉索刚度进行柔性切线延拓；该虚拟内力随后丢弃，所得构形作为新构件无应力
+  出生参考。没有新增约束的自由悬臂自然退化为刚体切线外推；
+  `SingleStagedDirectBatchSolver3D` 在每个施工细步只组装、凝聚并分解一次当前刚度矩阵，
+  将全部预张力扰动组成多右端矩阵一次回代。`opensees3d` 从同一 IR 为每个增量重建当前
+  `elasticBeamColumn`、`Truss` 和 `rigidLink beam` 切线模型，并在 Python 状态中累计提交量，
+  因而与自研后端逐细步交叉校核。
 
-第一轮的阶段语义是“累计激活后逐阶段线性重分析”，二期荷载阶段因此表示在完整结构上
-重新进行累计线性分析，尚不包含路径相关的零应力诞生、
-安装构形锁定、索垂度或几何非线性。`scripts/bridges/omo_bridge_3d.yaml` 是完整的 OMO
+当前阶段语义是真正的路径相关线性增量施工，包含零应力构件诞生和安装构形/支座位移锁定；
+仍不包含索垂度、拉索仅受拉或几何非线性。`scripts/bridges/omo_bridge_3d.yaml` 是完整的 OMO
 3D 物理输入，计算入口为 `python -m scripts.single_staged_3d --bridge omo3d`。
 
 `render.staged3d` 消费同一份 `SingleStagedPlan3D/StagedResult3D`，因此自研和 OpenSees
