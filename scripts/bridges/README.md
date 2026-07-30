@@ -60,6 +60,11 @@ line loads on the newly erected main girders while pretension B is applied;
 then the temporary load definition expires and the eccentric slab grillage is
 activated through rigid links. `pretension_a_ratio` may be a scalar or use the
 same stage-major `(backstay, main_stay)` shape as `pretension_per_cable`.
+The sequential forward optimizer reads `pretension_b_target_points` as
+`[design x (m), target relative uz (m)]` pairs.  It keeps the A-stage deck
+target at zero, while each B-stage deck target is obtained by piecewise-linear
+interpolation at that stage's main-stay anchor; values outside the supplied x
+range use the nearest endpoint target.
 
 After every analysis substep, the active main-girder frontier's incremental
 translation and rotation are transported through the future main-girder

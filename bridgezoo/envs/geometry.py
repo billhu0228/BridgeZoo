@@ -188,6 +188,19 @@ class SingleTowerGeometry3D:
     tower_outer_depth: float = 5.0
     tower_wall_thickness: float = 0.60
 
+    def cable_station_x(self, construction_stage: int) -> float:
+        """Return the design x coordinate of one main-stay deck anchor."""
+
+        if (
+            isinstance(construction_stage, bool)
+            or not isinstance(construction_stage, int)
+            or not 1 <= construction_stage <= self.n_seg
+        ):
+            raise ValueError(
+                f"construction_stage must be between 1 and {self.n_seg}"
+            )
+        return -(self.left_start + (construction_stage - 1) * self.left_spacing)
+
     @property
     def resolved_right_fix(self) -> float:
         return self.right_start if self.right_fix is None else self.right_fix

@@ -1,8 +1,9 @@
 """Load staged-bridge defaults from ``scripts/bridges/*.yaml``.
 
-The dependency-free parser supports the project's top-level numeric values and
-the ``tower_stiffness`` sequence of ``[z, EI]`` pairs.  It accepts either an
-inline sequence or the usual indented YAML list form.
+The dependency-free parser supports the project's top-level scalar values and
+sequences of numeric pairs, including ``tower_stiffness`` and the 3D B-stage
+displacement target points.  It accepts either an inline sequence or the usual
+indented YAML list form.
 """
 
 from __future__ import annotations
@@ -89,6 +90,7 @@ _3D_CONFIG_KEYS = {
 }
 _OPTIONAL_3D_CONFIG_KEYS = {
     "flexible_birth_correction_factor",
+    "pretension_b_target_points",
     "superimposed_dead_load",
 }
 _3D_MATERIAL_KEYS = {
@@ -267,7 +269,7 @@ def load_single_staged_3d_config(source: str | Path):
             "pretension_a_ratio",
         }
     ) | (_3D_MATERIAL_KEYS - {"steel_name", "concrete_name", "cable_material_name"}) | (
-        _OPTIONAL_3D_CONFIG_KEYS & values.keys()
+        (_OPTIONAL_3D_CONFIG_KEYS - {"pretension_b_target_points"}) & values.keys()
     )
     for key in scalar_keys:
         value = values[key]

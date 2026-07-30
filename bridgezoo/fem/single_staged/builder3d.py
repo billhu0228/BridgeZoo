@@ -23,6 +23,7 @@ from bridgezoo.fem.single_staged.model3d import (
     ConstructionStage3D,
     FrameElement3D,
     FrameLoad3D,
+    NodalLoad3D,
     Node3D,
     RigidLink3D,
     SingleStagedPlan3D,
@@ -76,6 +77,7 @@ class SingleStaged3DConfig(SingleTowerGeometry3D):
     pretension_a_ratio: (
         float | tuple[float, ...] | tuple[tuple[float, float], ...]
     ) = 1.0
+    pretension_b_target_points: tuple[tuple[float, float], ...] = ((0.0, 0.0),)
 
     steel: ElasticMaterial3D = STEEL_Q345
     concrete: ElasticMaterial3D = CONCRETE_C50
@@ -170,6 +172,43 @@ class SingleStaged3DConfig(SingleTowerGeometry3D):
         )
         if any(ratio > 1.0 for pair in ratios for ratio in pair):
             raise ValueError("pretension_a_ratio values must be between zero and one")
+        try:
+            raw_points = tuple(self.pretension_b_target_points)
+            if not raw_points:
+                raise ValueError
+            pairs = tuple(tuple(point) for point in raw_points)
+            if any(len(point) != 2 for point in pairs):
+                raise ValueError
+            points = tuple((float(point[0]), float(point[1])) for point in pairs)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "pretension_b_target_points must contain (x, z) pairs"
+            ) from exc
+        if any(not math.isfinite(value) for point in points for value in point):
+            raise ValueError("pretension_b_target_points values must be finite")
+        points = tuple(sorted(points))
+        if any(
+            math.isclose(left[0], right[0], rel_tol=0.0, abs_tol=1.0e-12)
+            for left, right in zip(points, points[1:])
+        ):
+            raise ValueError("pretension_b_target_points x coordinates must be unique")
+        object.__setattr__(self, "pretension_b_target_points", points)
+
+    def pretension_b_target_uz_m(self, x_m: float) -> float:
+        """Piecewise-linear B-stage deck target, clamped outside its point range."""
+
+        if not math.isfinite(x_m):
+            raise ValueError("B-stage target x coordinate must be finite")
+        points = self.pretension_b_target_points
+        if len(points) == 1 or x_m <= points[0][0]:
+            return points[0][1]
+        if x_m >= points[-1][0]:
+            return points[-1][1]
+        for left, right in zip(points, points[1:]):
+            if left[0] <= x_m <= right[0]:
+                fraction = (x_m - left[0]) / (right[0] - left[0])
+                return left[1] + fraction * (right[1] - left[1])
+        raise RuntimeError("failed to interpolate B-stage displacement target")
 
 
 @dataclass(frozen=True)
@@ -266,7 +305,7 @@ def _key_stations(config: SingleStaged3DConfig) -> list[_Station]:
         stations.append(
             _Station(
                 f"cable_{index}",
-                -(config.left_start + (index - 1) * config.left_spacing),
+                config.cable_station_x(index),
                 index,
                 "cable_station",
             )
@@ -626,6 +665,27 @@ def build_single_staged_3d(
                 )
             )
 
+    # The straight truss cable has no transverse member-load DOFs.  Represent
+    # each physical cable's gravity load by the consistent first-order lumping:
+    # half of rho*A*L*g at each end, introduced once when the cable is erected.
+    # This includes cable mass without introducing sag or geometric stiffness.
+    for cable in model.cables.values():
+        node_i = model.nodes[cable.i]
+        node_j = model.nodes[cable.j]
+        length = math.dist(node_i.xyz, node_j.xyz)
+        end_weight = (
+            -0.5 * cable.material.density * cable.area * length * config.gravity
+        )
+        for node_id in (cable.i, cable.j):
+            model.add_nodal_load(
+                NodalLoad3D(
+                    node=node_id,
+                    values=(0.0, 0.0, end_weight, 0.0, 0.0, 0.0),
+                    load_case="cable_self_weight",
+                    activation_stage=cable.activation_stage,
+                )
+            )
+
     # Tower base and the fully fixed right girder end provide global stability.
     # At x=0 the right end reuses the tower-axis girder nodes, avoiding a
     # duplicate station and zero-length members.  An optional left auxiliary
@@ -735,7 +795,8 @@ def build_single_staged_3d(
                     _steel_step(construction_stage),
                     f"{base}_steel_A",
                     (
-                        "activate steel girders and stays; apply cable pretension A"
+                        "activate steel girders and stays; apply cable self-weight "
+                        "and pretension A"
                         if has_cable
                         else "activate steel girders"
                     ),

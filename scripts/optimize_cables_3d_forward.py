@@ -159,6 +159,7 @@ def _control_from_payload(payload: dict) -> ForwardSubstageResult3D:
         stage_index=int(payload["stage_index"]),
         stage_label=str(payload["stage_label"]),
         displacement_basis=str(payload["displacement_basis"]),
+        target=_response_from_payload(payload["target"]),
         response_before=_response_from_payload(payload["response_before"]),
         predicted_response=_response_from_payload(payload["predicted_response"]),
         response_after=_response_from_payload(payload["response_after"]),
@@ -309,6 +310,18 @@ def _response_payload(response) -> dict:
     }
 
 
+def _response_residual(response, target) -> ForwardLocalResponse3D:
+    return ForwardLocalResponse3D(
+        tower_anchor_dx_m=(
+            response.tower_anchor_dx_m - target.tower_anchor_dx_m
+        ),
+        deck_anchor_relative_uz_m=(
+            response.deck_anchor_relative_uz_m
+            - target.deck_anchor_relative_uz_m
+        ),
+    )
+
+
 def _control_payload(control) -> dict:
     return {
         "stage": control.construction_stage,
@@ -316,13 +329,16 @@ def _control_payload(control) -> dict:
         "stage_index": control.stage_index,
         "stage_label": control.stage_label,
         "displacement_basis": control.displacement_basis,
-        "target": {
-            "tower_anchor_dx_mm": 0.0,
-            "deck_anchor_relative_uz_mm": 0.0,
-        },
+        "target": _response_payload(control.target),
         "response_before": _response_payload(control.response_before),
+        "residual_before": _response_payload(
+            _response_residual(control.response_before, control.target)
+        ),
         "predicted_response": _response_payload(control.predicted_response),
         "response_after": _response_payload(control.response_after),
+        "residual_after": _response_payload(
+            _response_residual(control.response_after, control.target)
+        ),
         "backstay_tension_N": control.backstay_tension_N,
         "main_stay_tension_N": control.main_stay_tension_N,
         "target_reached": control.target_reached,

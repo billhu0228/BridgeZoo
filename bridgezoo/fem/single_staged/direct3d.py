@@ -63,15 +63,15 @@ def _assert_same_structure_3d(reference: SingleStagedPlan3D, case: SingleStagedP
     for name in ("nodes", "frames", "rigid_links", "supports"):
         if getattr(reference_model, name) != getattr(case_model, name):
             raise ValueError(f"batched 3D plans differ in {name}")
-    if reference_model.nodal_loads != case_model.nodal_loads:
-        raise ValueError("batched 3D plans differ in nodal loads")
-    if reference_model.frame_loads != case_model.frame_loads:
-        raise ValueError("batched 3D plans differ in frame loads")
     if set(reference_model.cables) != set(case_model.cables):
         raise ValueError("batched 3D plans differ in cable ids")
     for cable_id, reference_cable in reference_model.cables.items():
         if _cable_structure(reference_cable) != _cable_structure(case_model.cables[cable_id]):
             raise ValueError(f"batched 3D plans differ in cable structure at {cable_id}")
+    if reference_model.nodal_loads != case_model.nodal_loads:
+        raise ValueError("batched 3D plans differ in nodal loads")
+    if reference_model.frame_loads != case_model.frame_loads:
+        raise ValueError("batched 3D plans differ in frame loads")
 
 
 class SingleStagedDirectBatchSolver3D:

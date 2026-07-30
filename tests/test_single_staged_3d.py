@@ -108,6 +108,34 @@ def test_3d_zero_right_fix_reuses_tower_axis_and_fully_fixes_both_girders():
     assert all(support.restraints == (True,) * 6 for support in fixed_girder_supports)
 
 
+def test_3d_pretension_b_target_points_are_normalized_and_interpolated():
+    config = SingleStaged3DConfig(
+        n_seg=10,
+        pretension_b_target_points=((0.0, 0.0), (-132.0, 0.01)),
+    )
+
+    assert config.pretension_b_target_points == ((-132.0, 0.01), (0.0, 0.0))
+    assert config.cable_station_x(10) == pytest.approx(-78.0)
+    assert config.pretension_b_target_uz_m(0.0) == pytest.approx(0.0)
+    assert config.pretension_b_target_uz_m(-66.0) == pytest.approx(0.005)
+    assert config.pretension_b_target_uz_m(-132.0) == pytest.approx(0.01)
+    assert config.pretension_b_target_uz_m(-200.0) == pytest.approx(0.01)
+    assert config.pretension_b_target_uz_m(20.0) == pytest.approx(0.0)
+
+    omo = load_single_staged_3d_config("omo3d")
+    assert omo.pretension_b_target_points == ((-132.0, 0.01), (0.0, 0.0))
+    omo_n10 = replace(omo, n_seg=10)
+    assert omo_n10.cable_station_x(10) == pytest.approx(-132.0)
+    assert omo_n10.pretension_b_target_uz_m(
+        omo_n10.cable_station_x(10)
+    ) == pytest.approx(0.01)
+
+    with pytest.raises(ValueError, match="must contain"):
+        replace(config, pretension_b_target_points=((0.0,),))
+    with pytest.raises(ValueError, match="must be unique"):
+        replace(config, pretension_b_target_points=((0.0, 0.0), (0.0, 0.01)))
+
+
 def test_legacy_3d_yaml_deck_load_is_migrated_without_inventing_line_load(tmp_path):
     source = resolve_bridge_config("omo3d")
     lines = [
@@ -240,6 +268,48 @@ def test_3d_builder_accepts_independent_backstay_and_main_stay_group_designs():
         assert {cable.pretension_b for cable in main_stays} == {
             main_tension * (1.0 - expected_ratios[1])
         }
+
+
+def test_3d_builder_lumps_each_physical_cable_self_weight_at_its_end_nodes():
+    plan = build_single_staged_3d(
+        n_seg=2,
+        left_span=None,
+        strands_per_cable=((10, 20), (30, 40)),
+        pretension_per_cable=0.0,
+    )
+    model = plan.model
+    loads = [
+        load for load in model.nodal_loads if load.load_case == "cable_self_weight"
+    ]
+
+    assert len(loads) == 2 * len(model.cables)
+    assert all(load.values[:2] == (0.0, 0.0) for load in loads)
+    assert all(load.values[3:] == (0.0, 0.0, 0.0) for load in loads)
+
+    actual_by_node_stage: dict[tuple[int, int], float] = {}
+    for load in loads:
+        key = (load.node, load.activation_stage)
+        actual_by_node_stage[key] = actual_by_node_stage.get(key, 0.0) + load.values[2]
+
+    expected_by_node_stage: dict[tuple[int, int], float] = {}
+    expected_total = 0.0
+    config = plan.metadata["config"]
+    for cable in model.cables.values():
+        length = np.linalg.norm(
+            np.asarray(model.nodes[cable.j].xyz) - np.asarray(model.nodes[cable.i].xyz)
+        )
+        end_weight = -0.5 * cable.material.density * cable.area * length * config.gravity
+        expected_total += 2.0 * end_weight
+        for node_id in (cable.i, cable.j):
+            key = (node_id, cable.activation_stage)
+            expected_by_node_stage[key] = expected_by_node_stage.get(key, 0.0) + end_weight
+
+    assert set(actual_by_node_stage) == set(expected_by_node_stage)
+    assert actual_by_node_stage == pytest.approx(expected_by_node_stage, rel=1.0e-12)
+    assert sum(load.values[2] for load in loads) == pytest.approx(
+        expected_total,
+        rel=1.0e-12,
+    )
 
 
 def test_detailed_3d_stage_commits_wet_deck_load_before_composite_activation():
@@ -939,6 +1009,11 @@ def test_3d_opensees_backend_matches_direct_linear_model():
     reference = SingleStagedOpenSeesSolver3D().run(plan).final
 
     assert direct.converged and reference.converged
+    assert reference.applied_load == pytest.approx(
+        direct.applied_load,
+        rel=1.0e-12,
+        abs=1.0e-6,
+    )
     beam_nodes = plan.metadata["beam_grid_node_ids"]
     for node_id in beam_nodes:
         assert reference.displacement[node_id] == pytest.approx(

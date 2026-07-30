@@ -85,6 +85,7 @@ class ForwardSubstageResult3D:
     stage_index: int
     stage_label: str
     displacement_basis: str
+    target: ForwardLocalResponse3D
     response_before: ForwardLocalResponse3D
     predicted_response: ForwardLocalResponse3D
     response_after: ForwardLocalResponse3D
@@ -324,6 +325,20 @@ class ForwardCableCycleOptimizer3D:
             deck_anchor_relative_uz_m=float(values[1]),
         )
 
+    def _target_response(
+        self,
+        construction_stage: int,
+        phase: str,
+    ) -> ForwardLocalResponse3D:
+        target_uz_m = 0.0
+        if phase == "B":
+            x_m = self.evaluator.config.cable_station_x(construction_stage)
+            target_uz_m = self.evaluator.config.pretension_b_target_uz_m(x_m)
+        return ForwardLocalResponse3D(
+            tower_anchor_dx_m=0.0,
+            deck_anchor_relative_uz_m=target_uz_m,
+        )
+
     def _probe_delta(self, value: float, upper: float) -> float:
         nominal = self.options.probe_fraction * upper
         if value + nominal <= upper:
@@ -377,6 +392,7 @@ class ForwardCableCycleOptimizer3D:
     ) -> tuple[ForwardSubstageResult3D, dict[int, float]]:
         if phase not in {"A", "B"}:
             raise ValueError("forward substage phase must be A or B")
+        target = self._target_response(construction_stage, phase)
         offset = 2 * (construction_stage - 1)
         target_values = pretension_a if phase == "A" else pretension_b
         other_values = pretension_b if phase == "A" else pretension_a
@@ -392,6 +408,7 @@ class ForwardCableCycleOptimizer3D:
         current = target_values[offset : offset + 2].copy()
         start_cases = self.total_fem_replays
         first_response = None
+        first_residual = None
         last_prediction = None
         last_rank = 0
         last_condition = math.inf
@@ -416,9 +433,11 @@ class ForwardCableCycleOptimizer3D:
             birth_uz_m = resolved_birth
             if first_response is None:
                 first_response = baseline
+                first_residual = self._as_response(baseline.vector - target.vector)
             accepted_response = baseline
             accepted_record = baseline_record
-            if baseline.max_abs_m <= self.options.displacement_tolerance_m:
+            baseline_residual = self._as_response(baseline.vector - target.vector)
+            if baseline_residual.max_abs_m <= self.options.displacement_tolerance_m:
                 target_values[offset : offset + 2] = current
                 last_prediction = baseline
                 break
@@ -448,13 +467,15 @@ class ForwardCableCycleOptimizer3D:
                 ) / delta
 
             candidate, last_rank, last_condition = self._bounded_candidate(
-                baseline.vector,
+                baseline_residual.vector,
                 influence,
                 current,
                 upper,
             )
-            intercept = baseline.vector - influence @ current
-            last_prediction = self._as_response(intercept + influence @ candidate)
+            residual_intercept = baseline_residual.vector - influence @ current
+            last_prediction = self._as_response(
+                target.vector + residual_intercept + influence @ candidate
+            )
             if np.allclose(candidate, current, rtol=0.0, atol=self._FORCE_EPS_N):
                 break
 
@@ -474,7 +495,11 @@ class ForwardCableCycleOptimizer3D:
             prediction_error = float(
                 np.max(np.abs(verified.vector - last_prediction.vector))
             )
-            if verified.norm_m > baseline.norm_m + self.options.linearity_tolerance_m:
+            verified_residual = self._as_response(verified.vector - target.vector)
+            if (
+                verified_residual.norm_m
+                > baseline_residual.norm_m + self.options.linearity_tolerance_m
+            ):
                 raise ForwardTuningError(
                     f"stage {construction_stage} {phase} correction worsened the "
                     "verified local displacement"
@@ -483,7 +508,8 @@ class ForwardCableCycleOptimizer3D:
             accepted_response = verified
             accepted_record = verified_record
             if (
-                verified.max_abs_m <= self.options.displacement_tolerance_m
+                verified_residual.max_abs_m
+                <= self.options.displacement_tolerance_m
                 or prediction_error <= self.options.linearity_tolerance_m
             ):
                 target_values[offset : offset + 2] = current
@@ -499,17 +525,19 @@ class ForwardCableCycleOptimizer3D:
             raise ForwardTuningError(
                 f"stage {construction_stage} {phase} produced no verified response"
             )
-        target_reached = (
-            final_response.max_abs_m <= self.options.displacement_tolerance_m
-        )
-        best_feasible = final_response.norm_m <= first_response.norm_m + (
+        final_residual = self._as_response(final_response.vector - target.vector)
+        target_reached = final_residual.max_abs_m <= self.options.displacement_tolerance_m
+        best_feasible = final_residual.norm_m <= first_residual.norm_m + (
             self.options.linearity_tolerance_m
         )
         if self.options.require_target and not target_reached:
             raise ForwardTuningError(
                 f"stage {construction_stage} {phase} did not reach the local "
-                f"displacement target: tower={final_response.tower_anchor_dx_m:.6g} m, "
-                f"deck={final_response.deck_anchor_relative_uz_m:.6g} m"
+                f"displacement target: actual tower="
+                f"{final_response.tower_anchor_dx_m:.6g} m, deck="
+                f"{final_response.deck_anchor_relative_uz_m:.6g} m; target tower="
+                f"{target.tower_anchor_dx_m:.6g} m, deck="
+                f"{target.deck_anchor_relative_uz_m:.6g} m"
             )
 
         active_bounds = []
@@ -531,6 +559,7 @@ class ForwardCableCycleOptimizer3D:
             stage_index=accepted_record.stage_index,
             stage_label=accepted_record.stage_label,
             displacement_basis=basis,
+            target=target,
             response_before=first_response,
             predicted_response=last_prediction,
             response_after=final_response,

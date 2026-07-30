@@ -111,10 +111,20 @@ def test_forward_cycle_tunes_A_then_wet_weight_B_and_locks_prior_groups():
     assert [item.stage_index for item in result.controls] == [1, 2, 4, 5]
     assert all(item.target_reached for item in result.controls)
     assert all(
-        item.response_after.max_abs_m
+        np.max(np.abs(item.response_after.vector - item.target.vector))
         <= optimizer.options.displacement_tolerance_m
         for item in result.controls
     )
+    for item in result.controls:
+        expected_uz_m = (
+            0.0
+            if item.phase == "A"
+            else config.pretension_b_target_uz_m(
+                config.cable_station_x(item.construction_stage)
+            )
+        )
+        assert item.target.tower_anchor_dx_m == pytest.approx(0.0)
+        assert item.target.deck_anchor_relative_uz_m == pytest.approx(expected_uz_m)
     assert all(
         "tangent-birth" in item.displacement_basis for item in result.controls
     )
@@ -239,6 +249,16 @@ def test_forward_cli_saves_verified_design_and_resumes_from_resized_counts(tmp_p
         item["FEM_replays_from_stage_1"] >= 4
         for item in design["forward_cycle"]["substage_controls"]
     )
+    controls = design["forward_cycle"]["substage_controls"]
+    assert controls[0]["target"]["deck_anchor_relative_uz_mm"] == pytest.approx(0.0)
+    assert controls[1]["target"]["deck_anchor_relative_uz_mm"] == pytest.approx(
+        1000.0 * 0.01 * 24.0 / 132.0
+    )
+    assert controls[1]["residual_after"]["max_abs_mm"] <= 0.1 + 1.0e-9
+    assert design["problem"]["bridge_config"]["pretension_b_target_points"] == [
+        [-132.0, 0.01],
+        [0.0, 0.0],
+    ]
     assert checkpoint["state"]["cycle_in_progress"] is False
 
     replay_config, _ = load_optimized_design_3d(
@@ -246,6 +266,16 @@ def test_forward_cli_saves_verified_design_and_resumes_from_resized_counts(tmp_p
         replace(load_single_staged_3d_config("omo3d"), n_seg=1),
     )
     assert replay_config.strands_per_cable == ((100, 100),)
+
+    legacy_design = json.loads(json.dumps(design))
+    legacy_design["problem"]["bridge_config"].pop("pretension_b_target_points")
+    legacy_path = out_dir / "legacy_best_design.json"
+    legacy_path.write_text(json.dumps(legacy_design), encoding="utf-8")
+    legacy_replay, _ = load_optimized_design_3d(
+        legacy_path,
+        replace(load_single_staged_3d_config("omo3d"), n_seg=1),
+    )
+    assert legacy_replay.strands_per_cable == ((100, 100),)
 
     assert forward_cli([*common, "--resume"]) == 0
     resumed_design = json.loads(

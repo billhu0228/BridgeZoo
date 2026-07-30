@@ -31,7 +31,7 @@ flexible_birth_correction_factor: 1.0
 main_girder_depth: 2.5
 main_girder_flange_width: 1.20
 main_girder_web_thickness: 0.020
-main_girder_flange_thickness: 0.040
+main_girder_flange_thickness: 0.050
 
 # Cross-girder welded H section.
 cross_girder_depth: 1.50
@@ -46,17 +46,17 @@ tower_wall_thickness: 1.20
 
 # Physical materials: E, Poisson ratio and mass density.
 steel_name: "Q345 structural steel"
-steel_E: 206.0e9
+steel_E: 1.9995e11
 steel_poisson: 0.30
-steel_density: 7850.0
+steel_density: 7861.0
 concrete_name: "OMO tower/deck concrete"
-concrete_E: 3.3238e10
+concrete_E: 2.8091e10
 concrete_poisson: 0.20
-concrete_density: 2500.0
+concrete_density: 2403.0
 cable_material_name: "parallel strand cable steel"
-cable_material_E: 1.95e11
+cable_material_E: 1.965e11
 cable_material_poisson: 0.30
-cable_material_density: 7850.0
+cable_material_density: 7861.0
 
 # Cable and permanent-load inputs.
 strand_area: 1.4e-4
@@ -65,9 +65,14 @@ pretension_per_cable: 6.0e6
 # Fraction applied as pretension A in substep 1; the remainder is B in substep 2.
 # Retain the calibrated legacy total entirely in A until an A/B schedule is supplied.
 pretension_a_ratio: 0.5
+# B-stage target for deck-anchor displacement relative to its tangent-birth
+# position: [design x (m), target uz (m)], positive z upward. Piecewise linear.
+pretension_b_target_points:
+  - [0.0, 0.0]
+  - [-132.0, 0.01]
 gravity: 9.806
 # Final-stage secondary loads. The railing/edge-facility value was not supplied,
 # so it remains explicit zero rather than silently changing the OMO load total.
-secondary_main_girder_line_load: 0.0
+secondary_main_girder_line_load: 1000.0
 # Existing first-round OMO deck pressure retained without changing its magnitude.
-secondary_deck_pressure: 1750.0
+secondary_deck_pressure: 877.9701492537314

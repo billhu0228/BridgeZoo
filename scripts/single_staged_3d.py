@@ -207,6 +207,11 @@ def load_optimized_design_3d(
     saved_config.pop("flexible_birth_correction_factor", None)
     current_config.pop("strands_per_cable", None)
     current_config.pop("pretension_per_cable", None)
+    # This curve is an optimizer target, not a physical FEM input.  Fixed-force
+    # replay remains valid if the current YAML uses a different target or if a
+    # legacy design predates the field.
+    current_config.pop("pretension_b_target_points", None)
+    saved_config.pop("pretension_b_target_points", None)
     if schema in {
         "bridgezoo.cable_optimization_3d.v2",
         "bridgezoo.cable_optimization_3d.v3",
