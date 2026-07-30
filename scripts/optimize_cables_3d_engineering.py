@@ -1,4 +1,4 @@
-"""Restartable two-round engineering feedback cycles for the OMO 3D bridge.
+"""Restartable three-round engineering feedback cycles for the OMO 3D bridge.
 
 首次运行（最终 secondary_load 主梁/桥塔位移目标均为0、连续2轮）：python -m scripts.optimize_cables_3d_engineering --bridge omo3d --cycles 2 --out results/cable_opt_3d_engineering
 中断后续算2轮：python -m scripts.optimize_cables_3d_engineering --bridge omo3d --cycles 2 --resume --out results/cable_opt_3d_engineering
@@ -29,7 +29,7 @@ from scripts.bridge_config import load_single_staged_3d_config, resolve_bridge_c
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-_CHECKPOINT_SCHEMA = "bridgezoo.engineering_cable_cycle_3d.v11"
+_CHECKPOINT_SCHEMA = "bridgezoo.engineering_cable_cycle_3d.v13"
 _LEGACY_CHECKPOINT_SCHEMAS = {
     "bridgezoo.engineering_cable_cycle_3d.v4",
     "bridgezoo.engineering_cable_cycle_3d.v5",
@@ -38,6 +38,8 @@ _LEGACY_CHECKPOINT_SCHEMAS = {
     "bridgezoo.engineering_cable_cycle_3d.v8",
     "bridgezoo.engineering_cable_cycle_3d.v9",
     "bridgezoo.engineering_cable_cycle_3d.v10",
+    "bridgezoo.engineering_cable_cycle_3d.v11",
+    "bridgezoo.engineering_cable_cycle_3d.v12",
 }
 _DESIGN_SCHEMA = "bridgezoo.cable_optimization_3d.v3"
 
@@ -118,6 +120,12 @@ class _EngineeringProgressDisplay:
             return "      — /       —"
         return f"{first:7.1f} / {second:7.1f}"
 
+    @staticmethod
+    def _mn_pair(first: float | None, second: float | None) -> str:
+        if first is None or second is None:
+            return "      — /       —"
+        return f"{first:7.3f} / {second:7.3f}"
+
     def _overall_fraction(self, event: EngineeringProgress3D) -> float:
         within = event.fem_cases_completed / max(1, event.fem_cases_total)
         completed_before = event.cycle_index - self.first_cycle
@@ -144,6 +152,7 @@ class _EngineeringProgressDisplay:
         if (
             event.tension_update_accepted is not None
             or event.strand_update_accepted is not None
+            or event.repair_update_accepted is not None
         ):
             tension_decision = (
                 "—"
@@ -155,7 +164,15 @@ class _EngineeringProgressDisplay:
                 if event.strand_update_accepted is None
                 else ("接受" if event.strand_update_accepted else "保留")
             )
-            decision = f"索力{tension_decision}/根数{strand_decision}"
+            repair_decision = (
+                "—"
+                if event.repair_update_accepted is None
+                else ("接受" if event.repair_update_accepted else "保留")
+            )
+            decision = (
+                f"索力{tension_decision}/根数{strand_decision}/"
+                f"修复{repair_decision}"
+            )
         step_min = event.step_scale if event.step_scale_min is None else event.step_scale_min
         step_max = event.step_scale if event.step_scale_max is None else event.step_scale_max
         elapsed = self.clock() - self.started
@@ -166,7 +183,7 @@ class _EngineeringProgressDisplay:
         )
         lines = [
             (
-                "3D 工程调索（索力轮 → 根数轮）  "
+                "3D 工程调索（索力轮 → 根数轮 → 线形修复轮）  "
                 f"cycle {event.cycle_index}/{self.last_cycle}  "
                 f"FEM {event.fem_cases_completed}/{event.fem_cases_total}"
             ),
@@ -181,15 +198,16 @@ class _EngineeringProgressDisplay:
                 f"最终应力≈{self.target_stress_mpa:.1f} MPa。A仅校核激活切线零位移。"
             ),
             "",
-            "组   根数(背/中)       梁端 z [mm] A激活 / 最终 / 目标       塔端 x [mm] A激活 / 最终       最终应力 [MPa] 背 / 中",
-            "──   ──────────       ───────────────────────────────       ───────────────────────       ─────────────────────",
+            "组   根数(背/中)   A+B索力 [MN] 背 / 中   梁端 z [mm] A激活 / 最终 / 目标   塔端 x [mm] A激活 / 最终   最终应力 [MPa] 背 / 中",
+            "──   ──────────   ────────────────────   ───────────────────────────────   ───────────────────────   ─────────────────────",
         ]
         for row in event.stage_status:
             lines.append(
                 f"{row.construction_stage:02d}   "
-                f"{row.backstay_strands:4d}/{row.main_stay_strands:<4d}       "
-                f"{self._deck_values(row.stage_a_deck_uz_m, row.final_deck_uz_m, row.target_final_deck_uz_m)}       "
-                f"{self._pair(row.stage_a_tower_dx_m, row.final_tower_dx_m)}       "
+                f"{row.backstay_strands:4d}/{row.main_stay_strands:<4d}   "
+                f"{self._mn_pair(row.backstay_total_tension_mn, row.main_stay_total_tension_mn)}   "
+                f"{self._deck_values(row.stage_a_deck_uz_m, row.final_deck_uz_m, row.target_final_deck_uz_m)}   "
+                f"{self._pair(row.stage_a_tower_dx_m, row.final_tower_dx_m)}   "
                 f"{self._stress_pair(row.backstay_final_stress_mpa, row.main_stay_final_stress_mpa)}"
             )
         source = "fresh run" if self.resumed_from is None else f"resume {self.resumed_from}"
@@ -308,7 +326,8 @@ def _problem_metadata(problem: CableOptimizationProblem, config) -> dict:
                 "backend": problem.backend,
                 "optimizer_architecture": (
                     "restartable_final_state_stress_priority_independent_count_"
-                    "feedback_without_influence_matrices"
+                    "feedback_with_main_stay_b_shape_repair_without_"
+                    "influence_matrices"
                 ),
                 "strand_area": problem.strand_area,
                 "grouping": (
@@ -363,7 +382,10 @@ def _load_resume(
         raise ValueError("cannot resume: bridge model or bounds differ")
     saved_settings = dict(payload.get("settings", {}))
     current_settings = dict(settings)
-    if schema in _LEGACY_CHECKPOINT_SCHEMAS:
+    if schema in _LEGACY_CHECKPOINT_SCHEMAS and schema not in {
+        "bridgezoo.engineering_cable_cycle_3d.v11",
+        "bridgezoo.engineering_cable_cycle_3d.v12",
+    }:
         # Older schemas used construction-stage B displacement/stress and a
         # configurable camber target.  Preserve their verified design vectors,
         # discard those obsolete target settings, and continue using the final
@@ -490,7 +512,9 @@ def _design_payload(
                 "A controls activation tangent displacement; B controls final "
                 "secondary-load deck/tower displacement; round 2 adjusts independent "
                 "strand counts from final cable stress and gives the 500 MPa target "
-                "priority over temporary displacement disturbance"
+                "priority over temporary displacement disturbance; round 3 freezes "
+                "A/counts/backstay B and repairs maximum final deck displacement "
+                "with main-stay B only"
             ),
             "coordinate_sign": "+z is upward; +x follows the bridge model",
             "update_method": (
@@ -498,7 +522,11 @@ def _design_payload(
                 "A/B memory per cable group and one FEM-verified worst-control "
                 "isolated retry after a rejected full proposal, followed by bounded "
                 "proportional sizing with independent counts and adaptive memory per "
-                "cable group; no strand curve and no influence matrix"
+                "cable group; negative final stress forces a one-third count "
+                "reduction outside the ordinary relaxation/change cap but inside "
+                "hard capacity bounds; a final main-stay-B-only candidate is accepted "
+                "only when max(abs(final deck z)) falls, with one verified worst-deck "
+                "group retry; no strand curve and no influence matrix"
             ),
             "model_limit_warning": (
                 "current model is linear small-displacement; the final-state zero "
@@ -515,6 +543,9 @@ def _design_payload(
             "FEM_seconds": result.fem_seconds,
             "local_balance_score_before": result.local_score_before,
             "local_balance_score_after_tension": result.local_score_after_tension,
+            "local_balance_score_after_strand_round": (
+                result.local_score_after_strand
+            ),
             "local_balance_score_after": result.local_score_after,
             "tension_proposal_local_balance_score": result.proposal_local_score,
             "tension_first_proposal_local_balance_score": (
@@ -529,9 +560,44 @@ def _design_payload(
             ),
             "strand_update_attempted": result.strand_update_attempted,
             "strand_update_accepted": result.strand_update_accepted,
+            "compression_strand_reduction_attempted": (
+                result.compression_strand_reduction_attempted
+            ),
+            "compression_strand_reduction_accepted": (
+                result.compression_strand_reduction_accepted
+            ),
+            "compression_strand_reduction_groups": [
+                evaluation.cable_ids[index]
+                for index in np.flatnonzero(
+                    result.compression_strand_reduction_mask
+                )
+            ],
             "strand_stress_score_before": result.strand_score_before,
             "strand_proposal_stress_score": result.strand_proposal_score,
+            "strand_round_stress_score_after": (
+                result.strand_round_score_after
+            ),
             "strand_stress_score_after": result.strand_score_after,
+            "shape_repair_max_abs_deck_mm_before": (
+                result.repair_max_deck_before_m * 1000.0
+            ),
+            "shape_repair_first_proposal_max_abs_deck_mm": (
+                result.repair_first_proposal_max_deck_m * 1000.0
+            ),
+            "shape_repair_proposal_max_abs_deck_mm": (
+                result.repair_proposal_max_deck_m * 1000.0
+            ),
+            "shape_repair_max_abs_deck_mm_after": (
+                result.repair_max_deck_after_m * 1000.0
+            ),
+            "shape_repair_update_attempted": result.repair_update_attempted,
+            "shape_repair_update_accepted": result.repair_update_accepted,
+            "shape_repair_partial_retry_attempted": (
+                result.repair_partial_retry_attempted
+            ),
+            "shape_repair_partial_retry_accepted": (
+                result.repair_partial_retry_accepted
+            ),
             # Compatibility fields used by earlier result readers.
             "proposal_local_balance_score": result.proposal_local_score,
             "update_accepted": result.update_accepted,
@@ -559,6 +625,9 @@ def _design_payload(
             "final_stress_before_sizing_MPa": (
                 result.stress_before_sizing_mpa.tolist()
             ),
+            "final_stress_after_strand_round_MPa": (
+                result.stress_after_strand_round_mpa.tolist()
+            ),
             "final_stress_after_sizing_MPa": (
                 result.stress_after_sizing_mpa.tolist()
             ),
@@ -566,7 +635,7 @@ def _design_payload(
                 "family": "independent-per-group",
                 "outward_non_decreasing": False,
                 "stress_priority": True,
-                "displacement_rebalanced_next_cycle": True,
+                "displacement_repaired_same_cycle": True,
             },
             "substage_controls": [
                 {
@@ -591,6 +660,9 @@ def _design_payload(
                         control.response_after_tension
                     ),
                     "response_after_sizing": _response_payload(
+                        control.response_after
+                    ),
+                    "response_after_shape_repair": _response_payload(
                         control.response_after
                     ),
                     # Compatibility key: always the final saved design response.
@@ -619,6 +691,7 @@ def _design_payload(
                 "pretension_a_ratio": float(ratios[index]),
                 "pretension_A_per_physical_cable_N": float(result.pretension_a[index]),
                 "pretension_B_per_physical_cable_N": float(result.pretension_b[index]),
+                "pretension_A_plus_B_MN": float(total[index] / 1.0e6),
                 "next_tension_step_A_MPa": float(
                     nominal_step_mpa * result.next_tension_step_scales[0, index]
                 ),
@@ -738,7 +811,7 @@ def _write_cycle_outputs(
     )
     next_step_mpa = nominal_step_mpa * result.next_tension_step_scales
     lines = [
-        "algorithm: final-state stress-priority independent-count feedback (no influence matrix)",
+        "algorithm: final-state stress-priority independent-count feedback plus main-stay-B shape repair (no influence matrix)",
         f"completed cycle: {result.cycle_index}",
         "final secondary_load target: deck z=0.000 mm, tower-anchor x=0.000 mm",
         "activation A target: tangent-relative deck z=0.000 mm, tower-anchor x=0.000 mm",
@@ -746,18 +819,30 @@ def _write_cycle_outputs(
             f"local balance score: {result.local_score_before:.6g} -> "
             f"{result.local_score_after:.6g} ({improvement:+.3f}%)"
         ),
-        "strand round may disturb displacement; the next tension round rebalances it",
+        "strand round may disturb displacement; the same cycle then runs a main-stay-B-only shape repair",
+        (
+            "negative-final-stress forced one-third strand reduction: "
+            f"{'accepted' if result.compression_strand_reduction_accepted else ('attempted' if result.compression_strand_reduction_attempted else 'not needed')}"
+        ),
         (
             f"tension round: {'accepted' if result.tension_update_accepted else 'kept'}, "
             f"score={result.proposal_local_score:.6g}; partial retry="
             f"{'accepted' if result.tension_partial_retry_accepted else ('rejected' if result.tension_partial_retry_attempted else 'not needed')}; "
             f"strand round: "
             f"{'accepted' if result.strand_update_accepted else 'kept'}, "
-            f"stress_score={result.strand_score_after:.6g}; "
+            f"round_stress_score={result.strand_round_score_after:.6g}, "
+            f"final_stress_score={result.strand_score_after:.6g}; "
             f"next independent step={np.min(next_step_mpa):.3f}.."
             f"{np.max(next_step_mpa):.3f} MPa; next strand scale="
             f"{np.min(result.next_strand_step_scales):.3f}.."
             f"{np.max(result.next_strand_step_scales):.3f}"
+        ),
+        (
+            "final-shape repair: "
+            f"{'accepted' if result.repair_update_accepted else ('rejected' if result.repair_update_attempted else 'not needed')}; "
+            f"max |deck z|={result.repair_max_deck_before_m * 1000.0:.3f} -> "
+            f"{result.repair_max_deck_after_m * 1000.0:.3f} mm; partial retry="
+            f"{'accepted' if result.repair_partial_retry_accepted else ('rejected' if result.repair_partial_retry_attempted else 'not needed')}"
         ),
         (
             "final secondary_load stress MPa: "
@@ -925,6 +1010,9 @@ def run(args):
                     "local_balance_score_after_tension": (
                         latest.local_score_after_tension
                     ),
+                    "local_balance_score_after_strand_round": (
+                        latest.local_score_after_strand
+                    ),
                     "local_balance_score_after": latest.local_score_after,
                     "local_improvement_percent": improvement,
                     "proposal_local_balance_score": latest.proposal_local_score,
@@ -941,9 +1029,48 @@ def run(args):
                     ),
                     "strand_update_attempted": latest.strand_update_attempted,
                     "strand_update_accepted": latest.strand_update_accepted,
+                    "compression_strand_reduction_attempted": (
+                        latest.compression_strand_reduction_attempted
+                    ),
+                    "compression_strand_reduction_accepted": (
+                        latest.compression_strand_reduction_accepted
+                    ),
+                    "compression_strand_reduction_groups": ";".join(
+                        str(evaluation.cable_ids[index])
+                        for index in np.flatnonzero(
+                            latest.compression_strand_reduction_mask
+                        )
+                    ),
                     "strand_stress_score_before": latest.strand_score_before,
                     "strand_proposal_stress_score": latest.strand_proposal_score,
+                    "strand_round_stress_score_after": (
+                        latest.strand_round_score_after
+                    ),
                     "strand_stress_score_after": latest.strand_score_after,
+                    "shape_repair_max_abs_deck_mm_before": (
+                        latest.repair_max_deck_before_m * 1000.0
+                    ),
+                    "shape_repair_first_proposal_max_abs_deck_mm": (
+                        latest.repair_first_proposal_max_deck_m * 1000.0
+                    ),
+                    "shape_repair_proposal_max_abs_deck_mm": (
+                        latest.repair_proposal_max_deck_m * 1000.0
+                    ),
+                    "shape_repair_max_abs_deck_mm_after": (
+                        latest.repair_max_deck_after_m * 1000.0
+                    ),
+                    "shape_repair_update_attempted": (
+                        latest.repair_update_attempted
+                    ),
+                    "shape_repair_update_accepted": (
+                        latest.repair_update_accepted
+                    ),
+                    "shape_repair_partial_retry_attempted": (
+                        latest.repair_partial_retry_attempted
+                    ),
+                    "shape_repair_partial_retry_accepted": (
+                        latest.repair_partial_retry_accepted
+                    ),
                     "feedback_step_scale_used": latest.step_scale_used,
                     "feedback_step_scale_next": latest.next_step_scale,
                     "feedback_step_scale_min_next": float(
@@ -994,8 +1121,8 @@ def run(args):
 def build_parser(config) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Run restartable tension-only then strand-only engineering cycles "
-            "without per-stage influence matrices."
+            "Run restartable tension, strand, and final-shape-repair engineering "
+            "cycles without per-stage influence matrices."
         ),
         epilog=(
             "首次运行（最终 secondary_load 主梁/桥塔位移目标均为0、连续2轮）：\n"

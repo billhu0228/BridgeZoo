@@ -13,7 +13,7 @@ left_end: 6.0
 right_start: 24.0
 right_spacing: 1.0
 right_end: 1.0
-right_fix: 0.2
+right_fix: 0.0
 left_span: 40.0
 
 # Transverse grillage and eccentric deck-slab reference plane.

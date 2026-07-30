@@ -8,7 +8,8 @@ Examples
 
 ``python -m scripts.single_staged_3d --bridge omo3d --backend opensees --render both --dxf``
 
-  python -m scripts.single_staged_3d --bridge omo3d --design results/cable_opt_3d_engineering/best_design.json
+  python -m scripts.single_staged_3d --bridge omo3d --design results/cable_opt_3d_forward/best_design.json \
+  --render text
 
 """
 
@@ -20,6 +21,8 @@ import math
 from collections.abc import Mapping
 from dataclasses import asdict, replace
 from pathlib import Path
+
+import numpy as np
 
 from bridgezoo.fem.single_staged import (
     SingleStaged3DConfig,
@@ -68,6 +71,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         choices=("none", "plot", "text", "both"),
         default="both",
         help="plot writes staged 3D images, text prints the summary, both does both",
+    )
+    parser.add_argument(
+        "--text-all-stages",
+        action="store_true",
+        help="with text/both, print control-point displacement for every analysis stage",
+    )
+    parser.add_argument(
+        "--text-dir",
+        type=Path,
+        help="directory for all-stage main-girder total and stage-delta TXT files",
     )
     parser.add_argument("--out", type=Path, default=Path("results/single_staged_3d.gif"))
     parser.add_argument(
@@ -356,22 +369,189 @@ def load_optimized_design_3d(
     return applied, metadata
 
 
+def _position_payload(values) -> dict[str, float]:
+    return {
+        "x": float(values[0]),
+        "y": float(values[1]),
+        "z": float(values[2]),
+    }
+
+
+def _deformation_payload(values) -> dict[str, dict[str, float]]:
+    return {
+        "translation_m": {
+            "ux": float(values[0]),
+            "uy": float(values[1]),
+            "uz": float(values[2]),
+        },
+        "rotation_rad": {
+            "rx": float(values[3]),
+            "ry": float(values[4]),
+            "rz": float(values[5]),
+        },
+    }
+
+
+def _stage_deformation_payloads(plan, result) -> dict[int, dict[str, object]]:
+    """Build explicit MIDAS-oriented activation/increment/total histories."""
+
+    model = plan.model
+    activation: dict[int, dict[str, object]] = {}
+    previous_displacement: dict[int, np.ndarray] = {}
+    by_stage: dict[int, dict[str, object]] = {}
+    for record in result.records:
+        for node_id, values in record.birth_displacement.items():
+            if node_id in activation:
+                raise RuntimeError(f"3D node {node_id} has multiple activation records")
+            node = model.nodes[node_id]
+            reference = np.asarray(values, dtype=float)
+            design_position = np.asarray(node.xyz, dtype=float)
+            activation[node_id] = {
+                "model_stage_index": node.activation_stage,
+                "analysis_stage_index": record.stage_index,
+                "analysis_stage_label": record.stage_label,
+                "reference": reference,
+                "position": design_position + reference[:3],
+            }
+
+        nodes = []
+        for node_id in sorted(record.displacement):
+            if node_id not in activation:
+                raise RuntimeError(
+                    f"3D node {node_id} is active without an activation reference"
+                )
+            node = model.nodes[node_id]
+            total = np.asarray(record.displacement[node_id], dtype=float)
+            reference = np.asarray(activation[node_id]["reference"], dtype=float)
+            previous = previous_displacement.get(node_id, reference)
+            step = total - previous
+            design_position = np.asarray(node.xyz, dtype=float)
+            nodes.append(
+                {
+                    "node_id": node_id,
+                    "role": node.role,
+                    "design_position_m": _position_payload(design_position),
+                    "activation": {
+                        "model_stage_index": activation[node_id][
+                            "model_stage_index"
+                        ],
+                        "analysis_stage_index": activation[node_id][
+                            "analysis_stage_index"
+                        ],
+                        "analysis_stage_label": activation[node_id][
+                            "analysis_stage_label"
+                        ],
+                        "position_m": _position_payload(
+                            activation[node_id]["position"]
+                        ),
+                        "reference_deformation": _deformation_payload(reference),
+                    },
+                    "step_deformation": _deformation_payload(step),
+                    "actual_total_deformation": _deformation_payload(total),
+                    "actual_position_m": _position_payload(
+                        design_position + total[:3]
+                    ),
+                }
+            )
+        previous_displacement = {
+            node_id: np.asarray(values, dtype=float).copy()
+            for node_id, values in record.displacement.items()
+        }
+        by_stage[record.stage_index] = {
+            "node_count": len(nodes),
+            "nodes": nodes,
+        }
+    return by_stage
+
+
+def _main_girder_controls_by_construction_stage(
+    plan,
+) -> dict[int, tuple[int, ...]]:
+    """Return the two current girder control nodes for each erection group."""
+
+    model = plan.model
+    controls: dict[int, tuple[int, ...]] = {}
+    for construction_stage in sorted(
+        {
+            stage.construction_stage
+            for stage in plan.stages
+            if stage.phase != "secondary_load"
+        }
+    ):
+        cable_nodes = {
+            cable.j
+            for cable in model.cables.values()
+            if cable.group == "main_stay"
+            and cable.construction_stage == construction_stage
+        }
+        if cable_nodes:
+            controls[construction_stage] = tuple(sorted(cable_nodes))
+            continue
+
+        steel_stage = next(
+            stage.index
+            for stage in plan.stages
+            if stage.construction_stage == construction_stage
+            and stage.phase == "steel_and_A"
+        )
+        new_girder_nodes = [
+            node
+            for node in model.nodes.values()
+            if node.role.startswith("main_girder")
+            and node.activation_stage == steel_stage
+        ]
+        if not new_girder_nodes:
+            controls[construction_stage] = ()
+            continue
+        control_x = min(node.x for node in new_girder_nodes)
+        controls[construction_stage] = tuple(
+            sorted(
+                node.id
+                for node in new_girder_nodes
+                if math.isclose(node.x, control_x, abs_tol=1.0e-10)
+            )
+        )
+    return controls
+
+
 def _result_payload(config, plan, result) -> dict[str, object]:
     model = plan.model
     final = result.final
+    deformation_by_stage = _stage_deformation_payloads(plan, result)
+    stage_definition = {stage.index: stage for stage in plan.stages}
+    controls_by_construction = _main_girder_controls_by_construction_stage(plan)
+    all_control_nodes = tuple(
+        sorted(
+            {
+                node_id
+                for node_ids in controls_by_construction.values()
+                for node_id in node_ids
+            }
+        )
+    )
     stages = []
     for record in result.records:
+        definition = stage_definition[record.stage_index]
+        control_nodes = (
+            all_control_nodes
+            if definition.phase == "secondary_load"
+            else controls_by_construction.get(definition.construction_stage, ())
+        )
         translations = [values[:3] for values in record.displacement.values()]
         stages.append(
             {
                 "index": record.stage_index,
                 "label": record.stage_label,
+                "construction_stage": definition.construction_stage,
+                "phase": definition.phase,
+                "main_girder_control_node_ids": list(control_nodes),
                 "converged": record.converged,
                 "node_count": len(record.displacement),
                 "max_abs_translation_m": max(
                     abs(component) for vector in translations for component in vector
                 ),
                 "applied_load_N": record.applied_load,
+                "deformation": deformation_by_stage[record.stage_index],
             }
         )
     return {
@@ -387,6 +567,30 @@ def _result_payload(config, plan, result) -> dict[str, object]:
             "supports": len(model.supports),
             "coordinate_system": plan.metadata["coordinate_system"],
             "analysis_scope": plan.metadata["analysis_scope"],
+        },
+        "deformation_convention": {
+            "coordinate_system": "x longitudinal, y transverse, z vertical",
+            "translation_unit": "m",
+            "rotation_unit": "rad",
+            "activation_position_m": (
+                "design_position plus the stress-free tangent-birth translation"
+            ),
+            "activation_reference_deformation": (
+                "stress-free tangent-birth displacement and rotation relative "
+                "to the design model"
+            ),
+            "step_deformation": (
+                "actual total deformation at this stage minus the preceding "
+                "analysis stage; for a newly activated node, minus its "
+                "activation reference deformation"
+            ),
+            "actual_total_deformation": (
+                "cumulative deformation relative to the design model after "
+                "this analysis stage"
+            ),
+            "actual_position_m": (
+                "design position plus actual total translation after this stage"
+            ),
         },
         "stages": stages,
         "final": {
@@ -405,7 +609,104 @@ def _result_payload(config, plan, result) -> dict[str, object]:
     }
 
 
-def _text_summary(plan, result, design_metadata=None) -> str:
+def _main_girder_deformation_table(
+    stage: Mapping[str, object],
+    deformation_field: str,
+) -> str:
+    deformation = stage["deformation"]
+    control_node_ids = set(stage["main_girder_control_node_ids"])
+    nodes = [
+        node
+        for node in deformation["nodes"]
+        if node["node_id"] in control_node_ids
+    ]
+    description = {
+        "actual_total_deformation": "实际总变形（相对设计模型）",
+        "step_deformation": "本阶段增量变形 delta（仅计本分析阶段）",
+    }[deformation_field]
+    lines = [
+        f"# stage_index={stage['index']}",
+        f"# stage_label={stage['label']}",
+        f"# result={description}",
+        "# coordinates: design x/y/z in m",
+        "# displacement: ux/uy/uz in mm; rotation: rx/ry/rz in rad",
+        "node_id role x_m y_m z_m ux_mm uy_mm uz_mm rx_rad ry_rad rz_rad",
+    ]
+    for node in nodes:
+        position = node["design_position_m"]
+        values = node[deformation_field]
+        translation = values["translation_m"]
+        rotation = values["rotation_rad"]
+        lines.append(
+            f"{node['node_id']} {node['role']} "
+            f"{position['x']:+.6f} {position['y']:+.6f} {position['z']:+.6f} "
+            f"{translation['ux'] * 1000.0:+.9f} "
+            f"{translation['uy'] * 1000.0:+.9f} "
+            f"{translation['uz'] * 1000.0:+.9f} "
+            f"{rotation['rx']:+.12e} {rotation['ry']:+.12e} "
+            f"{rotation['rz']:+.12e}"
+        )
+    return "\n".join(lines) + "\n"
+
+
+def _write_main_girder_deformation_texts(
+    payload: Mapping[str, object],
+    output_dir: Path,
+) -> dict[str, tuple[Path, ...]]:
+    """Write all-stage main-girder total and incremental deformation tables."""
+
+    categories = {
+        "actual_total": "actual_total_deformation",
+        "stage_delta": "step_deformation",
+    }
+    written: dict[str, tuple[Path, ...]] = {}
+    for category, field in categories.items():
+        category_dir = output_dir / f"main_girder_{category}"
+        category_dir.mkdir(parents=True, exist_ok=True)
+        paths = []
+        for stage in payload["stages"]:
+            label = "".join(
+                character if character.isalnum() or character in {"-", "_"} else "_"
+                for character in str(stage["label"])
+            )
+            path = category_dir / f"stage_{stage['index']:03d}_{label}.txt"
+            path.write_text(
+                _main_girder_deformation_table(stage, field),
+                encoding="utf-8",
+            )
+            paths.append(path)
+        written[category] = tuple(paths)
+
+    summary_path = output_dir / "main_girder_z_summary.txt"
+    summary_lines = [
+        "# 全阶段主梁节点竖向变形汇总",
+        "# delta_uz_mm: 仅由本分析阶段产生的竖向增量",
+        "# actual_total_uz_mm: 相对设计模型的真实竖向总变形",
+        "stage_index stage_label node_id delta_uz_mm actual_total_uz_mm",
+    ]
+    for stage in payload["stages"]:
+        control_node_ids = set(stage["main_girder_control_node_ids"])
+        for node in stage["deformation"]["nodes"]:
+            if node["node_id"] not in control_node_ids:
+                continue
+            delta_uz = node["step_deformation"]["translation_m"]["uz"]
+            total_uz = node["actual_total_deformation"]["translation_m"]["uz"]
+            summary_lines.append(
+                f"{stage['index']} {stage['label']} {node['node_id']} "
+                f"{delta_uz * 1000.0:+.9f} {total_uz * 1000.0:+.9f}"
+            )
+    summary_path.write_text("\n".join(summary_lines) + "\n", encoding="utf-8")
+    written["z_summary"] = (summary_path,)
+    return written
+
+
+def _text_summary(
+    plan,
+    result,
+    design_metadata=None,
+    *,
+    all_stages: bool = False,
+) -> str:
     """Build the console report for ``--render text`` and ``both``."""
 
     model = plan.model
@@ -435,33 +736,41 @@ def _text_summary(plan, result, design_metadata=None) -> str:
         )
     )
 
-    main_stay_nodes: dict[int, set[int]] = {}
-    for cable in model.cables.values():
-        if cable.group == "main_stay":
-            main_stay_nodes.setdefault(cable.construction_stage, set()).add(
-                cable.j
-            )
-    control_points = [
-        (stage, tuple(sorted(node_ids, key=lambda node_id: model.nodes[node_id].y)))
-        for stage, node_ids in sorted(main_stay_nodes.items())
-    ]
-    recent_records = result.records[-3:]
-    lines.append(
-        "主梁控制点位移（横桥向两个主梁锚点平均，单位 mm；"
-        f"最后{len(recent_records)}个分析阶段）"
+    controls_by_construction = _main_girder_controls_by_construction_stage(plan)
+    stage_definition = {stage.index: stage for stage in plan.stages}
+    displayed_records = result.records if all_stages else result.records[-3:]
+    stage_scope = (
+        f"全部{len(displayed_records)}个分析阶段"
+        if all_stages
+        else f"最后{len(displayed_records)}个分析阶段"
     )
-    for record in recent_records:
+    lines.append(
+        "主梁控制点位移（当前施工组横桥向控制节点平均，单位 mm；"
+        f"{stage_scope}）"
+    )
+    for record in displayed_records:
         lines.append(f"阶段 {record.stage_index}: {record.stage_label}")
-        for construction_stage, node_ids in control_points:
+        definition = stage_definition[record.stage_index]
+        control_points = (
+            sorted(controls_by_construction.items())
+            if definition.phase == "secondary_load"
+            else [
+                (
+                    definition.construction_stage,
+                    controls_by_construction.get(definition.construction_stage, ()),
+                )
+            ]
+        )
+        for construction_stage, raw_node_ids in control_points:
+            node_ids = tuple(
+                sorted(raw_node_ids, key=lambda node_id: model.nodes[node_id].y)
+            )
             active = [
                 record.displacement[node_id]
                 for node_id in node_ids
                 if node_id in record.displacement
             ]
             if not active:
-                lines.append(
-                    f"  梁点 S{construction_stage:02d} nodes={node_ids}: 未激活"
-                )
                 continue
             mean = tuple(
                 1000.0 * sum(values[index] for values in active) / len(active)
@@ -546,7 +855,26 @@ def main(argv: list[str] | None = None) -> int:
     if design_metadata is not None:
         payload["optimized_design"] = design_metadata
     if args.render in {"text", "both"}:
-        print(_text_summary(plan, result, design_metadata))
+        print(
+            _text_summary(
+                plan,
+                result,
+                design_metadata,
+                all_stages=args.text_all_stages,
+            )
+        )
+        default_text_dir = args.out.with_name(f"{args.out.stem}_text")
+        text_dir = _project_output_path(args.text_dir or default_text_dir)
+        text_artifacts = _write_main_girder_deformation_texts(payload, text_dir)
+        print(
+            f"text_actual_total={len(text_artifacts['actual_total'])} files in "
+            f"{text_dir / 'main_girder_actual_total'}"
+        )
+        print(
+            f"text_stage_delta={len(text_artifacts['stage_delta'])} files in "
+            f"{text_dir / 'main_girder_stage_delta'}"
+        )
+        print(f"text_z_summary={text_artifacts['z_summary'][0]}")
     if args.output is not None:
         output_path = _project_output_path(args.output)
         output_path.parent.mkdir(parents=True, exist_ok=True)

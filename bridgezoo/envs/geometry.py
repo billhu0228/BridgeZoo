@@ -204,7 +204,6 @@ class SingleTowerGeometry3D:
             "right_start": self.right_start,
             "right_spacing": self.right_spacing,
             "right_end": self.right_end,
-            "right_fix": self.resolved_right_fix,
             "girder_spacing": self.girder_spacing,
             "cross_girder_spacing": self.cross_girder_spacing,
             "deck_width": self.deck_width,
@@ -230,6 +229,8 @@ class SingleTowerGeometry3D:
         ]
         if invalid:
             raise ValueError(f"positive finite values required for: {', '.join(invalid)}")
+        if not np.isfinite(self.resolved_right_fix) or self.resolved_right_fix < 0.0:
+            raise ValueError("right_fix must be finite and nonnegative")
         if self.anchor_top_free < 0.0 or not np.isfinite(self.anchor_top_free):
             raise ValueError("anchor_top_free must be finite and nonnegative")
         if self.left_span is not None and (

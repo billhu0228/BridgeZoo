@@ -247,10 +247,11 @@ def _tower_elevations(config: SingleStaged3DConfig) -> tuple[list[float], list[f
 
 
 def _key_stations(config: SingleStaged3DConfig) -> list[_Station]:
-    stations = [
-        _Station("right_bearing", config.resolved_right_fix, 1, "right_bearing"),
-        _Station("tower_axis", 0.0, 1, "root"),
-    ]
+    stations = [_Station("tower_axis", 0.0, 1, "root")]
+    if not math.isclose(config.resolved_right_fix, 0.0, abs_tol=1.0e-12):
+        stations.append(
+            _Station("right_bearing", config.resolved_right_fix, 1, "right_bearing")
+        )
     for index in range(1, config.n_seg + 1):
         stations.append(
             _Station(
@@ -615,35 +616,25 @@ def build_single_staged_3d(
                 )
             )
 
-    # Tower base and right bearings provide global stability.  The right pair
-    # allows transverse expansion at one girder.  An optional left auxiliary
+    # Tower base and the fully fixed right girder end provide global stability.
+    # At x=0 the right end reuses the tower-axis girder nodes, avoiding a
+    # duplicate station and zero-length members.  An optional left auxiliary
     # span ends on vertical bearings.
     model.add_support(Support3D(tower_nodes[0], True, True, True, True, True, True, 0))
-    right_index = station_by_key["right_bearing"]
-    model.add_support(
-        Support3D(
-            beam_nodes[right_index, 0],
-            True,
-            True,
-            True,
-            False,
-            False,
-            False,
-            _steel_step(1),
+    right_index = station_by_key.get("right_bearing", station_by_key["tower_axis"])
+    for side in range(2):
+        model.add_support(
+            Support3D(
+                beam_nodes[right_index, side],
+                True,
+                True,
+                True,
+                True,
+                True,
+                True,
+                _steel_step(1),
+            )
         )
-    )
-    model.add_support(
-        Support3D(
-            beam_nodes[right_index, 1],
-            True,
-            False,
-            True,
-            False,
-            False,
-            False,
-            _steel_step(1),
-        )
-    )
     if config.left_span is not None:
         left_index = station_by_key["left_bearing"]
         final_stage_index = _steel_step(config.n_seg + 2)

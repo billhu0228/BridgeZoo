@@ -60,6 +60,7 @@ def test_bundled_omo_3d_yaml_supplies_complete_physical_input():
     assert resolve_bridge_config("omo3d").name == "omo_bridge_3d.yaml"
     assert config.n_seg == 24
     assert config.anchor_base_height == pytest.approx(48.75)
+    assert config.resolved_right_fix == pytest.approx(0.0)
     assert config.left_span == pytest.approx(40.0)
     assert config.girder_spacing == pytest.approx(11.4)
     assert config.cross_girder_spacing == pytest.approx(4.0)
@@ -83,6 +84,22 @@ def test_bundled_omo_3d_yaml_supplies_complete_physical_input():
     assert not (set(plan.model.frames) & set(plan.model.cables))
     assert plan.final_stage.label == "secondary_load"
     assert len(plan.stages) == 3 * (config.n_seg + 2) + 1
+
+
+def test_3d_zero_right_fix_reuses_tower_axis_and_fully_fixes_both_girders():
+    plan = build_single_staged_3d(n_seg=1, right_fix=0.0)
+    model = plan.model
+
+    assert "right_bearing" not in plan.metadata["station_x"]
+    assert list(plan.metadata["station_x"].values()).count(0.0) == 1
+    fixed_girder_supports = [
+        support
+        for support in model.supports.values()
+        if model.nodes[support.node].role.startswith("main_girder")
+        and model.nodes[support.node].x == pytest.approx(0.0)
+    ]
+    assert len(fixed_girder_supports) == 2
+    assert all(support.restraints == (True,) * 6 for support in fixed_girder_supports)
 
 
 def test_legacy_3d_yaml_deck_load_is_migrated_without_inventing_line_load(tmp_path):
@@ -579,21 +596,75 @@ def test_3d_new_steel_group_uses_actual_stiffness_for_flexible_birth_geometry():
     initialize_flexible_birth_3d(plan.model, 4, displacement)
 
     assert displacement[first_tip.id][2] == pytest.approx(first_uz, abs=1.0e-14)
-    assert rigid_tip_uz * 1000.0 == pytest.approx(230.661001, abs=1.0e-6)
+    assert rigid_tip_uz * 1000.0 == pytest.approx(219.519973, abs=1.0e-6)
     assert displacement[second_tip.id][2] * 1000.0 == pytest.approx(
-        170.598670,
+        161.090727,
         abs=1.0e-6,
     )
     assert displacement[second_tip.id][2] < rigid_tip_uz
 
     cable2_steel_a = solver.solve_stage(plan, 4)
     assert cable2_steel_a.displacement[second_tip.id][2] * 1000.0 == pytest.approx(
-        249.193935,
+        235.939140,
         abs=1.0e-6,
     )
 
 
-def test_3d_backends_report_tangent_birth_displacements_for_new_nodes():
+def test_3d_flexible_birth_never_commits_kinematic_fallback(monkeypatch):
+    config = replace(load_single_staged_3d_config("omo3d"), n_seg=2)
+    plan = build_single_staged_3d(config)
+    previous = SingleStagedDirectSolver3D().solve_stage(plan, 3)
+    displacement = {
+        node_id: np.asarray(values, dtype=float)
+        for node_id, values in previous.displacement.items()
+    }
+    before = {
+        node_id: values.copy() for node_id, values in displacement.items()
+    }
+
+    def non_finite_solution(matrix, right_hand_side, *, rcond):
+        del rcond
+        shape = (matrix.shape[1], right_hand_side.shape[1])
+        return np.full(shape, np.nan), np.empty(0), 0, np.empty(0)
+
+    monkeypatch.setattr(np.linalg, "lstsq", non_finite_solution)
+
+    with pytest.raises(ValueError, match="rigid-tangent fallback is disabled"):
+        initialize_flexible_birth_3d(plan.model, 4, displacement)
+
+    assert set(displacement) == set(before)
+    for node_id, values in before.items():
+        assert displacement[node_id] == pytest.approx(values, abs=0.0)
+
+
+def test_3d_flexible_birth_excludes_deck_slab_stiffness(monkeypatch):
+    config = replace(load_single_staged_3d_config("omo3d"), n_seg=1)
+    plan = build_single_staged_3d(config)
+    previous = SingleStagedDirectSolver3D().solve_stage(plan, 2)
+    displacement = {
+        node_id: np.asarray(values, dtype=float)
+        for node_id, values in previous.displacement.items()
+    }
+
+    def unexpected_slab_stiffness(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("deck-slab stiffness entered flexible birth solve")
+
+    monkeypatch.setattr(
+        "bridgezoo.fem.single_staged.birth3d.frame_local_stiffness_3d",
+        unexpected_slab_stiffness,
+    )
+
+    initialize_flexible_birth_3d(plan.model, 3, displacement)
+
+    assert any(
+        plan.model.nodes[node_id].role.startswith("deck_slab")
+        and plan.model.nodes[node_id].activation_stage == 3
+        for node_id in displacement
+    )
+
+
+def test_3d_backends_report_flexible_birth_displacements_for_new_nodes():
     pytest.importorskip("openseespy.opensees")
     config = replace(
         load_single_staged_3d_config("omo3d"),
@@ -1009,17 +1080,237 @@ def test_minimum_3d_cli_writes_machine_readable_json_and_detailed_text(
     assert payload["input"]["n_seg"] == 1
     assert payload["input"]["deck_width"] == pytest.approx(13.4)
     assert "3D rendering" not in payload["todo"]
+    assert payload["deformation_convention"]["translation_unit"] == "m"
+    assert payload["deformation_convention"]["rotation_unit"] == "rad"
+    assert all(
+        stage["deformation"]["node_count"]
+        == len(stage["deformation"]["nodes"])
+        for stage in payload["stages"]
+    )
     assert not forbidden_dxf.exists()
     lines = rendered.splitlines()
-    assert "主梁控制点位移（横桥向两个主梁锚点平均" in rendered
+    assert "主梁控制点位移（当前施工组横桥向控制节点平均" in rendered
     assert sum(line.startswith("阶段 ") for line in lines) == 3
-    assert sum(line.startswith("  梁点 S01 ") for line in lines) == 3
+    assert sum(line.startswith("  梁点 S03 ") for line in lines) == 3
+    assert ": 未激活" not in rendered
     assert "最终阶段拉索应力" in rendered
     assert sum(line.startswith("  拉索 id=") for line in lines) == 4
     assert "最终阶段塔顶位移" in rendered
     assert "ux=" in rendered
     assert "uy=" in rendered
     assert "uz=" in rendered
+
+    text_dir = tmp_path / "text_mode_must_not_write_text"
+    total_files = sorted((text_dir / "main_girder_actual_total").glob("*.txt"))
+    delta_files = sorted((text_dir / "main_girder_stage_delta").glob("*.txt"))
+    assert len(total_files) == len(delta_files) == len(payload["stages"])
+    assert total_files[0].name == "stage_001_cable1_steel_A.txt"
+    assert delta_files[0].name == "stage_001_cable1_steel_A.txt"
+
+    def displacement_rows(path):
+        rows = {}
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if not line or line.startswith("#") or line.startswith("node_id "):
+                continue
+            fields = line.split()
+            rows[int(fields[0])] = fields
+        return rows
+
+    total_rows = displacement_rows(total_files[0])
+    delta_rows = displacement_rows(delta_files[0])
+    node_id = payload["stages"][0]["main_girder_control_node_ids"][0]
+    first_main_node = next(
+        node
+        for node in payload["stages"][0]["deformation"]["nodes"]
+        if node["node_id"] == node_id
+    )
+    assert set(total_rows) == set(delta_rows)
+    assert float(total_rows[node_id][7]) == pytest.approx(
+        first_main_node["actual_total_deformation"]["translation_m"]["uz"]
+        * 1000.0,
+        abs=1.0e-9,
+    )
+    assert float(delta_rows[node_id][7]) == pytest.approx(
+        first_main_node["step_deformation"]["translation_m"]["uz"] * 1000.0,
+        abs=1.0e-9,
+    )
+    assert "本阶段增量变形 delta" in delta_files[0].read_text(encoding="utf-8")
+
+    z_summary = text_dir / "main_girder_z_summary.txt"
+    summary_lines = [
+        line
+        for line in z_summary.read_text(encoding="utf-8").splitlines()
+        if line and not line.startswith("#")
+    ]
+    assert summary_lines[0] == (
+        "stage_index stage_label node_id delta_uz_mm actual_total_uz_mm"
+    )
+    expected_row_count = sum(
+        len(stage["main_girder_control_node_ids"])
+        for stage in payload["stages"]
+    )
+    assert len(summary_lines) - 1 == expected_row_count
+    first_summary = summary_lines[1].split()
+    assert first_summary[:3] == [
+        str(payload["stages"][0]["index"]),
+        payload["stages"][0]["label"],
+        str(node_id),
+    ]
+    assert float(first_summary[3]) == pytest.approx(
+        first_main_node["step_deformation"]["translation_m"]["uz"] * 1000.0,
+        abs=1.0e-9,
+    )
+    assert float(first_summary[4]) == pytest.approx(
+        first_main_node["actual_total_deformation"]["translation_m"]["uz"]
+        * 1000.0,
+        abs=1.0e-9,
+    )
+
+
+def test_3d_json_deformation_separates_activation_step_and_actual_total(
+    tmp_path,
+):
+    output = tmp_path / "deformation_history.json"
+    assert run_cli(
+        [
+            "--bridge",
+            "omo3d",
+            "--n",
+            "1",
+            "--backend",
+            "direct",
+            "--render",
+            "none",
+            "--output",
+            str(output),
+        ]
+    ) == 0
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    first, second = payload["stages"][:2]
+    first_nodes = {
+        item["node_id"]: item for item in first["deformation"]["nodes"]
+    }
+    second_nodes = {
+        item["node_id"]: item for item in second["deformation"]["nodes"]
+    }
+
+    def translation(item, field):
+        values = item[field]["translation_m"]
+        return np.asarray([values["ux"], values["uy"], values["uz"]])
+
+    def rotation(item, field):
+        values = item[field]["rotation_rad"]
+        return np.asarray([values["rx"], values["ry"], values["rz"]])
+
+    newly_activated = next(
+        item
+        for item in first_nodes.values()
+        if item["role"].startswith("main_girder")
+    )
+    activation_reference = newly_activated["activation"]["reference_deformation"]
+    reference_translation = np.asarray(
+        list(activation_reference["translation_m"].values())
+    )
+    reference_rotation = np.asarray(
+        list(activation_reference["rotation_rad"].values())
+    )
+    assert (
+        reference_translation
+        + translation(newly_activated, "step_deformation")
+    ) == pytest.approx(
+        translation(newly_activated, "actual_total_deformation"),
+        abs=1.0e-12,
+    )
+    assert (
+        reference_rotation + rotation(newly_activated, "step_deformation")
+    ) == pytest.approx(
+        rotation(newly_activated, "actual_total_deformation"),
+        abs=1.0e-12,
+    )
+    design_position = np.asarray(
+        list(newly_activated["design_position_m"].values())
+    )
+    activation_position = np.asarray(
+        list(newly_activated["activation"]["position_m"].values())
+    )
+    actual_position = np.asarray(
+        list(newly_activated["actual_position_m"].values())
+    )
+    assert activation_position == pytest.approx(
+        design_position + reference_translation,
+        abs=1.0e-12,
+    )
+    assert actual_position == pytest.approx(
+        design_position
+        + translation(newly_activated, "actual_total_deformation"),
+        abs=1.0e-12,
+    )
+
+    existing_id = next(
+        node_id
+        for node_id, item in first_nodes.items()
+        if item["role"] in {"tower", "tower_anchor"}
+        and node_id in second_nodes
+    )
+    assert (
+        translation(first_nodes[existing_id], "actual_total_deformation")
+        + translation(second_nodes[existing_id], "step_deformation")
+    ) == pytest.approx(
+        translation(second_nodes[existing_id], "actual_total_deformation"),
+        abs=1.0e-12,
+    )
+    assert second_nodes[existing_id]["activation"] == first_nodes[existing_id][
+        "activation"
+    ]
+
+
+def test_3d_cli_text_all_stages_prints_every_analysis_stage(tmp_path, capsys):
+    output = tmp_path / "all_stages.json"
+    text_dir = tmp_path / "all_stages_text"
+    assert run_cli(
+        [
+            "--bridge",
+            "omo3d",
+            "--n",
+            "1",
+            "--backend",
+            "direct",
+            "--render",
+            "text",
+            "--text-all-stages",
+            "--text-dir",
+            str(text_dir),
+            "--output",
+            str(output),
+        ]
+    ) == 0
+    rendered = capsys.readouterr().out
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    stage_lines = [
+        line for line in rendered.splitlines() if line.startswith("阶段 ")
+    ]
+
+    assert "全部10个分析阶段" in rendered
+    assert len(stage_lines) == len(payload["stages"]) == 10
+    assert stage_lines[0].endswith("cable1_steel_A")
+    assert stage_lines[-1].endswith("secondary_load")
+    assert ": 未激活" not in rendered
+    control_sets = [
+        tuple(stage["main_girder_control_node_ids"])
+        for stage in payload["stages"]
+    ]
+    assert control_sets[0] == control_sets[1] == control_sets[2]
+    assert control_sets[3] == control_sets[4] == control_sets[5]
+    assert control_sets[6] == control_sets[7] == control_sets[8]
+    assert len({control_sets[0], control_sets[3], control_sets[6]}) == 3
+    assert set(control_sets[-1]) == set().union(*map(set, control_sets[:-1]))
+    for stage, control_ids in zip(payload["stages"], control_sets):
+        active_ids = {
+            node["node_id"] for node in stage["deformation"]["nodes"]
+        }
+        assert set(control_ids).issubset(active_ids)
+    assert len(list((text_dir / "main_girder_actual_total").glob("*.txt"))) == 10
+    assert len(list((text_dir / "main_girder_stage_delta").glob("*.txt"))) == 10
 
 
 def test_3d_cli_exports_dxf_independently_without_plot_rendering(tmp_path):

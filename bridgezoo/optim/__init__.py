@@ -10,6 +10,16 @@ from bridgezoo.optim.engineering_cycle3d import (
     EngineeringStageStatus3D,
     EngineeringSubstageControl3D,
 )
+from bridgezoo.optim.forward_cycle3d import (
+    ForwardCableCycleOptimizer3D,
+    ForwardCycleOptions3D,
+    ForwardCycleResult3D,
+    ForwardLocalResponse3D,
+    ForwardMilestone3D,
+    ForwardSizingError,
+    ForwardSubstageResult3D,
+    ForwardTuningError,
+)
 from bridgezoo.optim.hybrid import CableHybridOptimizer, HybridOptimizationResult, HybridOptions, IntegerSearchOptions
 from bridgezoo.optim.linear import AffineCableModel, LinearTensionOptimizer, build_affine_model
 from bridgezoo.optim.problem import CableBounds, CableOptimizationProblem, ObjectiveWeights, TargetLine
@@ -56,6 +66,14 @@ __all__ = [
     "EngineeringSubstageControl3D",
     "EvaluationResult",
     "EvaluationResult3D",
+    "ForwardCableCycleOptimizer3D",
+    "ForwardCycleOptions3D",
+    "ForwardCycleResult3D",
+    "ForwardLocalResponse3D",
+    "ForwardMilestone3D",
+    "ForwardSizingError",
+    "ForwardSubstageResult3D",
+    "ForwardTuningError",
     "SecondaryAffineModel3D",
     "SecondaryTensionOptions3D",
     "SecondaryTensionResult3D",

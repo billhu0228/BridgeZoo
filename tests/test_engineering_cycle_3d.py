@@ -99,7 +99,7 @@ def test_engineering_cycle_writes_restartable_reproducible_design(tmp_path):
     assert first_control[
         "FEM_cases_for_influence_matrix"
     ] == 0
-    assert design["search"]["OpenSees_FEM_cases_this_cycle"] in (3, 4)
+    assert design["search"]["OpenSees_FEM_cases_this_cycle"] in (4, 5, 6)
     assert design["engineering_cycle"]["tension_update_accepted"] is True
     assert design["engineering_cycle"]["strand_update_attempted"] is True
     assert design["engineering_cycle"]["strand_update_accepted"] is True
@@ -108,9 +108,14 @@ def test_engineering_cycle_writes_restartable_reproducible_design(tmp_path):
         "family": "independent-per-group",
         "outward_non_decreasing": False,
         "stress_priority": True,
-        "displacement_rebalanced_next_cycle": True,
+        "displacement_repaired_same_cycle": True,
     }
-    assert checkpoint["schema"] == "bridgezoo.engineering_cable_cycle_3d.v11"
+    assert design["engineering_cycle"]["shape_repair_update_attempted"] is True
+    assert design["engineering_cycle"]["shape_repair_update_accepted"] is True
+    assert design["engineering_cycle"][
+        "shape_repair_max_abs_deck_mm_after"
+    ] < design["engineering_cycle"]["shape_repair_max_abs_deck_mm_before"]
+    assert checkpoint["schema"] == "bridgezoo.engineering_cable_cycle_3d.v13"
     assert np.asarray(
         checkpoint["state"]["feedback_step_scale_per_phase_group"]
     ).shape == (2, 2)
@@ -123,6 +128,11 @@ def test_engineering_cycle_writes_restartable_reproducible_design(tmp_path):
     assert len(design["engineering_cycle"]["strand_step_memory"]["next"]) == 2
     assert all(
         "next_strand_step_scale" in group for group in design["cable_groups"]
+    )
+    assert all(
+        group["pretension_A_plus_B_MN"]
+        == pytest.approx(group["pretension_per_physical_cable_N"] / 1.0e6)
+        for group in design["cable_groups"]
     )
     assert checkpoint["completed_cycles"] == 1
     assert checkpoint["cumulative_FEM_cases"] == design["search"][
@@ -154,7 +164,7 @@ def test_engineering_cycle_writes_restartable_reproducible_design(tmp_path):
                 abs=1.0e-10,
             )
 
-    # Existing v4 engineering state remains restartable after the two-round
+    # Existing v4 engineering state remains restartable after the three-round
     # architecture upgrade; only the valid numerical state is migrated.
     checkpoint["schema"] = "bridgezoo.engineering_cable_cycle_3d.v4"
     checkpoint["problem"]["optimizer_architecture"] = (
@@ -173,7 +183,9 @@ def test_engineering_cycle_writes_restartable_reproducible_design(tmp_path):
     assert engineering_cli([*common, "--resume"]) == 0
     resumed = json.loads(checkpoint_path.read_text(encoding="utf-8"))
     assert resumed["completed_cycles"] == 2
-    assert resumed["cumulative_FEM_cases"] == 6
+    assert resumed["cumulative_FEM_cases"] == sum(
+        row["FEM_full_replays"] for row in resumed["history"]
+    )
     assert len(resumed["history"]) == 2
 
 
@@ -238,11 +250,11 @@ def test_engineering_cycle_uses_separate_tension_and_sizing_replays():
         pretension_b=np.full(4, 3.0e6),
     )
 
-    assert result.fem_cases in (3, 4)
+    assert result.fem_cases in (4, 5, 6)
     assert result.tension_update_accepted is True
     assert result.strand_update_attempted is True
     if result.strand_update_accepted:
-        assert result.strand_score_after < result.strand_score_before
+        assert result.strand_round_score_after < result.strand_score_before
     assert np.array_equal(
         result.evaluation_before_sizing.design.strands,
         result.strands_before_sizing,
@@ -265,7 +277,7 @@ def test_engineering_cycle_uses_separate_tension_and_sizing_replays():
         strand_step_scale=result.next_strand_step_scales,
         baseline_evaluation=result.evaluation_after_sizing,
     )
-    assert next_result.fem_cases in (2, 3)
+    assert next_result.fem_cases in (3, 4, 5)
     assert next_result.local_score_before == pytest.approx(result.local_score_after)
     assert next_result.local_score_after_tension <= next_result.local_score_before
 
@@ -361,16 +373,18 @@ def test_engineering_cycle_prioritizes_stress_and_bounds_accelerated_sizing():
         for result in results
     )
     assert all(
-        result.strand_score_after
+        result.strand_round_score_after
         <= result.strand_score_before + 1.0e-12
         for result in results
     )
-    assert all(
-        np.max(
+    for result in results:
+        exceeds_ordinary_cap = (
             np.abs(result.strands_after_sizing - result.strands_before_sizing)
-        ) <= optimizer.options.strand_max_change_per_cycle
-        for result in results
-    )
+            > optimizer.options.strand_max_change_per_cycle
+        )
+        assert np.all(
+            ~exceeds_ordinary_cap | result.compression_strand_reduction_mask
+        )
     assert any(result.tension_update_accepted for result in results)
     assert any(result.strand_update_accepted for result in results)
     assert any(
@@ -417,6 +431,77 @@ def test_engineering_tension_feedback_residuals_match_activation_and_final_targe
 
     assert residuals[0] == pytest.approx([0.01, 0.02, -0.04, -0.05])
     assert residuals[1] == pytest.approx([0.03, 0.10, -0.06, -0.20])
+
+
+def test_engineering_shape_repair_changes_only_main_stay_b_in_deck_direction():
+    optimizer = _direct_optimizer(n_seg=2)
+    responses = {
+        (1, "A"): StageAControlResponse3D(1, 1, 0.01, 0.02),
+        (1, "B"): StageAControlResponse3D(1, 2, 0.03, 0.20),
+        (2, "A"): StageAControlResponse3D(2, 4, -0.04, -0.05),
+        (2, "B"): StageAControlResponse3D(2, 5, -0.06, -0.30),
+    }
+    before_a = np.full(4, 3.0e6)
+    before_b = np.full(4, 3.0e6)
+
+    after_b = optimizer._update_final_shape_main_stay_b(
+        np.full(4, 100, dtype=int),
+        before_a,
+        before_b,
+        responses,
+        np.ones((2, 4)),
+    )
+
+    assert after_b[[0, 2]] == pytest.approx(before_b[[0, 2]])
+    assert after_b[1] < before_b[1]
+    assert after_b[3] > before_b[3]
+
+
+def test_engineering_shape_repair_retry_isolates_worst_final_deck_group():
+    optimizer = _direct_optimizer(n_seg=3)
+    responses = {
+        (stage, phase): StageAControlResponse3D(
+            stage,
+            3 * stage - (2 if phase == "A" else 0),
+            0.0,
+            (0.10, -0.45, 0.30)[stage - 1] if phase == "B" else 0.0,
+        )
+        for stage in range(1, 4)
+        for phase in ("A", "B")
+    }
+    before_b = np.full(6, 10.0)
+    proposed_b = np.asarray([10.0, 11.0, 10.0, 12.0, 10.0, 13.0])
+
+    partial_b, keep = optimizer._isolated_shape_repair_candidate(
+        before_b, proposed_b, responses
+    )
+
+    assert keep.tolist() == [False, False, False, True, False, False]
+    assert partial_b == pytest.approx([10.0, 10.0, 10.0, 12.0, 10.0, 10.0])
+
+
+def test_engineering_shape_repair_reduces_max_deck_and_freezes_other_variables():
+    optimizer = _direct_optimizer(n_seg=3)
+    result = optimizer.run_cycle(
+        np.full(6, 100, dtype=int),
+        cycle_index=1,
+        pretension_a=np.full(6, 3.0e6),
+        pretension_b=np.full(6, 3.0e6),
+    )
+    tension_design = result.evaluation_before_sizing.design
+    tension_a = tension_design.pretension * tension_design.pretension_a_ratio
+    tension_b = tension_design.pretension - tension_a
+
+    assert result.repair_update_attempted is True
+    assert result.repair_update_accepted is True
+    assert result.repair_max_deck_after_m < result.repair_max_deck_before_m
+    assert result.pretension_a == pytest.approx(tension_a)
+    assert result.pretension_b[::2] == pytest.approx(tension_b[::2])
+    assert np.any(np.abs(result.pretension_b[1::2] - tension_b[1::2]) > 1.0e-9)
+    assert np.array_equal(
+        result.evaluation_after_sizing.design.strands,
+        result.strands_after_sizing,
+    )
 
 
 def test_engineering_partial_tension_retry_isolates_worst_control_group():
@@ -543,7 +628,47 @@ def test_engineering_final_stress_target_is_signed():
         np.asarray([-500.0, 500.0]),
         np.ones(2),
     )
-    assert resized.tolist() == [88, 100]
+    assert resized.tolist() == [66, 100]
+
+
+def test_engineering_negative_final_stress_forces_one_third_strand_reduction():
+    optimizer = _direct_optimizer(n_seg=1)
+    area_capacity = (
+        optimizer.problem.bounds.tension_bound_stress_mpa
+        * 1.0e6
+        * optimizer.problem.strand_area
+    )
+
+    resized = optimizer._resize_strands(
+        np.asarray([82, 12]),
+        np.asarray([0.0, 10.0 * area_capacity]),
+        np.asarray([-130.0, -1.0]),
+        np.asarray([1.0 / 32.0, 1.0 / 32.0]),
+    )
+
+    # The forced branch bypasses relaxation/cache/ordinary change caps, but
+    # never violates the tension-capacity lower bound.
+    assert resized.tolist() == [54, 10]
+
+
+def test_engineering_forced_compression_reduction_overrides_stress_score_rejection():
+    optimizer = _direct_optimizer(n_seg=3)
+    synthetic_scores = iter((0.1, 0.2, 0.3))
+    optimizer._strand_score = lambda _stress: next(synthetic_scores)
+
+    result = optimizer.run_cycle(
+        np.full(6, 100, dtype=int),
+        cycle_index=1,
+        pretension_a=np.full(6, 6.0e6),
+        pretension_b=np.full(6, 6.0e6),
+    )
+
+    assert result.stress_before_sizing_mpa[1] < 0.0
+    assert result.compression_strand_reduction_attempted is True
+    assert result.compression_strand_reduction_accepted is True
+    assert result.strands_after_sizing[1] == 66
+    assert result.strand_round_score_after > result.strand_score_before
+    assert result.strand_score_after > result.strand_score_before
 
 
 class _TTYBuffer(StringIO):
@@ -558,6 +683,8 @@ def test_engineering_progress_refreshes_one_24_group_dashboard(tmp_path):
             construction_stage=stage,
             backstay_strands=90 + stage,
             main_stay_strands=100 + stage,
+            backstay_total_tension_mn=1.25,
+            main_stay_total_tension_mn=2.5,
             target_final_deck_uz_m=0.0,
             stage_a_tower_dx_m=stage / 100_000.0,
             stage_a_deck_uz_m=0.0,
@@ -606,7 +733,10 @@ def test_engineering_progress_refreshes_one_24_group_dashboard(tmp_path):
     display.close()
 
     rendered = stream.getvalue()
+    assert "索力轮 → 根数轮 → 线形修复轮" in rendered
     assert "根数(背/中)" in rendered
+    assert "A+B索力 [MN] 背 / 中" in rendered
+    assert "  1.250 /   2.500" in rendered
     assert "梁端 z [mm] A激活 / 最终 / 目标" in rendered
     assert "塔端 x [mm] A激活 / 最终" in rendered
     assert "最终应力 [MPa] 背 / 中" in rendered

@@ -152,9 +152,11 @@ class SingleStagedDirectBatchSolver3D:
                 displacement,
                 ncase=ncase,
             )
-            born_this_stage = [
-                node_id for node_id in displacement if node_id not in existing_nodes
-            ]
+            born_this_stage = {
+                node_id: displacement[node_id].copy()
+                for node_id in displacement
+                if node_id not in existing_nodes
+            }
 
             active_nodes = sorted(displacement)
             node_ids = set(active_nodes)
@@ -402,9 +404,9 @@ class SingleStagedDirectBatchSolver3D:
                 record.birth_displacement = {
                     node_id: tuple(
                         float(value)
-                        for value in displacement[node_id][:, case_index]
+                        for value in birth[:, case_index]
                     )
-                    for node_id in born_this_stage
+                    for node_id, birth in born_this_stage.items()
                 }
                 for node_id in active_nodes:
                     record.displacement[node_id] = tuple(

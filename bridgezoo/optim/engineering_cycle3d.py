@@ -7,15 +7,20 @@ build per-stage influence matrices.  One cycle instead:
 2. changes only A/B tension and independently accepts that verified replay;
 3. changes every cable group's strand count independently and accepts the
    second verified replay whenever the 500 MPa stress indicator improves,
-   even if displacement is temporarily disturbed.
+   even if displacement is temporarily disturbed.  A cable with negative
+   final stress instead receives a mandatory one-third strand reduction,
+   limited only by tension capacity and global strand bounds.
+4. freezes A, every strand count, and every backstay B force, then repairs the
+   final bridge shape with main-stay B forces only.  This final verified replay
+   is accepted only when the maximum absolute final deck displacement drops.
 
 Only initial tension A uses an intermediate construction record: its tower
 response and the new girder's tangent-birth-relative response are controlled to
 zero at activation.  Tension B, strand sizing, deck displacement, tower
 displacement, and cable stress all use the final ``secondary_load`` state.
-Final deck and tower displacement targets are both exactly zero.  The following
-cycle retunes A/B forces from an accepted count state and therefore seeks a new
-final-state balance after every stiffness change.
+Final deck and tower displacement targets are both exactly zero.  The final
+repair round immediately retunes main-stay B from an accepted count state; the
+following cycle can then continue the full A/B balance from that repaired state.
 """
 
 from __future__ import annotations
@@ -60,6 +65,8 @@ class EngineeringStageStatus3D:
     construction_stage: int
     backstay_strands: int
     main_stay_strands: int
+    backstay_total_tension_mn: float | None
+    main_stay_total_tension_mn: float | None
     target_final_deck_uz_m: float
     stage_a_tower_dx_m: float | None = None
     stage_a_deck_uz_m: float | None = None
@@ -87,6 +94,7 @@ class EngineeringProgress3D:
     step_scale: float = 1.0
     tension_update_accepted: bool | None = None
     strand_update_accepted: bool | None = None
+    repair_update_accepted: bool | None = None
     step_scale_min: float | None = None
     step_scale_max: float | None = None
 
@@ -159,9 +167,11 @@ class EngineeringCycleResult3D:
     strands_before_sizing: np.ndarray
     strands_after_sizing: np.ndarray
     stress_before_sizing_mpa: np.ndarray
+    stress_after_strand_round_mpa: np.ndarray
     stress_after_sizing_mpa: np.ndarray
     local_score_before: float
     local_score_after_tension: float
+    local_score_after_strand: float
     local_score_after: float
     proposal_local_score: float
     first_tension_proposal_local_score: float
@@ -171,9 +181,21 @@ class EngineeringCycleResult3D:
     tension_partial_retry_accepted: bool
     strand_update_attempted: bool
     strand_update_accepted: bool
+    compression_strand_reduction_attempted: bool
+    compression_strand_reduction_accepted: bool
+    compression_strand_reduction_mask: np.ndarray
     strand_score_before: float
     strand_proposal_score: float | None
+    strand_round_score_after: float
     strand_score_after: float
+    repair_max_deck_before_m: float
+    repair_first_proposal_max_deck_m: float
+    repair_proposal_max_deck_m: float
+    repair_max_deck_after_m: float
+    repair_update_attempted: bool
+    repair_update_accepted: bool
+    repair_partial_retry_attempted: bool
+    repair_partial_retry_accepted: bool
     step_scale_used: float
     next_step_scale: float
     tension_step_scales_used: np.ndarray
@@ -424,6 +446,7 @@ class EngineeringCableCycleOptimizer3D:
         strands: np.ndarray,
         responses: dict[tuple[int, str], StageAControlResponse3D] | None,
         stress_mpa: np.ndarray | None,
+        total_tension: np.ndarray | None,
     ) -> tuple[EngineeringStageStatus3D, ...]:
         rows = []
         for stage in range(1, self.problem.n_seg + 1):
@@ -435,6 +458,16 @@ class EngineeringCableCycleOptimizer3D:
                     construction_stage=stage,
                     backstay_strands=int(strands[offset]),
                     main_stay_strands=int(strands[offset + 1]),
+                    backstay_total_tension_mn=(
+                        None
+                        if total_tension is None
+                        else float(total_tension[offset] / 1.0e6)
+                    ),
+                    main_stay_total_tension_mn=(
+                        None
+                        if total_tension is None
+                        else float(total_tension[offset + 1] / 1.0e6)
+                    ),
                     target_final_deck_uz_m=0.0,
                     stage_a_tower_dx_m=(
                         None if response_a is None else response_a.backstay_tower_dx_m
@@ -533,6 +566,73 @@ class EngineeringCableCycleOptimizer3D:
             residuals[1, offset] = response_b.backstay_tower_dx_m
             residuals[1, offset + 1] = response_b.main_stay_deck_uz_m
         return residuals
+
+    def _final_deck_max_abs_m(
+        self,
+        responses: dict[tuple[int, str], StageAControlResponse3D],
+    ) -> float:
+        """Return the governing final deck displacement over all stay groups."""
+
+        return float(
+            max(
+                abs(responses[stage, "B"].main_stay_deck_uz_m)
+                for stage in range(1, self.problem.n_seg + 1)
+            )
+        )
+
+    def _update_final_shape_main_stay_b(
+        self,
+        strands: np.ndarray,
+        pretension_a: np.ndarray,
+        pretension_b: np.ndarray,
+        responses: dict[tuple[int, str], StageAControlResponse3D],
+        step_scales: np.ndarray,
+    ) -> np.ndarray:
+        """Propose a conservative final-shape repair using main-stay B only."""
+
+        step_scales = self._tension_step_scales(step_scales)
+        upper = self.tension_upper_bounds(strands)
+        updated_b = pretension_b.copy()
+        for stage in range(1, self.problem.n_seg + 1):
+            index = 2 * (stage - 1) + 1
+            deck_uz_m = responses[stage, "B"].main_stay_deck_uz_m
+            correction = self._feedback_correction(
+                error=-deck_uz_m,
+                scale=self.options.feedback_deck_scale_m,
+                upper=float(upper[index]),
+                step_scale=float(step_scales[1, index]),
+            )
+            updated_b[index] = float(
+                np.clip(
+                    updated_b[index] + correction,
+                    0.0,
+                    upper[index] - pretension_a[index],
+                )
+            )
+        return updated_b
+
+    def _isolated_shape_repair_candidate(
+        self,
+        pretension_b: np.ndarray,
+        proposed_b: np.ndarray,
+        responses: dict[tuple[int, str], StageAControlResponse3D],
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Keep only the changed main-stay B at the worst final deck point."""
+
+        changed = np.abs(proposed_b - pretension_b) > 1.0e-9
+        main_stay = np.arange(self.layout.size) % 2 == 1
+        eligible = changed & main_stay
+        priority = np.full(self.layout.size, -np.inf, dtype=float)
+        for stage in range(1, self.problem.n_seg + 1):
+            index = 2 * (stage - 1) + 1
+            if eligible[index]:
+                priority[index] = abs(
+                    responses[stage, "B"].main_stay_deck_uz_m
+                )
+        keep = np.zeros(self.layout.size, dtype=bool)
+        if np.any(eligible):
+            keep[int(np.argmax(priority))] = True
+        return np.where(keep, proposed_b, pretension_b), keep
 
     def _isolated_tension_candidate(
         self,
@@ -730,6 +830,24 @@ class EngineeringCableCycleOptimizer3D:
             self.problem.bounds.strand_min,
             self.problem.bounds.strand_max,
         )
+        # A negative final stress represents an invalid compressive cable
+        # state.  Per the engineering rule, bypass relaxation, cached step
+        # scale, and the ordinary per-cycle change cap and remove at least one
+        # third of that group's strands.  Tension-capacity and global strand
+        # bounds remain hard constraints.
+        compression = np.asarray(stress_mpa, dtype=float) < 0.0
+        forced_compression_target = np.floor(
+            2.0 * strands.astype(float) / 3.0
+        ).astype(int)
+        forced_compression_target = np.maximum(
+            forced_compression_target,
+            required,
+        )
+        proposed = np.where(
+            compression,
+            forced_compression_target,
+            proposed,
+        )
         # Counts are true per-group design variables.  Do not fit a Bernstein
         # curve or impose outward monotonicity: either operation couples an
         # otherwise improving group to unrelated groups and can prevent low-
@@ -771,9 +889,7 @@ class EngineeringCableCycleOptimizer3D:
                 response_after_tension = after_tension[stage, phase]
                 response_after = after_sizing[stage, phase]
                 norm_before = self._substage_residual_norm(phase, response_before)
-                norm_after = self._substage_residual_norm(
-                    phase, response_after_tension
-                )
+                norm_after = self._substage_residual_norm(phase, response_after)
                 active = []
                 for local, name in enumerate(("backstay", "main_stay")):
                     index = offset + local
@@ -826,7 +942,7 @@ class EngineeringCableCycleOptimizer3D:
         strand_step_scale=1.0,
         baseline_evaluation: EvaluationResult3D | None = None,
     ) -> EngineeringCycleResult3D:
-        """Run independently verified tension and strand-count subrounds."""
+        """Run independently verified tension, strand, and shape-repair rounds."""
 
         started = time.perf_counter()
         start_cases = self.total_fem_cases
@@ -866,11 +982,12 @@ class EngineeringCableCycleOptimizer3D:
                 raise ValueError(
                     "cached engineering baseline does not match the current design"
                 )
-        # Steady-state cost is normally two full replays: one tension-only
-        # candidate and one strand-only candidate.  A rejected tension vector
-        # may add one verified partial-candidate replay.  A fresh process also
-        # needs one baseline replay; an in-process cycle reuses the prior one.
-        fem_cases_total = 3 if baseline_evaluation is None else 2
+        # Steady-state cost is normally three full replays: one tension-only
+        # candidate, one strand-only candidate, and one final-shape repair.
+        # Rejected tension or repair vectors may each add one verified isolated
+        # retry.  A fresh process also needs one baseline replay; an in-process
+        # cycle reuses the prior cycle's final replay.
+        fem_cases_total = 4 if baseline_evaluation is None else 3
 
         self._emit(
             EngineeringProgress3D(
@@ -884,7 +1001,9 @@ class EngineeringCableCycleOptimizer3D:
                 fem_cases_total=fem_cases_total,
                 elapsed_seconds=0.0,
                 eta_seconds=0.0,
-                stage_status=self._stage_status(strands, None, None),
+                stage_status=self._stage_status(
+                    strands, None, None, total_before
+                ),
                 step_scale=displayed_step_scale,
                 step_scale_min=float(np.min(tension_step_scales)),
                 step_scale_max=float(np.max(tension_step_scales)),
@@ -908,9 +1027,13 @@ class EngineeringCableCycleOptimizer3D:
                 fem_cases_completed=cases_before_update,
                 fem_cases_total=fem_cases_total,
                 elapsed_seconds=first_elapsed,
-                eta_seconds=max(first_elapsed, self.total_fem_seconds / max(1, self.total_fem_cases)) * 2.0,
+                eta_seconds=max(
+                    first_elapsed,
+                    self.total_fem_seconds / max(1, self.total_fem_cases),
+                )
+                * 3.0,
                 stage_status=self._stage_status(
-                    strands, before_responses, baseline_stress
+                    strands, before_responses, baseline_stress, total_before
                 ),
                 local_score=score_before,
                 step_scale=displayed_step_scale,
@@ -937,9 +1060,13 @@ class EngineeringCableCycleOptimizer3D:
                 fem_cases_completed=cases_before_update,
                 fem_cases_total=fem_cases_total,
                 elapsed_seconds=time.perf_counter() - started,
-                eta_seconds=max(first_elapsed, self.total_fem_seconds / max(1, self.total_fem_cases)) * 2.0,
+                eta_seconds=max(
+                    first_elapsed,
+                    self.total_fem_seconds / max(1, self.total_fem_cases),
+                )
+                * 3.0,
                 stage_status=self._stage_status(
-                    strands, before_responses, baseline_stress
+                    strands, before_responses, baseline_stress, total_before
                 ),
                 local_score=score_before,
                 step_scale=displayed_step_scale,
@@ -1013,6 +1140,7 @@ class EngineeringCableCycleOptimizer3D:
                             strands,
                             tension_proposal_responses,
                             tension_proposal_stress,
+                            updated_a + updated_b,
                         ),
                         local_score=score_before,
                         proposal_score=first_tension_proposal_score,
@@ -1098,9 +1226,16 @@ class EngineeringCableCycleOptimizer3D:
                 fem_cases_completed=cases_after_tension,
                 fem_cases_total=fem_cases_total,
                 elapsed_seconds=time.perf_counter() - started,
-                eta_seconds=self.total_fem_seconds / max(1, self.total_fem_cases),
+                eta_seconds=(
+                    2.0
+                    * self.total_fem_seconds
+                    / max(1, self.total_fem_cases)
+                ),
                 stage_status=self._stage_status(
-                    strands, tension_responses, stress_before_sizing
+                    strands,
+                    tension_responses,
+                    stress_before_sizing,
+                    accepted_a + accepted_b,
                 ),
                 local_score=score_after_tension,
                 proposal_score=tension_proposal_score,
@@ -1116,6 +1251,12 @@ class EngineeringCableCycleOptimizer3D:
         resized = self._resize_strands(
             strands, accepted_total, stress_before_sizing, strand_step_scales
         )
+        compression_strand_reduction_mask = (
+            (stress_before_sizing < 0.0) & (resized < strands)
+        )
+        compression_strand_reduction_attempted = bool(
+            np.any(compression_strand_reduction_mask)
+        )
         strand_update_attempted = not np.array_equal(resized, strands)
         strand_score_before = self._strand_score(stress_before_sizing)
         self._emit(
@@ -1125,9 +1266,16 @@ class EngineeringCableCycleOptimizer3D:
                 fem_cases_completed=cases_after_tension,
                 fem_cases_total=fem_cases_total,
                 elapsed_seconds=time.perf_counter() - started,
-                eta_seconds=self.total_fem_seconds / max(1, self.total_fem_cases),
+                eta_seconds=(
+                    2.0
+                    * self.total_fem_seconds
+                    / max(1, self.total_fem_cases)
+                ),
                 stage_status=self._stage_status(
-                    resized, tension_responses, stress_before_sizing
+                    resized,
+                    tension_responses,
+                    stress_before_sizing,
+                    accepted_total,
                 ),
                 local_score=score_after_tension,
                 step_scale=next_step_scale,
@@ -1146,14 +1294,15 @@ class EngineeringCableCycleOptimizer3D:
             strand_proposal_score = self._strand_score(strand_proposal_stress)
             # A strand-count change alters cable EA and may temporarily move
             # the bridge away from its displacement target.  Material
-            # utilization has priority in this round; the next cycle starts
-            # from this verified state and retunes A/B forces to find the new
-            # displacement balance position.
+            # utilization has priority in this round.  A verified forced
+            # compression reduction is accepted even when the aggregate stress
+            # score worsens; the next cycle retunes A/B forces from that state.
             strand_proposal_balance = self._local_score(
                 strand_proposal_responses
             )
             strand_update_accepted = bool(
-                strand_proposal_score < strand_score_before - 1.0e-12
+                compression_strand_reduction_attempted
+                or strand_proposal_score < strand_score_before - 1.0e-12
             )
         else:
             strand_proposal_evaluation = tension_evaluation
@@ -1170,22 +1319,194 @@ class EngineeringCableCycleOptimizer3D:
             resized != strands,
             self.options.target_stress_mpa,
         )
+        if compression_strand_reduction_attempted:
+            # Do not carry a stale minimum step cache out of the forced branch.
+            next_strand_step_scales[compression_strand_reduction_mask] = 1.0
+        compression_strand_reduction_accepted = bool(
+            compression_strand_reduction_attempted and strand_update_accepted
+        )
         if strand_update_accepted:
-            after_evaluation = strand_proposal_evaluation
-            after_responses = strand_proposal_responses
-            stress_after = strand_proposal_stress
-            score_after = strand_proposal_balance
-            strand_score_after = float(strand_proposal_score)
+            strand_evaluation = strand_proposal_evaluation
+            strand_responses = strand_proposal_responses
+            stress_after_strand = strand_proposal_stress
+            score_after_strand = strand_proposal_balance
+            strand_round_score_after = float(strand_proposal_score)
             accepted_strands = resized
         else:
-            after_evaluation = tension_evaluation
-            after_responses = tension_responses
-            stress_after = stress_before_sizing
-            score_after = score_after_tension
-            strand_score_after = strand_score_before
+            strand_evaluation = tension_evaluation
+            strand_responses = tension_responses
+            stress_after_strand = stress_before_sizing
+            score_after_strand = score_after_tension
+            strand_round_score_after = strand_score_before
             accepted_strands = strands
 
-        update_accepted = tension_update_accepted or strand_update_accepted
+        repair_max_deck_before = self._final_deck_max_abs_m(strand_responses)
+        proposed_repair_b = self._update_final_shape_main_stay_b(
+            accepted_strands,
+            accepted_a,
+            accepted_b,
+            strand_responses,
+            next_tension_step_scales,
+        )
+        repair_update_attempted = not np.array_equal(
+            proposed_repair_b, accepted_b
+        )
+        self._emit(
+            EngineeringProgress3D(
+                cycle_index=cycle_index,
+                phase="第3轮：固定A/根数/背索B，仅修复最终主梁线形",
+                fem_cases_completed=self.total_fem_cases - start_cases,
+                fem_cases_total=fem_cases_total,
+                elapsed_seconds=time.perf_counter() - started,
+                eta_seconds=self.total_fem_seconds / max(1, self.total_fem_cases),
+                stage_status=self._stage_status(
+                    accepted_strands,
+                    strand_responses,
+                    stress_after_strand,
+                    accepted_a + accepted_b,
+                ),
+                local_score=score_after_strand,
+                proposal_score=repair_max_deck_before,
+                step_scale=float(np.median(next_tension_step_scales)),
+                step_scale_min=float(np.min(next_tension_step_scales)),
+                step_scale_max=float(np.max(next_tension_step_scales)),
+                tension_update_accepted=tension_update_accepted,
+                strand_update_accepted=strand_update_accepted,
+            )
+        )
+
+        repair_partial_retry_attempted = False
+        repair_partial_retry_accepted = False
+        if repair_update_attempted:
+            repair_proposal_evaluation = self._evaluate(
+                accepted_strands, accepted_a, proposed_repair_b
+            )
+            repair_proposal_responses, repair_proposal_stress = (
+                self._local_stage_responses(repair_proposal_evaluation)
+            )
+            repair_proposal_max_deck = self._final_deck_max_abs_m(
+                repair_proposal_responses
+            )
+            repair_update_accepted = bool(
+                repair_proposal_max_deck < repair_max_deck_before - 1.0e-12
+            )
+        else:
+            repair_proposal_evaluation = strand_evaluation
+            repair_proposal_responses = strand_responses
+            repair_proposal_stress = stress_after_strand
+            repair_proposal_max_deck = repair_max_deck_before
+            repair_update_accepted = False
+
+        first_repair_proposal_max_deck = repair_proposal_max_deck
+        full_repair_components = np.zeros(
+            (2, self.layout.size), dtype=bool
+        )
+        full_repair_components[1] = (
+            np.abs(proposed_repair_b - accepted_b) > 1.0e-9
+        )
+        isolated_repair_components = np.zeros_like(full_repair_components)
+        if repair_update_attempted and not repair_update_accepted:
+            partial_b, partial_groups = self._isolated_shape_repair_candidate(
+                accepted_b,
+                proposed_repair_b,
+                strand_responses,
+            )
+            partial_differs_from_full = not np.array_equal(
+                partial_b, proposed_repair_b
+            )
+            if np.any(partial_groups) and partial_differs_from_full:
+                repair_partial_retry_attempted = True
+                isolated_repair_components[1] = partial_groups
+                fem_cases_total += 1
+                self._emit(
+                    EngineeringProgress3D(
+                        cycle_index=cycle_index,
+                        phase="第3轮：回放最大梁位移处的单组中跨索B",
+                        fem_cases_completed=self.total_fem_cases - start_cases,
+                        fem_cases_total=fem_cases_total,
+                        elapsed_seconds=time.perf_counter() - started,
+                        eta_seconds=(
+                            self.total_fem_seconds
+                            / max(1, self.total_fem_cases)
+                        ),
+                        stage_status=self._stage_status(
+                            accepted_strands,
+                            repair_proposal_responses,
+                            repair_proposal_stress,
+                            accepted_a + proposed_repair_b,
+                        ),
+                        local_score=score_after_strand,
+                        proposal_score=first_repair_proposal_max_deck,
+                        update_accepted=False,
+                        step_scale=float(np.median(next_tension_step_scales)),
+                        step_scale_min=float(np.min(next_tension_step_scales)),
+                        step_scale_max=float(np.max(next_tension_step_scales)),
+                        tension_update_accepted=tension_update_accepted,
+                        strand_update_accepted=strand_update_accepted,
+                    )
+                )
+                repair_proposal_evaluation = self._evaluate(
+                    accepted_strands, accepted_a, partial_b
+                )
+                repair_proposal_responses, repair_proposal_stress = (
+                    self._local_stage_responses(repair_proposal_evaluation)
+                )
+                repair_proposal_max_deck = self._final_deck_max_abs_m(
+                    repair_proposal_responses
+                )
+                repair_update_accepted = bool(
+                    repair_proposal_max_deck
+                    < repair_max_deck_before - 1.0e-12
+                )
+                repair_partial_retry_accepted = repair_update_accepted
+                proposed_repair_b = partial_b
+
+        repair_changed_components = np.zeros(
+            (2, self.layout.size), dtype=bool
+        )
+        repair_changed_components[1] = (
+            np.abs(proposed_repair_b - accepted_b) > 1.0e-9
+        )
+        residual_before_repair = self._tension_feedback_residuals(
+            strand_responses
+        )
+        if repair_update_accepted:
+            next_tension_step_scales = self._adapt_tension_step_scales(
+                next_tension_step_scales,
+                residual_before_repair,
+                self._tension_feedback_residuals(repair_proposal_responses),
+                repair_changed_components,
+            )
+            after_evaluation = repair_proposal_evaluation
+            after_responses = repair_proposal_responses
+            stress_after = repair_proposal_stress
+            accepted_b = proposed_repair_b
+            repair_max_deck_after = repair_proposal_max_deck
+        else:
+            rejected_repair_components = (
+                isolated_repair_components
+                if repair_partial_retry_attempted
+                else full_repair_components
+            )
+            next_tension_step_scales[rejected_repair_components] = np.maximum(
+                1.0 / 32.0,
+                0.5
+                * next_tension_step_scales[rejected_repair_components],
+            )
+            after_evaluation = strand_evaluation
+            after_responses = strand_responses
+            stress_after = stress_after_strand
+            repair_max_deck_after = repair_max_deck_before
+
+        score_after = self._local_score(after_responses)
+        strand_score_after = self._strand_score(stress_after)
+        next_step_scale = float(np.median(next_tension_step_scales))
+        accepted_total = accepted_a + accepted_b
+        update_accepted = (
+            tension_update_accepted
+            or strand_update_accepted
+            or repair_update_accepted
+        )
         controls = self._controls(
             before_responses,
             tension_responses,
@@ -1207,14 +1528,17 @@ class EngineeringCableCycleOptimizer3D:
             EngineeringProgress3D(
                 cycle_index=cycle_index,
                 phase=(
-                    "本循环完成：索力与根数独立验收"
+                    "本循环完成：索力、根数与最终线形修复独立验收"
                 ),
                 fem_cases_completed=fem_cases,
                 fem_cases_total=fem_cases_total,
                 elapsed_seconds=time.perf_counter() - started,
                 eta_seconds=0.0,
                 stage_status=self._stage_status(
-                    accepted_strands, after_responses, stress_after
+                    accepted_strands,
+                    after_responses,
+                    stress_after,
+                    accepted_total,
                 ),
                 local_score=score_after,
                 score_change_percent=score_change,
@@ -1225,6 +1549,7 @@ class EngineeringCableCycleOptimizer3D:
                 step_scale_max=float(np.max(next_tension_step_scales)),
                 tension_update_accepted=tension_update_accepted,
                 strand_update_accepted=strand_update_accepted,
+                repair_update_accepted=repair_update_accepted,
             )
         )
         return EngineeringCycleResult3D(
@@ -1239,9 +1564,11 @@ class EngineeringCableCycleOptimizer3D:
             strands_before_sizing=strands,
             strands_after_sizing=accepted_strands,
             stress_before_sizing_mpa=stress_before_sizing,
+            stress_after_strand_round_mpa=stress_after_strand,
             stress_after_sizing_mpa=stress_after,
             local_score_before=score_before,
             local_score_after_tension=score_after_tension,
+            local_score_after_strand=score_after_strand,
             local_score_after=score_after,
             proposal_local_score=tension_proposal_score,
             first_tension_proposal_local_score=(
@@ -1255,9 +1582,29 @@ class EngineeringCableCycleOptimizer3D:
             tension_partial_retry_accepted=tension_partial_retry_accepted,
             strand_update_attempted=strand_update_attempted,
             strand_update_accepted=strand_update_accepted,
+            compression_strand_reduction_attempted=(
+                compression_strand_reduction_attempted
+            ),
+            compression_strand_reduction_accepted=(
+                compression_strand_reduction_accepted
+            ),
+            compression_strand_reduction_mask=(
+                compression_strand_reduction_mask
+            ),
             strand_score_before=strand_score_before,
             strand_proposal_score=strand_proposal_score,
+            strand_round_score_after=strand_round_score_after,
             strand_score_after=strand_score_after,
+            repair_max_deck_before_m=repair_max_deck_before,
+            repair_first_proposal_max_deck_m=(
+                first_repair_proposal_max_deck
+            ),
+            repair_proposal_max_deck_m=repair_proposal_max_deck,
+            repair_max_deck_after_m=repair_max_deck_after,
+            repair_update_attempted=repair_update_attempted,
+            repair_update_accepted=repair_update_accepted,
+            repair_partial_retry_attempted=repair_partial_retry_attempted,
+            repair_partial_retry_accepted=repair_partial_retry_accepted,
             step_scale_used=displayed_step_scale,
             next_step_scale=next_step_scale,
             tension_step_scales_used=tension_step_scales,
