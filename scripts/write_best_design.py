@@ -23,8 +23,8 @@ from pathlib import Path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_MCT_FILE = Path("/Users/bill/项目/20260726 OMO河大桥/优化参数.mct")
-DEFAULT_BEST_DESIGN = PROJECT_ROOT / "results/cable_opt_3d_engineering/best_design.json"
+DEFAULT_MCT_FILE = Path("/Users/bill/Library/CloudStorage/GoogleDrive-billhu0228@gmail.com/我的云端硬盘/Project/OmoBridge/优化参数.mct")
+DEFAULT_BEST_DESIGN = PROJECT_ROOT / "results/cable_opt_3d_forward/best_design.json"
 
 _GROUP_RE = re.compile(r"^CF([AB])-(\d+)$", re.IGNORECASE)
 

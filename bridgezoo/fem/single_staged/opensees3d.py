@@ -16,7 +16,7 @@ from contextlib import contextmanager
 
 import numpy as np
 
-from bridgezoo.fem.single_staged.birth3d import initialize_flexible_birth_3d
+from bridgezoo.fem.single_staged.birth3d import TangentDisplacementHistory3D
 from bridgezoo.fem.single_staged.kernels3d import frame_axes_3d
 from bridgezoo.fem.single_staged.model3d import (
     SingleStagedPlan3D,
@@ -91,15 +91,22 @@ class SingleStagedOpenSeesSolver3D:
         processed_nodal_loads: set[int] = set()
         total_applied = np.zeros(3, dtype=float)
         result = StagedResult3D(backend=self.name)
+        tangent_history = TangentDisplacementHistory3D(
+            model,
+            correction_factor=plan.metadata[
+                "config"
+            ].flexible_birth_correction_factor,
+        )
 
         for stage in stages:
             stage_index = stage.index
-            existing_nodes = set(displacement)
-            initialize_flexible_birth_3d(model, stage_index, displacement)
+            born_values = tangent_history.activate(
+                stage_index,
+                displacement,
+            )
             born_this_stage = {
-                node_id: tuple(float(value) for value in displacement[node_id])
-                for node_id in displacement
-                if node_id not in existing_nodes
+                node_id: tuple(float(value) for value in values)
+                for node_id, values in born_values.items()
             }
 
             active_nodes = sorted(displacement)
@@ -260,10 +267,13 @@ class SingleStagedOpenSeesSolver3D:
                 ops.analysis("Static")
                 ok = ops.analyze(1)
 
+                stage_increment = {
+                    node_id: np.asarray(ops.nodeDisp(node_id), dtype=float)
+                    for node_id in active_nodes
+                }
                 for node_id in active_nodes:
-                    displacement[node_id] += np.asarray(
-                        ops.nodeDisp(node_id), dtype=float
-                    )
+                    displacement[node_id] += stage_increment[node_id]
+                tangent_history.accumulate(stage_index, stage_increment)
                 for frame_id in active_frames:
                     response = ops.eleResponse(frame_id, "localForce")
                     cumulative_frame_force[frame_id] += np.asarray(

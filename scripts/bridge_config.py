@@ -87,7 +87,10 @@ _3D_CONFIG_KEYS = {
     "secondary_main_girder_line_load",
     "secondary_deck_pressure",
 }
-_OPTIONAL_3D_CONFIG_KEYS = {"superimposed_dead_load"}
+_OPTIONAL_3D_CONFIG_KEYS = {
+    "flexible_birth_correction_factor",
+    "superimposed_dead_load",
+}
 _3D_MATERIAL_KEYS = {
     "steel_name",
     "steel_E",

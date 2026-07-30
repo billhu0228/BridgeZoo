@@ -198,6 +198,13 @@ def load_optimized_design_3d(
             raise ValueError("3D optimized design n_seg is invalid")
         config = replace(config, n_seg=saved_n_seg)
     current_config = asdict(config)
+    saved_config = dict(saved_config)
+    # The bridge-specific birth correction is a replay calibration, not an
+    # optimization design variable.  A design can therefore be back-tested
+    # with the current YAML calibration, including legacy designs saved before
+    # this field existed.
+    current_config.pop("flexible_birth_correction_factor", None)
+    saved_config.pop("flexible_birth_correction_factor", None)
     current_config.pop("strands_per_cable", None)
     current_config.pop("pretension_per_cable", None)
     if schema in {
@@ -573,11 +580,12 @@ def _result_payload(config, plan, result) -> dict[str, object]:
             "translation_unit": "m",
             "rotation_unit": "rad",
             "activation_position_m": (
-                "design_position plus the stress-free tangent-birth translation"
+                "design position plus the accumulated pre-activation virtual "
+                "tangent translation"
             ),
             "activation_reference_deformation": (
-                "stress-free tangent-birth displacement and rotation relative "
-                "to the design model"
+                "stress-free displacement and rotation accumulated while the "
+                "beam node was inactive, relative to the design model"
             ),
             "step_deformation": (
                 "actual total deformation at this stage minus the preceding "

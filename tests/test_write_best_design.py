@@ -3,7 +3,7 @@ import math
 
 import pytest
 
-from scripts.write_best_design import run
+from scripts.write_best_design import DEFAULT_BEST_DESIGN, run
 
 
 def _design_payload():
@@ -65,6 +65,12 @@ def _template_text():
     )
 
 
+def test_write_best_design_defaults_to_forward_optimizer_result():
+    assert DEFAULT_BEST_DESIGN.as_posix().endswith(
+        "results/cable_opt_3d_forward/best_design.json"
+    )
+
+
 def test_write_best_design_creates_versioned_mct_without_overwriting(tmp_path):
     design_path = tmp_path / "best_design.json"
     template_path = tmp_path / "template.mct"
@@ -79,14 +85,33 @@ def test_write_best_design_creates_versioned_mct_without_overwriting(tmp_path):
     assert first.name == "template_updated.mct"
     assert second.name == "template_updated_2.mct"
     updated = first.read_text(encoding="utf-8")
-    main_diameter = math.sqrt(4.0 * 29 * 0.00014 / math.pi)
-    back_diameter = math.sqrt(4.0 * 74 * 0.00014 / math.pi)
-    assert f"{main_diameter:.10g}" in updated
-    assert f"{back_diameter:.10g}" in updated
+    main_stage_1_diameter = math.sqrt(4.0 * 29 * 0.00014 / math.pi)
+    main_stage_2_diameter = math.sqrt(4.0 * 84 * 0.00014 / math.pi)
+    back_stage_1_diameter = math.sqrt(4.0 * 74 * 0.00014 / math.pi)
+    back_stage_2_diameter = math.sqrt(4.0 * 77 * 0.00014 / math.pi)
+    section_diameters = {
+        int(fields[0]): float(fields[14])
+        for line in updated.splitlines()
+        if len(fields := [field.strip() for field in line.split(",")]) > 14
+        and fields[0].isdigit()
+        and fields[1] == "DBUSER"
+    }
+    assert section_diameters[101] == pytest.approx(main_stage_1_diameter)
+    assert section_diameters[102] == pytest.approx(main_stage_2_diameter)
+    assert section_diameters[201] == pytest.approx(back_stage_1_diameter)
+    assert section_diameters[202] == pytest.approx(back_stage_2_diameter)
+
+    # All four element ranges follow the BridgeZoo construction-stage order.
     assert "101, 1100000, CFA-1" in updated
+    assert "101, 210000, CFB-1" in updated
+    assert "102, 1300000, CFA-2" in updated
+    assert "201, 1100000, CFA-1" in updated
     assert "201, 210000, CFB-1" in updated
+    assert "202, 1300000, CFA-2" in updated
     assert "301, 1200000, CFA-1" in updated
     assert "401, 220000, CFB-1" in updated
+    assert "302, 1400000, CFA-2" in updated
+    assert "402, 240000, CFB-2" in updated
 
 
 def test_write_best_design_rejects_incomplete_template(tmp_path):

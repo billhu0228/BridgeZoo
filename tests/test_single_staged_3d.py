@@ -4,7 +4,7 @@ from dataclasses import replace
 import numpy as np
 import pytest
 
-from bridgezoo.fem.single_staged.birth3d import initialize_flexible_birth_3d
+from bridgezoo.fem.single_staged.birth3d import TangentDisplacementHistory3D
 from bridgezoo.fem.single_staged import (
     HSection3D,
     HollowBoxSection3D,
@@ -61,6 +61,7 @@ def test_bundled_omo_3d_yaml_supplies_complete_physical_input():
     assert config.n_seg == 24
     assert config.anchor_base_height == pytest.approx(48.75)
     assert config.resolved_right_fix == pytest.approx(0.0)
+    assert config.flexible_birth_correction_factor == pytest.approx(1.0)
     assert config.left_span == pytest.approx(40.0)
     assert config.girder_spacing == pytest.approx(11.4)
     assert config.cross_girder_spacing == pytest.approx(4.0)
@@ -84,6 +85,11 @@ def test_bundled_omo_3d_yaml_supplies_complete_physical_input():
     assert not (set(plan.model.frames) & set(plan.model.cables))
     assert plan.final_stage.label == "secondary_load"
     assert len(plan.stages) == 3 * (config.n_seg + 2) + 1
+
+    with pytest.raises(ValueError, match="flexible_birth_correction_factor"):
+        replace(config, flexible_birth_correction_factor=float("inf"))
+    with pytest.raises(ValueError, match="retired and must equal 1.0"):
+        replace(config, flexible_birth_correction_factor=0.5)
 
 
 def test_3d_zero_right_fix_reuses_tower_axis_and_fully_fixes_both_girders():
@@ -569,102 +575,90 @@ def test_direct_3d_solver_runs_all_stages_and_balances_physical_dead_load():
     )
 
 
-def test_3d_new_steel_group_uses_actual_stiffness_for_flexible_birth_geometry():
-    config = replace(load_single_staged_3d_config("omo3d"), n_seg=3)
+def test_3d_tangent_history_accumulates_every_pre_activation_stage():
+    config = replace(
+        load_single_staged_3d_config("omo3d"),
+        n_seg=3,
+        pretension_per_cable=0.0,
+    )
     plan = build_single_staged_3d(config)
-    solver = SingleStagedDirectSolver3D()
-    cable1_composite = solver.solve_stage(plan, 3)
-    displacement = {
-        node_id: np.asarray(values, dtype=float)
-        for node_id, values in cable1_composite.displacement.items()
-    }
+    model = plan.model
+    history = TangentDisplacementHistory3D(model)
+    displacement = {}
 
-    first_tip = next(
+    first = next(
         node
-        for node in plan.model.nodes.values()
+        for node in model.nodes.values()
         if node.role == "main_girder_0" and node.x == pytest.approx(-24.0)
     )
-    second_tip = next(
+    second = next(
         node
-        for node in plan.model.nodes.values()
+        for node in model.nodes.values()
         if node.role == "main_girder_0" and node.x == pytest.approx(-36.0)
     )
-    first_uz = displacement[first_tip.id][2]
-    first_ry = displacement[first_tip.id][4]
-    rigid_tip_uz = first_uz + 12.0 * first_ry
-
-    initialize_flexible_birth_3d(plan.model, 4, displacement)
-
-    assert displacement[first_tip.id][2] == pytest.approx(first_uz, abs=1.0e-14)
-    assert rigid_tip_uz * 1000.0 == pytest.approx(219.519973, abs=1.0e-6)
-    assert displacement[second_tip.id][2] * 1000.0 == pytest.approx(
-        161.090727,
-        abs=1.0e-6,
-    )
-    assert displacement[second_tip.id][2] < rigid_tip_uz
-
-    cable2_steel_a = solver.solve_stage(plan, 4)
-    assert cable2_steel_a.displacement[second_tip.id][2] * 1000.0 == pytest.approx(
-        235.939140,
-        abs=1.0e-6,
+    third = next(
+        node
+        for node in model.nodes.values()
+        if node.role == "main_girder_0" and node.x == pytest.approx(-48.0)
     )
 
+    history.activate(1, displacement)
+    stage1 = {node_id: np.zeros(6) for node_id in displacement}
+    stage1[first.id][2] = -0.10
+    stage1[first.id][4] = 0.01
+    history.accumulate(1, stage1)
 
-def test_3d_flexible_birth_never_commits_kinematic_fallback(monkeypatch):
-    config = replace(load_single_staged_3d_config("omo3d"), n_seg=2)
-    plan = build_single_staged_3d(config)
-    previous = SingleStagedDirectSolver3D().solve_stage(plan, 3)
-    displacement = {
-        node_id: np.asarray(values, dtype=float)
-        for node_id, values in previous.displacement.items()
-    }
-    before = {
-        node_id: values.copy() for node_id, values in displacement.items()
-    }
+    stage2_birth = history.activate(4, displacement)
+    assert stage2_birth[second.id][2] == pytest.approx(0.02, abs=1.0e-14)
+    assert history.virtual[third.id][2, 0] == pytest.approx(0.14, abs=1.0e-14)
 
-    def non_finite_solution(matrix, right_hand_side, *, rcond):
-        del rcond
-        shape = (matrix.shape[1], right_hand_side.shape[1])
-        return np.full(shape, np.nan), np.empty(0), 0, np.empty(0)
+    stage2 = {node_id: np.zeros(6) for node_id in displacement}
+    stage2[second.id][2] = -0.02
+    stage2[second.id][4] = -0.005
+    history.accumulate(4, stage2)
 
-    monkeypatch.setattr(np.linalg, "lstsq", non_finite_solution)
-
-    with pytest.raises(ValueError, match="rigid-tangent fallback is disabled"):
-        initialize_flexible_birth_3d(plan.model, 4, displacement)
-
-    assert set(displacement) == set(before)
-    for node_id, values in before.items():
-        assert displacement[node_id] == pytest.approx(values, abs=0.0)
+    stage3_birth = history.activate(7, displacement)
+    assert stage3_birth[third.id][2] == pytest.approx(0.06, abs=1.0e-14)
+    assert stage3_birth[third.id][4] == pytest.approx(0.005, abs=1.0e-14)
 
 
-def test_3d_flexible_birth_excludes_deck_slab_stiffness(monkeypatch):
-    config = replace(load_single_staged_3d_config("omo3d"), n_seg=1)
-    plan = build_single_staged_3d(config)
-    previous = SingleStagedDirectSolver3D().solve_stage(plan, 2)
-    displacement = {
-        node_id: np.asarray(values, dtype=float)
-        for node_id, values in previous.displacement.items()
+def test_3d_new_cable_force_does_not_change_its_beam_birth_reference():
+    common = dict(
+        n_seg=2,
+        strands_per_cable=((100, 100), (100, 100)),
+        pretension_a_ratio=((1.0, 1.0), (1.0, 1.0)),
+    )
+    unloaded_second = build_single_staged_3d(
+        **common,
+        pretension_per_cable=((1.0e6, 1.0e6), (0.0, 0.0)),
+    )
+    tensioned_second = build_single_staged_3d(
+        **common,
+        pretension_per_cable=((1.0e6, 1.0e6), (4.0e6, 4.0e6)),
+    )
+    solver = SingleStagedDirectSolver3D()
+    unloaded = solver.solve_stage(unloaded_second, 4)
+    tensioned = solver.solve_stage(tensioned_second, 4)
+    deck_nodes = {
+        cable.j
+        for cable in tensioned_second.model.cables.values()
+        if cable.group == "main_stay" and cable.construction_stage == 2
     }
 
-    def unexpected_slab_stiffness(*args, **kwargs):
-        del args, kwargs
-        raise AssertionError("deck-slab stiffness entered flexible birth solve")
-
-    monkeypatch.setattr(
-        "bridgezoo.fem.single_staged.birth3d.frame_local_stiffness_3d",
-        unexpected_slab_stiffness,
-    )
-
-    initialize_flexible_birth_3d(plan.model, 3, displacement)
-
-    assert any(
-        plan.model.nodes[node_id].role.startswith("deck_slab")
-        and plan.model.nodes[node_id].activation_stage == 3
-        for node_id in displacement
+    assert deck_nodes.issubset(unloaded.birth_displacement)
+    assert {
+        node_id: tensioned.birth_displacement[node_id]
+        for node_id in deck_nodes
+    } == pytest.approx(
+        {
+            node_id: unloaded.birth_displacement[node_id]
+            for node_id in deck_nodes
+        },
+        abs=1.0e-12,
     )
 
 
-def test_3d_backends_report_flexible_birth_displacements_for_new_nodes():
+def test_3d_backends_report_historical_birth_displacements_for_new_nodes():
     pytest.importorskip("openseespy.opensees")
     config = replace(
         load_single_staged_3d_config("omo3d"),
@@ -861,6 +855,13 @@ def test_direct_3d_batch_solver_matches_scalar_and_uses_one_multi_rhs_solve(monk
             [plans[0], different_area],
             stage.index,
             stage.label,
+        )
+
+    with pytest.raises(ValueError, match="retired and must equal 1.0"):
+        build_single_staged_3d(
+            **common,
+            pretension_per_cable=((1.0e6, 2.0e6), (1.5e6, 2.5e6)),
+            flexible_birth_correction_factor=0.5,
         )
 
 
@@ -1078,6 +1079,9 @@ def test_minimum_3d_cli_writes_machine_readable_json_and_detailed_text(
     assert payload["model"]["coordinate_system"] == "x longitudinal, y transverse, z vertical"
     assert payload["final"]["converged"] is True
     assert payload["input"]["n_seg"] == 1
+    assert payload["input"]["flexible_birth_correction_factor"] == pytest.approx(
+        1.0
+    )
     assert payload["input"]["deck_width"] == pytest.approx(13.4)
     assert "3D rendering" not in payload["todo"]
     assert payload["deformation_convention"]["translation_unit"] == "m"

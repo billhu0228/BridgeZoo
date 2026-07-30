@@ -66,6 +66,7 @@ class SingleStaged3DConfig(SingleTowerGeometry3D):
     secondary_main_girder_line_load: float = 0.0  # per main girder, N/m
     secondary_deck_pressure: float = 0.0  # full deck surface, N/m²
     superimposed_dead_load: float | None = None  # legacy alias for deck pressure
+    flexible_birth_correction_factor: float = 1.0
 
     strand_area: float = 1.4e-4
     strands_per_cable: int | tuple[int, ...] | tuple[tuple[int, int], ...] = 55
@@ -141,6 +142,15 @@ class SingleStaged3DConfig(SingleTowerGeometry3D):
         if invalid_secondary:
             raise ValueError(
                 f"finite nonnegative values required for: {', '.join(invalid_secondary)}"
+            )
+        if not math.isfinite(self.flexible_birth_correction_factor) or not math.isclose(
+            self.flexible_birth_correction_factor,
+            1.0,
+            rel_tol=0.0,
+            abs_tol=1.0e-12,
+        ):
+            raise ValueError(
+                "flexible_birth_correction_factor is retired and must equal 1.0"
             )
         _stage_pair_values(
             self.strands_per_cable,

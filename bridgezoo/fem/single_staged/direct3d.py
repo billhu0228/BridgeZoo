@@ -1,18 +1,18 @@
 """Path-dependent linear 3D solver for the detailed construction plan.
 
 Every construction substep is an incremental equilibrium solve.  Newly born
-members use an actual-stiffness flexible extension of the current committed
-nodal displacement as their stress-free reference, while previously
-accumulated member force and displacement remain in the state.  This is what
-lets wet-deck weight be applied to steelwork in substep 2 and retained after
-the slab joins the composite system in substep 3.
+beam nodes inherit their stage-by-stage virtual tangent history as their
+stress-free reference, while previously accumulated member force and real
+displacement remain in the state.  This is what lets wet-deck weight be applied
+to steelwork in substep 2 and retained after the slab joins the composite
+system in substep 3.
 """
 
 from __future__ import annotations
 
 import numpy as np
 
-from bridgezoo.fem.single_staged.birth3d import initialize_flexible_birth_3d
+from bridgezoo.fem.single_staged.birth3d import TangentDisplacementHistory3D
 from bridgezoo.fem.single_staged.kernels3d import (
     frame_axes_3d,
     frame_local_stiffness_3d,
@@ -53,6 +53,11 @@ def _assert_same_structure_3d(reference: SingleStagedPlan3D, case: SingleStagedP
 
     if reference.stages != case.stages:
         raise ValueError("batched 3D plans differ in construction stages")
+    if (
+        reference.metadata["config"].flexible_birth_correction_factor
+        != case.metadata["config"].flexible_birth_correction_factor
+    ):
+        raise ValueError("batched 3D plans differ in flexible birth correction")
     reference_model = reference.model
     case_model = case.model
     for name in ("nodes", "frames", "rigid_links", "supports"):
@@ -133,6 +138,14 @@ class SingleStagedDirectBatchSolver3D:
         processed_nodal_loads: set[int] = set()
         total_applied = np.zeros(3, dtype=float)
         results = [StagedResult3D(backend=self.name) for _ in plans]
+        tangent_history = TangentDisplacementHistory3D(
+            model,
+            ncase=ncase,
+            batched=True,
+            correction_factor=reference.metadata[
+                "config"
+            ].flexible_birth_correction_factor,
+        )
 
         stages = [
             stage
@@ -144,19 +157,10 @@ class SingleStagedDirectBatchSolver3D:
 
         for stage in stages:
             stage_index = stage.index
-            existing_nodes = set(displacement)
-
-            initialize_flexible_birth_3d(
-                model,
+            born_this_stage = tangent_history.activate(
                 stage_index,
                 displacement,
-                ncase=ncase,
             )
-            born_this_stage = {
-                node_id: displacement[node_id].copy()
-                for node_id in displacement
-                if node_id not in existing_nodes
-            }
 
             active_nodes = sorted(displacement)
             node_ids = set(active_nodes)
@@ -384,8 +388,13 @@ class SingleStagedDirectBatchSolver3D:
             reduced_reaction = (
                 reduced_stiffness @ reduced_increment - reduced_load
             )
+            stage_increment = {
+                node_id: full_increment[dofs(node_id), :].copy()
+                for node_id in active_nodes
+            }
             for node_id in active_nodes:
-                displacement[node_id] += full_increment[dofs(node_id), :]
+                displacement[node_id] += stage_increment[node_id]
+            tangent_history.accumulate(stage_index, stage_increment)
             for support in active_supports:
                 for component, restrained in enumerate(support.restraints):
                     if restrained:

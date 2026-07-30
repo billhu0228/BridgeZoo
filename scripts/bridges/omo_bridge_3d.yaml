@@ -23,6 +23,9 @@ deck_width: 13.4
 deck_thickness: 0.30
 deck_offset: 1.4
 tower_element_size: 2.0
+# Legacy input retained at its required identity value.  Real displacement now
+# uses a stage-by-stage main-girder tangent history and cannot be scaled.
+flexible_birth_correction_factor: 1.0
 
 # Main-girder welded H section: depth, flange width, web and flange thickness.
 main_girder_depth: 2.5

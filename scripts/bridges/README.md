@@ -61,12 +61,15 @@ then the temporary load definition expires and the eccentric slab grillage is
 activated through rigid links. `pretension_a_ratio` may be a scalar or use the
 same stage-major `(backstay, main_stay)` shape as `pretension_per_cable`.
 
-Before each steel/A substep, the newly erected frame-and-cable group receives
-an unloaded actual-stiffness virtual solve.  Previously active connection
-nodes retain their committed displacement, and the new nodes take the elastic
-extension compatible with the new beam/truss stiffness.  That virtual field is
-then used as the stress-free birth geometry.  A free extension with no new
-restraint naturally reduces to rigid tangent extrapolation.
+After every analysis substep, the active main-girder frontier's incremental
+translation and rotation are transported through the future main-girder
+topology.  Each inactive beam node therefore accumulates a virtual tangent
+history before erection; that history is frozen as its stress-free birth
+reference when the node becomes active.  Slab nodes inherit their already
+active beam master's rigid-body position when installed.  Future slab and
+cable stiffness never participates in the tangent history.
+`flexible_birth_correction_factor` remains only for input compatibility and
+must equal the identity value `1.0`; empirical six-DOF scaling is retired.
 
 ### Current `single` construction topology
 
