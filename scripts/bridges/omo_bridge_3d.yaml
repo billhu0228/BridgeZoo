@@ -10,7 +10,7 @@ anchor_top_free: 6.5
 left_start: 24.0
 left_spacing: 12.0
 left_end: 6.0
-right_start: 24.0
+right_start: 36.0
 right_spacing: 1.0
 right_end: 1.0
 right_fix: 0.0
@@ -19,7 +19,7 @@ left_span: 40.0
 # Transverse grillage and eccentric deck-slab reference plane.
 girder_spacing: 11.4
 cross_girder_spacing: 4.0
-deck_width: 13.4
+deck_width: 12.4
 deck_thickness: 0.30
 deck_offset: 1.4
 tower_element_size: 2.0
